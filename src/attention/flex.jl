@@ -392,6 +392,7 @@ allocate_checkpoints(::typeof(flex_attention!), Q, K, V) =
     (; M = similar(Q, Float32, (size(Q, 2), size(Q, 3), size(Q, 4))),
        L = similar(Q, Float32, (size(Q, 2), size(Q, 3), size(Q, 4))))
 
+#=
 """
     _flex_attention(Q, K, V, score_mod; mask_mod = FullMask(), kwargs...) -> O
 
@@ -402,6 +403,7 @@ too (e.g. `AliBiScore` slopes, `BiasScore` bias), alongside `Q`/`K`/`V`; `mask_m
 stays fixed config. Wrap this directly when you want the variant's parameters
 trained.
 """
+=#
 function _flex_attention(Q, K, V, score_mod; mask_mod = FullMask(), kwargs...)
     return _flex_attention_core(Q, K, V, score_mod, mask_mod, (; kwargs...))
 end
