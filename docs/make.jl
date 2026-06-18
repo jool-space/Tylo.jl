@@ -19,5 +19,7 @@ makedocs(;
 
 deploydocs(;
     repo="github.com/jool-space/Tylo.jl",
+    deploy_repo="github.com/jool-space/docs",
     devbranch="main",
+    dirname="Tylo.jl",
 )
