@@ -11,4 +11,5 @@ Tylo = "e9ed47d0-8750-4009-b91d-3679011a846b"
 
 [compat]
 CUDA = "6"
+Mooncake = "0.5.32"
 ParallelTestRunner = "2.6.0"
