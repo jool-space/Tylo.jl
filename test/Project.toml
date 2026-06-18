@@ -10,5 +10,8 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Tylo = "e9ed47d0-8750-4009-b91d-3679011a846b"
 
 [compat]
+Adapt = "4.6.1"
 CUDA = "6"
+ChainRulesCore = "1.26.1"
+Mooncake = "0.5.32"
 ParallelTestRunner = "2.6.0"

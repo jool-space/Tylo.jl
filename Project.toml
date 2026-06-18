@@ -23,5 +23,6 @@ MooncakeExt = ["Mooncake", "ChainRulesCore"]
 Adapt = "4"
 CUDACore = "6"
 ChainRulesCore = "1.26.1"
+Mooncake = "0.5.32"
 cuTile = "0.3"
 julia = "1.11"
