@@ -19,6 +19,9 @@ Mooncake = "da2b9cff-9c12-43a0-ae48-6db2b0edb7d6"
 ChainRulesCoreExt = "ChainRulesCore"
 MooncakeExt = ["Mooncake", "ChainRulesCore"]
 
+[sources]
+cuTile = {rev = "main", url = "https://github.com/JuliaGPU/cuTile.jl"}
+
 [compat]
 Adapt = "4"
 CUDACore = "6"
