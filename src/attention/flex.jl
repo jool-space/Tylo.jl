@@ -422,8 +422,7 @@ end
 """
     flex_attention(Q, K, V; score_mod = NoOpScore(), mask_mod = FullMask(), kwargs...) -> O
 
-Allocating forward; see [`flex_attention!`](@ref). A thin kwarg wrapper over the
-differentiable core [`_flex_attention`](@ref) — autodiff through `flex_attention`
+Allocating forward; see [`flex_attention!`](@ref). Autodiff through `flex_attention`
 yields `Q`/`K`/`V` **and** `score_mod`-parameter gradients (`mask_mod` fixed
 config). For score-mod param grads without the AD engine, call
 [`∇flex_attention!`](@ref) with a [`grad_shadow`](@ref) `∂score_mod` directly.

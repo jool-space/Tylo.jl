@@ -1,6 +1,8 @@
 export allocate_checkpoints
 export allocate_scratchspace
 export Duplicated
+public primal
+public shadow
 
 """
     Duplicated(primal, shadow)
@@ -28,9 +30,20 @@ end
 
 Duplicated(x) = Duplicated(x, similar(x))
 
+"""
+    primal(x)
+
+The primal value of `x`: `x` itself for a bare array, or `d.primal` for a
+[`Duplicated`](@ref). Lets forward kernels accept either.
+"""
 @inline primal(x) = x
 @inline primal(d::Duplicated) = d.primal
 
+"""
+    shadow(d::Duplicated)
+
+The gradient shadow of a [`Duplicated`](@ref).
+"""
 @inline shadow(d::Duplicated) = d.shadow
 
 """
