@@ -14,6 +14,10 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Design" => "design.md",
+        "Layouts and GEMM" => "layouts.md",
+        "TMA and WGMMA" => "hopper.md",
+        "Validation" => "validation.md",
     ],
 )
 

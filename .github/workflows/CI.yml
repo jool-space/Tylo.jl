@@ -70,3 +70,31 @@ jobs:
           using Tylo
           DocMeta.setdocmeta!(Tylo, :DocTestSetup, :(using Tylo); recursive=true)
           doctest(Tylo)
+
+  assembly:
+    name: Offline tile and attention assembly
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: Tylo
+      - uses: actions/checkout@v6
+        with:
+          repository: jool-space/PTX.jl
+          ref: 32e36c122bc1c7af5f171cf478324b628b06af3a
+          path: PTX
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.12'
+      - run: julia --project=Tylo/test/gpu -e 'using Pkg; Pkg.instantiate()'
+      - run: julia --project=Tylo/test/gpu Tylo/test/gpu/runtests.jl --attention
+        env:
+          TYLO_EVIDENCE: ${{ runner.temp }}/tylo-evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tile-assembly
+          path: ${{ runner.temp }}/tylo-evidence

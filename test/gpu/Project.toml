@@ -1,0 +1,17 @@
+[deps]
+BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
+CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
+PTX = "7a3554bf-f3bf-40cd-9a57-3cf23ff3bbf8"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+Tylo = "845906dd-ae2b-43fc-b595-f8c9a7396ab9"
+
+[sources]
+Tylo = {path = "../.."}
+PTX = {path = "../../../PTX"}
+
+[compat]
+CUDACore = "6.2"
+julia = "1.12"

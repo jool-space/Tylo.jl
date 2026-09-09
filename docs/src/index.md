@@ -1,14 +1,23 @@
 ```@meta
 CurrentModule = Tylo
+DocTestSetup = :(using Tylo)
 ```
 
 # Tylo
 
-Documentation for [Tylo](https://github.com/jool-space/Tylo.jl).
+Composable tile programming for NVIDIA GPUs in Julia. The implementation includes
+shared/global layouts, asynchronous copies, warp MMA, TMA, Hopper WGMMA,
+and complete GEMM pipelines,
+alongside row-distributed register fragments and explicit TMEM views/completion.
+See [Representation and completion](@ref) for the boundary and current limits.
 
-```@index
+```jldoctest
+julia> f = RowFragment((1f0, 2f0, 3f0, 4f0));
+
+julia> columns(scale(f, 0.5f0), Val(2), Val(2)).data
+(1.5f0, 2.0f0)
 ```
 
 ```@autodocs
-Modules = [Tylo]
+Modules = [Tylo, Tylo.Layouts]
 ```
