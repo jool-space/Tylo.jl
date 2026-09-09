@@ -93,7 +93,7 @@ jobs:
       - run: julia --project=Tylo/test/gpu Tylo/test/gpu/runtests.jl --attention
         env:
           TYLO_EVIDENCE: ${{ runner.temp }}/tylo-evidence
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: tile-assembly
