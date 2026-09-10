@@ -4,9 +4,10 @@ module Layouts
 
 using Static: StaticInt, static
 
-export Layout, Swizzle, compose, window, shape, cosize, static, coordinate
+export Layout, @Layout, Swizzle, compose, window, shape, cosize, static, coordinate
 
 include("layouts/affine.jl")
+include("layouts/notation.jl")
 include("layouts/transforms.jl")
 
 function layout end

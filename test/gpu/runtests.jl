@@ -1,5 +1,6 @@
 using Tylo, PTX, CUDACore, BFloat16s, Random, Test
 include("codegen.jl")
+include("layouts.jl")
 include("fragments.jl")
 include("tmem.jl")
 include("gemm.jl")

@@ -38,6 +38,65 @@ runtime representation, while wholly static inputs stay static.
 permutations without pretending they are affine strides. There is no
 arbitrary symbolic composition simplifier or inverse solver yet.
 
+## Static layout notation
+
+`@Layout` defaults to static shape and stride values. Use `$` to preserve a
+value's existing type: ordinary integers stay ordinary integers, while
+already-static values stay static. The explicit `Layout` constructor keeps
+its existing behavior.
+
+```jldoctest
+julia> using Tylo.Layouts: @Layout, shape, static;
+
+julia> l = @Layout (16, 32) (32, 1);
+
+julia> shape(l) === (static(16), static(32))
+true
+
+julia> n, ld = Int32(5), Int32(128);
+
+julia> l = @Layout ((8, 4), $n) ((1, 8), $ld);
+
+julia> shape(l) === ((static(8), static(4)), n)
+true
+
+julia> strides(l) === ((static(1), static(8)), ld)
+true
+
+julia> l(((Int32(3), Int32(2)), Int32(1)))
+147
+```
+
+Tuple syntax is traversed recursively, preserving its structure. An unmarked
+variable such as `subshape` becomes `static(subshape)`; `static` recursively
+converts tuple values too. `$subshape` instead preserves the complete subtree,
+including any mixture of static and ordinary integers. It inserts one mode,
+without splicing the tuple's contents. Whole shape/stride tuples can also be
+passed as `@Layout $shape_value $stride_value`.
+
+Unmarked expressions are evaluated normally and passed to `static`, once per
+occurrence. Thus a type-derived `K` works as `@Layout (64, K) (K, 1)`, but an
+unknown runtime integer does not become known to inference merely because it
+is unmarked. Interpolate a whole ordinary expression as `$(2*n)`.
+
+Both arguments are required. Tuple splatting and automatic stride generation
+are outside this notation; shape and stride trees obey the same constructor
+checks as explicit layouts.
+
+When generating Julia code, an enclosing quote consumes `$` before the layout
+macro sees it. Insert a dollar expression explicitly to preserve the marker:
+
+```julia
+n_marker = Expr(:$, :n)
+ld_marker = Expr(:$, :ld)
+expr = :(@Layout (64, $n_marker) ($ld_marker, 1))
+# Constructs the syntax: @Layout (64, $n) ($ld, 1)
+```
+
+The names `n` and `ld` are resolved when the generated code executes. Emitting
+the explicit `Layout` constructor is also a straightforward choice for code
+generators.
+
 ## Swizzle phase belongs to the allocation
 
 `Swizzle{B,M,S}` XORs two disjoint bit fields, preserving the low M bits.

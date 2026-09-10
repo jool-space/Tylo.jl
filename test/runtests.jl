@@ -95,6 +95,7 @@ end
 end
 
 include("layouts.jl")
+include("layout_macro.jl")
 
 include("hopper.jl")
 
