@@ -8,6 +8,7 @@ include("tma.jl")
 include("wgmma.jl")
 
 include("rows.jl")
+include("arrayops.jl")
 
 include("softmax.jl")
 

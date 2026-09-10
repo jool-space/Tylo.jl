@@ -18,7 +18,7 @@ The complete iteration is visible in [kernel.jl](kernel.jl):
 scores = mma(config.scores, sq, sk, zero_accumulator(config.scores), tid)
 update = softmax_update(state, mask_scores(scores, mask, tid, row, key, m, n, causal))
 out = weighted_values(config.output, update.weights, sv,
-                      row_map(*, out, update.rescale), tid)
+                      out .* update.rescale, tid)
 state = update.state
 ```
 

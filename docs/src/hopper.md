@@ -5,7 +5,7 @@ DocTestSetup = :(using Tylo)
 
 # TMA and Hopper WGMMA
 
-Tylo now has a second complete shared-memory data path: TMA brings a tile
+The Hopper path uses a different matrix instruction from the warp-MMA GEMM: TMA brings a tile
 from global memory into shared memory, and a 128-thread warpgroup consumes
 shared descriptors with WGMMA. Megakernels' `HopperProjection` uses these
 operations for GEMM and fused gate/up projection.
@@ -102,16 +102,18 @@ accumulators have no arithmetic or store methods. Julia types do not enforce
 linear ownership, thread convergence, storage lifetime, or barrier correctness.
 
 `finish_mma` returns an immutable distributed fragment. Its ownership map is
-an ISA property, independent of storage. `map`, `scale`, and `store!` compose
-an epilogue without a separate kernel. There is no automatic cross-warp
+an ISA property, independent of storage. FP32 `map`, `scale`, and `store!` compose
+an epilogue without a separate kernel. `WGMMAFragment` currently remains separate
+from the generic `Fragment` broadcast/reduction API: `finish_mma` does not make
+`exp.(result)` or `sum(result; dims=2)` supported automatically. There is no automatic cross-warp
 redistribution or hidden scratch allocation.
 
 ## Worked consumers and current validation
 
 [`examples/hopper/kernel.jl`](https://github.com/jool-space/Tylo.jl/blob/main/examples/hopper/kernel.jl)
 is a complete 64×N GEMM pipeline with one producer warp, one consumer
-warpgroup, and one or two stages. The tests cover K tails, repeated slot
-reuse, modified inputs, forced GC and graph replay on an SM90 device.
+warpgroup, and one or two stages. The prepared SM90 runtime tests exercise K tails, repeated slot
+reuse, modified inputs, forced GC and graph replay when run on that device.
 Megakernels uses two consumer warpgroups, task dependencies, a different
 barrier participant count, fused gate/up epilogues and its own workspace.
 Those policies live entirely in the respective consumers.

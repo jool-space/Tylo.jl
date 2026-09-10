@@ -30,9 +30,11 @@ function operand_layout(::MMA16x8x16,::Accumulator)
         ((Layouts.static(32),Layouts.static(1)),(Layouts.static(16),Layouts.static(8)))))
 end
 
-# Packing and register counts come from the atom role, never tile-area/32.
+# Operand packing and local value counts come from the atom role.
+# Elementwise accumulator results may change scalar type (e.g. Bool masks);
+# only the instruction's prescribed FP32 format can be passed back to MMA.
 _word_type(::Type{T},::Union{OperandA,OperandB}) where T = UInt32
-_word_type(::Type{Float32},::Accumulator) = Float32
+_word_type(::Type{T},::Accumulator) where T = T
 _word_count(::OperandA) = 4
 _word_count(::OperandB) = 2
 _word_count(::Accumulator) = 4
@@ -40,7 +42,7 @@ struct MMAFragment{T,Role<:OperandRole,N,R}
     data::NTuple{N,R}
     function MMAFragment(::Type{T},role::Role,data::NTuple{N,R}) where {T,Role<:OperandRole,N,R}
         if role isa Accumulator
-            T === Float32 || throw(ArgumentError("FP32 accumulator required"))
+            isbitstype(T) || throw(ArgumentError("register values must be isbits"))
         else
             MMA16x8x16(T)
         end
@@ -50,10 +52,14 @@ struct MMAFragment{T,Role<:OperandRole,N,R}
     end
 end
 Layouts.layout(::MMAFragment{T,Role}) where {T,Role} =
-    operand_layout(MMA16x8x16(T === Float32 ? BFloat16 : T),Role())
+    operand_layout(MMA16x8x16(T),Role())
+Layouts.layout(::MMAFragment{T,Accumulator}) where T =
+    operand_layout(MMA16x8x16(BFloat16),Accumulator())
 zero_accumulator(::MMA16x8x16) = MMAFragment(Float32,Accumulator(),(0f0,0f0,0f0,0f0))
-@inline Base.map(f::F,a::MMAFragment{Float32,Accumulator}) where F =
-    MMAFragment(Float32,Accumulator(),(f(a.data[1]),f(a.data[2]),f(a.data[3]),f(a.data[4])))
+@inline function Base.map(f::F,a::MMAFragment{T,Accumulator}) where {F,T}
+    data = (f(a.data[1]),f(a.data[2]),f(a.data[3]),f(a.data[4]))
+    MMAFragment(eltype(data),Accumulator(),data)
+end
 @inline scale(a::MMAFragment{Float32,Accumulator},x) = map(Base.Fix2(*,x),a)
 
 "Load a 16×16 A operand from shared memory; K contiguous in 16-byte groups."
@@ -62,7 +68,15 @@ function load_a end
 function load_b end
 "Collectively multiply operands and return the updated immutable accumulator."
 function mma end
-"Store an accumulator to a logical output view, using its lane/value ownership."
+"""
+    store!(plan, destination, accumulator, thread)
+    store!(pointer, packed::PackedBF16)
+
+Store an accumulator to a logical output view using its ownership. The packed
+payload overload writes this thread's local words contiguously to a global
+UInt16 pointer. It requires 16-byte alignment, a multiple of eight BF16 values,
+and a sufficiently large distinct destination region for each thread.
+"""
 function store! end
 
 """
@@ -83,11 +97,11 @@ struct TiledMMA{A,W,R,K}
 end
 Base.size(::TiledMMA{A,W,R,K}) where {A,W,R,K} = (16W[1]*R[1],8W[2]*R[2],K)
 threads(::TiledMMA{A,W}) where {A,W} = 32prod(W)
-struct MMAAccumulator{P,N}
-    data::NTuple{N,MMAFragment{Float32,Accumulator,4,Float32}}
-    function MMAAccumulator(p::P,data::NTuple{N,MMAFragment{Float32,Accumulator,4,Float32}}) where {P<:TiledMMA,N}
+struct MMAAccumulator{P,N,T}
+    data::NTuple{N,MMAFragment{T,Accumulator,4,T}}
+    function MMAAccumulator(p::P,data::NTuple{N,MMAFragment{T,Accumulator,4,T}}) where {P<:TiledMMA,N,T}
         N == _acc_count(p) || throw(ArgumentError("accumulator shape does not match plan"))
-        new{P,N}(data)
+        new{P,N,T}(data)
     end
 end
 _acc_count(::TiledMMA{A,W,R}) where {A,W,R} = prod(R)
@@ -95,13 +109,13 @@ _acc_count(::TiledMMA{A,W,R}) where {A,W,R} = prod(R)
 # Static scalar calls avoid outlining nested tuple-map callbacks into device
 # functions, which would materialize the accumulator in local memory.
 @generated function Base.map(f::F,a::MMAAccumulator{P,N}) where {F,P,N}
-    fragments=[:(MMAFragment(Float32,Accumulator(),
-        ($( [:(f(a.data[$i].data[$j])) for j in 1:4]... ),))) for i in 1:N]
+    fragments=[:(_mapped_mma_fragment(f,a.data[$i])) for i in 1:N]
     quote
         Base.@inline
         MMAAccumulator(_plan($P),($(fragments...),))
     end
 end
+@inline _mapped_mma_fragment(f::F,a::MMAFragment{T,Accumulator}) where {F,T} = map(f,a)
 @inline scale(a::MMAAccumulator,x) = map(Base.Fix2(*,x),a)
 _plan(::Type{TiledMMA{MMA16x8x16{T},W,R,K}}) where {T,W,R,K} =
     TiledMMA(MMA16x8x16(T),Val(W),Val(R),Val(K))

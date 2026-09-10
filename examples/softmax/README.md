@@ -21,7 +21,7 @@ keeps mathematical A(M,K), B(K,N), output(M,N), with A physically stored as (K,M
 to make K contiguous. Masks have the same shape as each output. Valid logits
 must be finite; masked entries and fully masked rows produce zero.
 
-See [the row API](../../docs/src/rows.md) for ownership and participation rules.
+See [fragments and logical reductions](../../docs/src/rows.md) for ownership and participation rules.
 
 ## Rows wider than a fixed register tile
 

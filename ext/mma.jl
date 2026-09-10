@@ -16,8 +16,7 @@ Base.@propagate_inbounds function Tylo.load_b(a::MMA16x8x16{T},t::SharedTile{T},
     Tylo.MMAFragment(T,OperandB(),data)
 end
 for (T,name) in ((BFloat16,"bf16"),(Float16,"f16"))
-    instruction = Expr(:macrocall,Symbol("@ptx_str"),LineNumberNode(0),
-        "mma.sync.aligned.m16n8k16.row.col.f32.$name.$name.f32")
+    instruction = ptx"mma.sync.aligned.m16n8k16.row.col.f32.$name.$name.f32"
     @eval @inline function Tylo.mma(::MMA16x8x16{$T},
             a::Tylo.MMAFragment{$T,OperandA,4,UInt32},
             b::Tylo.MMAFragment{$T,OperandB,2,UInt32},

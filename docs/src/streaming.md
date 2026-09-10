@@ -3,16 +3,20 @@ CurrentModule = Tylo
 DocTestSetup = :(using Tylo)
 ```
 
-# Streaming rows and chained MMA
+# Streaming attention and online state
 
-The new reusable layer has two jobs: preserve a stable row summary while tiles
+This part of the library has two jobs: preserve a stable row summary while tiles
 arrive, and convert a matrix result into the next matrix instruction's operand.
 Neither job chooses buffers, CTA roles, scheduling, or barrier placement.
 
 ## Online statistics
 
 `SoftmaxState` stores an FP32 maximum and unnormalized sum in an existing
-`RowValues` distribution. An update returns a new state, unnormalized weights,
+`RowValues` distribution. This algorithm helper currently assumes the original
+lane-local, warp-striped or warp-MMA row distributions and reduces dimension 2.
+It has no `dims` argument and does not accept every generic or permuted fragment.
+That is an unfinished API generalization, not a hardware requirement that
+online statistics must be called rows. An update returns a new state, unnormalized weights,
 and the factor that rescales a previous weighted numerator:
 
 ```jldoctest
@@ -28,8 +32,8 @@ julia> softmax_normalize(u.weights, u.state).data
 ```
 
 With previous summary `(m,l)` and new scores `x`, the update uses
-`m′=max(m,row_max(x))`, `α=exp(m-m′)`, `p=exp(x-m′)`, and
-`l′=α*l+row_sum(p)`. Empty state is `(-Inf,0)`; explicit branches give empty
+`m′=max.(m,maximum(x;dims=2))`, `α=exp(m-m′)`, `p=exp(x-m′)`, and
+`l′=α.*l.+sum(p;dims=2)`. Empty state is `(-Inf,0)`; explicit branches give empty
 updates zero weights and avoid undefined differences and divisions.
 Valid scores are finite; masking supplies `-Inf32`. Entirely masked rows
 normalize to zero and have log-sum-exp `-Inf32`.
@@ -38,7 +42,7 @@ The numerator update is `o′=α*o+p*V`. `softmax_normalize(o,state)` belongs af
 the final tile. `softmax_merge` combines independent summaries and exposes both
 numerator rescale factors. Floating-point chunking/merge order is not associative.
 
-Row ownership must agree. A 32-column MMA score accumulator and 64-column output
+The state and values must agree on the original row-result ownership. A 32-column MMA score accumulator and 64-column output
 accumulator can share the same state when their M decomposition and one-N-warp
 distribution agree. A lane-local summary cannot silently become a warp summary.
 All lanes still participate in distributed reductions, including masked lanes.

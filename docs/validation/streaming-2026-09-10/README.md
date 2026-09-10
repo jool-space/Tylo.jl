@@ -1,7 +1,7 @@
 # GB10 streaming attention checkpoint
 
 The implementation is Tylo `60dda118bfc6d65a3b5b0b72fcba8c3d728eb68f`.
-See `../../src/validation.md` for results and limitations. `attention.toml` and
+See `../../src/validation-history.md` for results and limitations. `attention.toml` and
 `softmax.toml` retain all paired samples; resource tables distinguish offline
 assembly from runtime kernel attributes. `validation.json` records commands,
 exit statuses and sanitizer summaries. Source hashes identify both Julia repos

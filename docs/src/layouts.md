@@ -5,13 +5,16 @@ DocTestSetup = :(using Tylo)
 
 # Layouts, storage and ownership
 
-Tylo now has a small layout algebra used by a complete tiled GEMM. This is
-still a selected subset of CuTe's capabilities. The API is experimental.
+Tylo's layout algebra describes coordinate maps used by the instruction
+implementations. Start with [Design and boundaries](design.md) for how storage
+maps differ from register ownership. This page explains the mathematics and
+notation; [the GEMM walkthrough](gemm.md) shows a complete consumer.
 
 ## A layout is a function
 
-`Layout(shape, strides)` maps zero-based logical coordinates to element
-offsets. Shapes and strides may be hierarchical. Staticness belongs to each
+`Layout(shape, strides)` maps zero-based logical coordinates to offsets.
+A memory view supplies the unit: elements for global/shared storage, and typed
+TMEM slots for the TMEM adapter. Shapes and strides may be hierarchical. Staticness belongs to each
 leaf: use `static(n)` for a compile-time constant and an ordinary integer
 for a runtime dimension or leading stride. Runtime strides do not become
 new type parameters.
@@ -27,6 +30,25 @@ julia> l((Int32(3), Int32(7)))
 julia> Tylo.Layouts.tile(l, Val((8, 16)))(((3, 1), (7, 1))) == l((11, 23))
 true
 ```
+
+For a matrix shape `(16,32)`, strides `(32,1)` make the second axis contiguous:
+this is row-major storage. Strides `(1,16)` make the first axis contiguous:
+ordinary column-major storage. `Layout` accepts either. There is no automatic
+choice of major order in the constructor or `@Layout`.
+
+```jldoctest
+julia> using Tylo.Layouts: @Layout;
+
+julia> l = @Layout (16, 32) (32, 1);
+
+julia> permutedims(l)((7, 3)) == l((3, 7))
+true
+```
+
+Permutation reverses the top-level shape and stride modes together. Its matching
+coordinate is reversed too. With nested modes, their internal structure remains
+intact. The logical index can also be a nested tuple, such as the `(within,
+outer)` coordinates produced by `tile` in the preceding example.
 
 An integer coordinate decomposes first-mode-fastest. `tile` factors flat
 modes into within-tile and tile-index components. `coalesce` removes unit
@@ -130,9 +152,11 @@ dimensions and its launch grid.
 - `GlobalTile` and `SharedTile` borrow typed LLVM pointers. Their layouts
   count elements; pointer access converts to bytes. Global coordinates are
   widened before offset arithmetic to support allocations larger than 4 GiB.
-- `MMAFragment` and `RowFragment` hold immutable tuples in registers. They
-  are values, not addressable arrays. Register indexing stays static.
-- `TmemTile` and `TmemRows` retain the separate TMEM row/column encoding.
+- `Fragment` holds immutable values and explicit ownership. MMA operands
+  retain instruction-specific packing. Neither is an addressable local array;
+  register indexing stays static.
+- `TmemTile` maps logical coordinates to TMEM storage; `TmemTransfer` binds
+  register ownership to a supported hardware access. See [TMEM tiles and transfers](@ref).
   Generic byte-pointer slicing is never applied to TMEM.
 
 The MMA atom's ownership layout maps `(lane, logical_value)` to a matrix
@@ -161,24 +185,16 @@ before that buffer can be overwritten. Arithmetic on an accumulator returns
 another value with the same ownership. Scaling and activation can therefore
 be composed into an epilogue without a separate kernel.
 
-## Lessons carried forward
+## Limits of the algebra
 
-Laythe's useful separation is pure coordinate mathematics with mixed static
-and dynamic leaves. Tylo keeps that as an internal module for now. The old
-Tylo prototype also identified useful memory spaces and operand roles, but
-its generic register sizing and provisional byte arithmetic for TMEM did
-not establish valid instruction contracts. The new implementation checks
-those contracts against real generated code and executed kernels.
+The implementation provides affine evaluation, hierarchical factorization,
+composition, swizzles, windows and selected axis permutations. `coalesce` and
+nonlinear `cosize` are host planning operations. It does not provide arbitrary
+symbolic simplification, inversion, complements, automatic vectorization or
+register redistribution.
 
-The TMA and Hopper WGMMA path now exercises canonical descriptor-compatible
-shared layouts and explicit completion rules. Megakernels is its second
-consumer. The next datacenter path can connect TMA, tcgen05 MMA and the
-existing TMEM operations. See [TMA and Hopper WGMMA](@ref) for current limits.
-
-Row reductions and broadcasts now cover lane-local, warp-striped, and tiled
-MMA distributions; see [Row reductions and broadcasts](@ref). Rectangular
-bounds and partial vectors are handled by [Boundary tiles](@ref).
-
-General inverses/complements, arbitrary fragment redistribution, additional
-dtypes and automatic allocation remain future work. They should arrive with
-kernels that need and validate them.
+Describing a map is separate from binding it to an instruction. For example,
+TMA accepts a canonical descriptor-compatible layout, not every layout that can
+be written here. A scalar fragment operation can support a new ownership before
+that ownership has a reduction implementation. See [Current status](validation.md)
+and [the design decisions](design.md#Decisions-still-worth-challenging).

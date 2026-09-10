@@ -5,87 +5,102 @@
 
 Composable tile programming for NVIDIA GPUs in Julia.
 
-Tylo represents the data a kernel operates on: register fragments, memory
-views, and the operations that move between them. PTX.jl supplies the
-instructions. The kernel controls its work assignment and synchronization.
+Tylo provides logical memory views, distributed register values, and specific
+copy and matrix operations that connect them. PTX.jl supplies instruction
+bindings. The kernel author controls the launch, work assignment, allocation
+and pipeline. The API is experimental.
 
-This is an experimental implementation with these worked consumers:
+## Read the design and code
 
-- A complete BF16/FP16 tiled GEMM: shared-memory layouts, asynchronous copies,
-  register fragments, warp MMA, bounded copies/stores and composed epilogues,
-  executable on CC 8.0+.
-- TMA plus Hopper WGMMA: a complete producer/consumer GEMM and
-  Megakernels.jl’s GEMM/gate-up projection. TMA runs on GB10; WGMMA has
-  SM90a assembly coverage and prepared H100/H200 runtime tests.
-- Row reductions and broadcasts with lane-local, warp-striped, and MMA ownership;
-  masked softmax examples and Megakernels normalization consumers.
-- Streaming BF16 forward attention on GB10: online row statistics, same-lane
-  accumulator-to-A conversion, runtime sequence lengths, masks and causal tails.
-  See [the complete dataflow](examples/streaming_attention/README.md).
-- Correction and epilogue replacements in PTX.jl's datacenter Blackwell
-  attention kernel, with typed TMEM views and explicit completion.
+Start with the [manual](docs/src/index.md). For a focused reading path:
 
-Layouts support hierarchical shapes/strides, mixed static/runtime leaves,
-composition, XOR swizzles, factorization and windows that preserve swizzle
-phase. MMA ownership and packed register representations are separate from
-physical memory layout.
+1. [Design and boundaries](docs/src/design.md): storage, ownership, operation
+   plans, completion, and the tradeoffs still worth challenging.
+2. [Layouts](docs/src/layouts.md) and [fragments](docs/src/rows.md): static
+   notation, logical axes, register distribution, scalar broadcast and reductions.
+3. [Walk through GEMM](docs/src/gemm.md): one complete consumer from host planning
+   through shared copies and matrix instructions to the epilogue.
+4. [Read the implementation](docs/src/codebase.md): source files, specialization,
+   dispatch paths and the tests that establish their contracts.
+5. [Current status](docs/src/validation.md): supported combinations, hardware
+   coverage and performance limits.
 
-See [the complete GEMM](examples/gemm/README.md) for the data path and an
-executable demo. See [the design](docs/src/layouts.md) for contracts and limits.
+The [API reference](docs/src/api.md) and [dated validation history](docs/src/validation-history.md)
+are separate from the conceptual explanation. Build this working tree's manual
+with the instructions below; the published documentation follows deployed commits.
 
-The example's epilogue uses ordinary Julia:
+## The core distinction
+
+`Fragment(values, ownership)` separates each thread's local values from their
+logical coordinates. Memory layouts separately map those coordinates to storage.
+A thread's values can form a row, a scattered patch, or part of an MMA result.
+
+Inside a kernel, ready register fragments support ordinary scalar composition:
 
 ```julia
-values = wait_load(load_async(chunk))
-part = columns(values, Val(0), Val(32))
-packed = pack_bf16(scale(part, inv_sum))
-store_row!(destination, packed)
+m = maximum(f; dims=2)  # requires a supported collective for this ownership
+w = exp.(f .- m)       # generic scalar broadcast, for finite input here
+y = w ./ sum(w; dims=2)
+z = ptx"fma.rn.f32".(y, 2f0, 1f0)
 ```
 
-The kernel can release its readout barriers after `wait_load`, before the
-conversion and global stores. Tylo does not silently insert a CTA barrier.
+Elementwise operations preserve ownership. Reductions need an implemented
+communication recipe. Logical `permutedims` changes coordinates; producing a
+different instruction's register arrangement may require an explicit conversion.
+Memory tiles and pending results are not implicitly loaded or waited on by
+broadcast. See [the fragment support table](docs/src/rows.md).
 
-## Scope
+## Worked consumers
 
-Warp MMA supports `mma.sync.m16n8k16`. Hopper WGMMA supports M=64,
-N=8:8:256, K=16/32/64 with BF16/FP16 inputs and FP32 accumulation. TMA
-supports one explicit 128-byte-swizzled K=64 storage format. See
-[the TMA/WGMMA contracts](docs/src/hopper.md).
+- [Complete warp-MMA GEMM](examples/gemm/README.md): BF16/FP16 inputs,
+  shared layouts, asynchronous copies, bounded tiles and composed epilogues.
+- [Softmax](examples/softmax/README.md): lane-local, warp-striped and MMA
+  reductions, with explicit masking and fully masked-group behavior.
+- [Streaming attention](examples/streaming_attention/README.md): a complete
+  D=64 BF16 forward kernel with online statistics and chained warp MMA on GB10.
+- [TMA/WGMMA GEMM](examples/hopper/README.md): producer/consumer pipeline and
+  the primitives also used by Megakernels' `HopperProjection`.
+- [Datacenter FlashAttention experiment](examples/flash_attention/README.md):
+  TMEM correction and epilogue replacements in a pinned raw PTX kernel.
 
-The library is not yet a general CuTe or ThunderKittens equivalent.
-Tcgen05 MMA, arbitrary redistribution, allocation
-management and automatic pipelines remain future work.
+Warp GEMM, TMA and register operations have GB10 runtime coverage. WGMMA and
+actual TMEM transfers have assembly coverage and prepared hardware tests;
+H100/H200 and B200/B300 execution respectively remain unvalidated for those
+paths. The library does not yet have general CuTe/ThunderKittens coverage,
+including tcgen05 MMA, arbitrary redistribution or allocation management.
 
-`Tylo.Layouts` contains the pure coordinate mathematics. A separate Laythe
-package can follow once multiple consumers establish a stable boundary.
-
-Megakernels.jl consumes the TMA/WGMMA path in `HopperProjection`; it owns
-task scheduling and producer/consumer buffer reuse.
-Standalone kernels can use Tylo without Megakernels. cuTile remains a
-separate compiler-driven approach.
+`Tylo.Layouts` contains the pure coordinate mathematics. Megakernels consumes
+Tylo operations while owning task scheduling and buffer reuse. Standalone
+kernels use Tylo without Megakernels; cuTile uses a separate compiler-driven
+approach. The [design](docs/src/design.md) explains those boundaries.
 
 ## Development
 
-Host tests need Julia 1.10+ and no GPU:
+Host tests need no GPU (declared compatibility: Julia 1.10+):
 
 ```sh
 julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 ```
 
-The GPU development environment needs Julia 1.12+ and a sibling PTX checkout:
+The GPU development environment needs Julia 1.12+ and a sibling PTX checkout.
+Recent local runs use Julia 1.13:
 
 ```sh
 julia --project=test/gpu -e 'using Pkg; Pkg.instantiate()'
 julia --project=test/gpu test/gpu/runtests.jl
-julia --project=test/gpu test/gpu/runtests.jl --attention
+julia --project=test/gpu examples/gemm/run.jl 65 97 73
 ```
 
-`using Tylo, PTX, CUDACore` activates the device implementations. Host-only
-use does not load CUDA. The GPU suite assembles warp GEMM for SM80, SM90a, SM100a and SM121a,
-plus Hopper pipelines for SM90a and TMEM probes for SM100a. Warp GEMM,
-TMA and register arithmetic execute on GB10. WGMMA execution requires SM90.
-TMEM and full attention execution require B200/B300 and are explicitly
-skipped elsewhere. Compilation is not hardware validation.
+`using Tylo, PTX, CUDACore` activates the GPU implementations. The optional
+`--attention` comparison requires an exact reference file; see [validation and
+reproduction](docs/src/validation.md) before running it with a newer PTX checkout.
 
-See [the attention experiment](examples/flash_attention/README.md) for the
-reference pin, paired benchmark, and evidence commands.
+Build the manual locally, including its host doctests:
+
+```sh
+julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+julia --project=docs docs/make.jl
+```
+
+Open `docs/build/index.html`. GPU excerpts in the manual identify their required
+surrounding setup; the complete programs live in `examples/`.

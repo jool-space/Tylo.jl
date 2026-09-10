@@ -1,23 +1,24 @@
+using Tylo.Layouts: @Layout
 # This path runs on GB10 too: no TMEM instructions, but the SAME fragment
 # scale/slice/BF16/vector-store implementation used by the attention epilogue.
 function fragment_kernel!(out, input, alpha)
     tid = Int32(threadIdx().x)-Int32(1)
     values = RowFragment(ntuple(i -> @inbounds(input[64tid+i]),Val(64)))
-    for_half = Tylo.columns(values,Val(0),Val(32))
-    for_tail = Tylo.columns(values,Val(32),Val(32))
-    store_row!(pointer(out)+128tid,pack_bf16(scale(for_half,alpha)))
-    store_row!(pointer(out)+128tid+64,pack_bf16(scale(for_tail,alpha)))
+    for_half = window(values,Val((0,0)),Val((32,32)))
+    for_tail = window(values,Val((0,32)),Val((32,32)))
+    store!(pointer(out)+128tid,pack_bf16(for_half .* alpha))
+    store!(pointer(out)+128tid+64,pack_bf16(for_tail .* alpha))
     nothing
 end
 
 function tmem_correction_kernel!(base::UInt32, alpha::Float32)
     warp = (UInt32(threadIdx().x)-UInt32(1)) >> UInt32(5)
-    output = warp_rows(TmemTile{Float32,128}(base),warp)
+    output = @inbounds window(TmemTile(Float32,base,@Layout((128,128),(1,128))),(UInt32(32)*warp,UInt32(0)),Val((32,128)))
     fence_after_thread_sync()
     PTX.Utils.@unroll for half in 0:1
-        chunk = columns(output,Val(64half),Val(64))
+        chunk = @inbounds partition(TmemTransfer{(32,64),2}(),window(output,(0,64half),Val((32,64))))
         values = wait_load(load_async(chunk))
-        store_async!(chunk,scale(values,alpha))
+        store_async!(chunk,values .* alpha)
     end
     wait_stores()
     fence_before_thread_sync()
@@ -26,11 +27,11 @@ end
 
 function tmem_epilogue_kernel!(out, base::UInt32, alpha::Float32)
     tid = UInt32(threadIdx().x)-UInt32(1)
-    output = warp_rows(TmemTile{Float32,64}(base),tid >> UInt32(5))
-    values = wait_load(load_async(output))
+    output = @inbounds window(TmemTile(Float32,base,@Layout((128,64),(1,128))),(UInt32(32)*(tid >> UInt32(5)),UInt32(0)),Val((32,64)))
+    values = @inbounds wait_load(load_async(partition(TmemTransfer{(32,64),2}(),output)))
     PTX.Utils.@unroll for half in 0:1
-        part = columns(values,Val(32half),Val(32))
-        store_row!(pointer(out)+Int(tid)*128+64half,pack_bf16(scale(part,alpha)))
+        part = window(values,Val((0,32half)),Val((32,32)))
+        store!(pointer(out)+Int(tid)*128+64half,pack_bf16(part .* alpha))
     end
     nothing
 end

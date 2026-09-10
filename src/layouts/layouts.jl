@@ -6,9 +6,9 @@ using Static: StaticInt, static
 
 export Layout, @Layout, Swizzle, compose, window, shape, cosize, static, coordinate
 
-include("layouts/affine.jl")
-include("layouts/notation.jl")
-include("layouts/transforms.jl")
+include("affine.jl")
+include("notation.jl")
+include("transforms.jl")
 
 function layout end
 
@@ -31,8 +31,8 @@ Base.size(::LaneRows{N}) where N = (32, N)
     (lane, oftype(lane, E))
 end
 
-# One slicing rule shared by register fragments and TMEM views. The interval
-# is static; it cannot materialize a dynamically indexed register tuple.
+# Compatibility slicing for the original lane-local register fragments.
+# Static indexing keeps tuples in registers.
 function check_columns(n, first, width)
     first isa Int && width isa Int && 0 <= first && 0 < width &&
         first <= n - width || throw(ArgumentError("column interval is outside the tile"))

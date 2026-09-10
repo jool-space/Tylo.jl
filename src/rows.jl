@@ -1,31 +1,20 @@
-"""
-    WarpRowFragment(values::NTuple{N,Float32})
-
-One row striped over a full warp: lane t owns columns t + 32e, e = 0:N-1.
-Unlike `RowFragment`, a reduction communicates between lanes. Supply identity
-values for invalid columns; all 32 lanes must execute collective operations.
-"""
-struct WarpRowFragment{N}
-    data::NTuple{N,Float32}
-    function WarpRowFragment(data::NTuple{N,Float32}) where N
-        N > 0 || throw(ArgumentError("a row fragment must contain values"))
-        new{N}(data)
-    end
-end
 struct WarpRowLayout{N} end
 Base.size(::WarpRowLayout{N}) where N = (1,32N)
-Layouts.layout(::WarpRowFragment{N}) where N = WarpRowLayout{N}()
+_register_count(::WarpRowLayout{N}) where N = N
 @inline function Layouts.coordinate(::WarpRowLayout{N},lane::Integer,::Val{E}) where {N,E}
     0 <= E < N || throw(BoundsError())
     (zero(lane),lane+oftype(lane,32E))
 end
-@generated function Base.map(f::F,a::WarpRowFragment{N}) where {F,N}
-    values=[:(f(a.data[$i])) for i in 1:N]
-    quote
-        Base.@inline
-        WarpRowFragment(($(values...),))
-    end
-end
+
+"""
+    WarpRowFragment(values::NTuple{N,T})
+
+A `Fragment` with one logical row striped over a full warp: lane t owns
+columns t + 32e. The local values are scattered within that row. All 32 lanes
+must participate in its collective reductions.
+"""
+const WarpRowFragment{N,T} = Fragment{T,N,WarpRowLayout{N}}
+WarpRowFragment(data::NTuple{N,T}) where {N,T} = Fragment(data,WarpRowLayout{N}())
 
 abstract type RowOwnership end
 "One row per lane; no result replication between lanes."
@@ -38,26 +27,30 @@ _row_count(::LaneRowOwnership) = 1
 _row_count(::WarpRowOwnership) = 1
 _row_count(::MMARowOwnership{W,R}) where {W,R} = 2R
 
-"""
-    RowValues(ownership, values::NTuple{N,Float32})
+# A reduction retains its two logical axes, with extent one on axis 2.
+struct ReducedFragmentLayout{O<:RowOwnership} end
+Base.size(::ReducedFragmentLayout{LaneRowOwnership}) = (32,1)
+Base.size(::ReducedFragmentLayout{WarpRowOwnership}) = (1,1)
+Base.size(::ReducedFragmentLayout{MMARowOwnership{W,R}}) where {W,R} = (16W*R,1)
+_register_count(::ReducedFragmentLayout{O}) where O = _row_count(O())
+@inline Layouts.coordinate(::ReducedFragmentLayout{O},t::Integer,e::Val) where O =
+    (row_coordinate(O(),t,e),zero(t))
 
-Row results in the distribution described by `row_ownership(fragment)`.
-`row_coordinate(results, thread, Val(e))` identifies each result's logical row.
-Use `row_map(op, fragment, results)` to apply results without redistributing
-registers. `only(results)` extracts a scalar when each thread holds one result.
-These types describe ownership; they do not prove collective participation.
 """
-struct RowValues{O<:RowOwnership,N}
-    data::NTuple{N,Float32}
-    function RowValues(o::O,data::NTuple{N,Float32}) where {O<:RowOwnership,N}
-        N == _row_count(o) || throw(DimensionMismatch("row result count differs from ownership"))
-        new{O,N}(data)
-    end
-end
+    RowValues(ownership, values::NTuple{N,T})
+
+A `Fragment` of reduction results with singleton axis 2 and explicit
+replication between lanes. Use dotted arithmetic to broadcast it back onto
+a compatible fragment. `only(results)` extracts this thread's scalar when
+it holds one result; it does not claim that the whole tile has one element.
+"""
+const RowValues{O,N,T} = Fragment{T,N,ReducedFragmentLayout{O}}
+RowValues(o::O,data::NTuple{N,T}) where {O<:RowOwnership,N,T} =
+    Fragment(data,ReducedFragmentLayout{O}())
 "Describe the logical rows held by each thread and the replication of row results."
 row_ownership(::RowFragment) = LaneRowOwnership()
 row_ownership(::WarpRowFragment) = WarpRowOwnership()
-row_ownership(::MMAFragment{Float32,Accumulator}) = MMARowOwnership{1,1}()
+row_ownership(::MMAFragment{T,Accumulator}) where T = MMARowOwnership{1,1}()
 function row_ownership(::TiledMMA{A,W,R}) where {A,W,R}
     W[2] == 1 || throw(ArgumentError("row reductions across multiple N warps require explicit shared communication"))
     MMARowOwnership{W[1],R[1]}()
@@ -65,7 +58,6 @@ end
 row_ownership(::MMAAccumulator{P}) where P = row_ownership(_plan(P))
 row_ownership(::RowValues{O}) where O = O()
 @inline Base.only(x::RowValues{O,1}) where O = x.data[1]
-@inline Base.map(f,x::RowValues) = RowValues(row_ownership(x),map(f,x.data))
 
 "Identify result slot E's zero-based logical row at a zero-based thread index."
 @inline function row_coordinate(x::RowValues,tid::Integer,::Val{E}) where E
@@ -93,8 +85,6 @@ end
         $(tree(1,N))
     end
 end
-@inline _row_reduce(op,f::RowFragment{Float32}) =
-    RowValues(row_ownership(f),(_local_reduce(op,f.data),))
 
 """
     row_sum(fragment)
@@ -110,12 +100,13 @@ The operation's floating-point reduction order is not a sequential fold.
 @inline row_max(f) = _row_reduce(max,f)
 
 "Apply `op(value, row_result)` to every value, preserving register ownership."
-@inline row_map(op,f::RowFragment{Float32},r::RowValues{LaneRowOwnership}) =
+@inline row_map(op,f::RowFragment,r::RowValues{LaneRowOwnership}) =
     map(x -> op(x,only(r)),f)
 @inline row_map(op,f::WarpRowFragment,r::RowValues{WarpRowOwnership}) =
     map(x -> op(x,only(r)),f)
-@inline function row_map(op,f::MMAFragment{Float32,Accumulator},r::RowValues{MMARowOwnership{1,1}})
-    MMAFragment(Float32,Accumulator(),ntuple(i -> op(f.data[i],r.data[(i-1)÷2+1]),Val(4)))
+@inline function row_map(op,f::MMAFragment{T,Accumulator},r::RowValues{MMARowOwnership{1,1}}) where T
+    data = ntuple(i -> op(f.data[i],r.data[(i-1)÷2+1]),Val(4))
+    MMAFragment(eltype(data),Accumulator(),data)
 end
 @generated function row_map(op::F,a::MMAAccumulator{TiledMMA{A,W,R,K}},
                             r::RowValues{MMARowOwnership{WM,RM}}) where {F,A,W,R,K,WM,RM}

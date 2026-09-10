@@ -93,7 +93,7 @@ function attention_kernel!(output,q_data,k_data,v_data,mask,m::Int32,n::Int32,co
         commit_copies();wait_copies(Val(0));sync_threads() # copies visible to every warp
         scores=@inbounds mma(config.scores,sq,sk,zero_accumulator(config.scores),tid)
         update=softmax_update(state,mask_scores(scores,mask,tid,row,key,m,n,causal))
-        out=weighted_values(config.output,update.weights,sv,row_map(*,out,update.rescale),tid)
+        out=weighted_values(config.output,update.weights,sv,out .* update.rescale,tid)
         state=update.state
         sync_threads() # every warp has finished reading K/V before reuse
     end

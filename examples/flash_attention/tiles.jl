@@ -1,3 +1,4 @@
+using Tylo.Layouts: @Layout
 # Included into the FlashAttention definitions module by comparison.jl.
 # The kernel's barrier protocol and role assignment remain explicit here.
 
@@ -12,11 +13,12 @@
     needs_correction = nvvm"vote.ballot.sync"(0xffffffff,alpha < 1f0)
     if needs_correction != UInt32(0)
         Tylo.fence_after_thread_sync()
-        output = Tylo.TmemRows{Float32,128}(o_addr)
+        output = Tylo.TmemTile(Float32,o_addr,@Layout((32,128),(1,128)))
         for half in 0:1
-            chunk = @inbounds Tylo.columns(output,UInt32(64half),Val(64))
+            chunk = @inbounds Tylo.partition(Tylo.TmemTransfer{(32,64),2}(),
+                Tylo.window(output,(UInt32(0),UInt32(64half)),Val((32,64))))
             values = Tylo.wait_load(Tylo.load_async(chunk))
-            Tylo.store_async!(chunk,Tylo.scale(values,alpha))
+            Tylo.store_async!(chunk,values .* alpha)
         end
         Tylo.wait_stores()
         Tylo.fence_before_thread_sync()
@@ -33,10 +35,11 @@ end
     inv_sum = ptx"rcp.approx.f32"(@inbounds stats[alpha_idx+256])
     row = out_row + UInt32(STAGE*FAB_BM)
     dst = po + Int(row)*(FAB_HD*2)
-    output = Tylo.TmemRows{Float32,128}(o_addr)
+    output = Tylo.TmemTile(Float32,o_addr,@Layout((32,128),(1,128)))
 
     for half in 0:1
-        chunk = @inbounds Tylo.columns(output,UInt32(64half),Val(64))
+        chunk = @inbounds Tylo.partition(Tylo.TmemTransfer{(32,64),2}(),
+                Tylo.window(output,(UInt32(0),UInt32(64half)),Val((32,64))))
         values = Tylo.wait_load(Tylo.load_async(chunk))
         if STAGE == 1 && half == 1
             # Release immediately after the final TMEM read; the next item's
@@ -47,9 +50,9 @@ end
             barrier_arrive(bars.o_resc[1,0])
         end
         @unroll for quarter in 0:1
-            part = Tylo.columns(values,Val(32quarter),Val(32))
-            packed = Tylo.pack_bf16(Tylo.scale(part,inv_sum))
-            Tylo.store_row!(dst + 128half + 64quarter,packed)
+            part = Tylo.window(values,Val((0,32quarter)),Val((32,32)))
+            packed = Tylo.pack_bf16(part .* inv_sum)
+            Tylo.store!(dst + 128half + 64quarter,packed)
         end
     end
     STAGE == 0 && barrier_arrive(bars.stats_free[0])

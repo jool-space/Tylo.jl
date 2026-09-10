@@ -5,10 +5,12 @@ include("../gemm/kernel.jl")
 
 # Finite valid logits; invalid entries are represented by -Inf. The explicit
 # all-masked case avoids -Inf - -Inf and division by zero. No hidden barriers.
-@inline function softmax(f)
-    shifted=row_map((x,m) -> m == -Inf32 ? -Inf32 : x-m,f,row_max(f))
-    weights=map(exp,shifted)
-    row_map((x,s) -> s == 0f0 ? 0f0 : x/s,weights,row_sum(weights))
+@inline shift_logit(x,m) = m == -Inf32 ? -Inf32 : x-m
+@inline normalize_weight(x,s) = s == 0f0 ? 0f0 : x/s
+@inline function softmax(f;dims=2)
+    m = maximum(f;dims)
+    weights = exp.(shift_logit.(f,m))
+    normalize_weight.(weights,sum(weights;dims))
 end
 
 # Physical input/output shape is (columns, rows), so each row is contiguous.

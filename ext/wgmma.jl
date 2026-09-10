@@ -34,8 +34,7 @@ end
         b::Tylo.WGMMAOperand{Tylo.WGMMA64{T,N,K,P},OperandB},
         c::Tylo.WGMMAAccumulator{Tylo.WGMMA64{T,N,K,P},R}) where {T,N,K,P,R}
     dtype = T === Tylo.BFloat16 ? "bf16" : "f16"
-    instruction = Expr(:macrocall,Symbol("@ptx_str"),LineNumberNode(0),
-        "wgmma.mma_async.sync.aligned.m64n$(N)k16.f32.$dtype.$dtype")
+    instruction = ptx"wgmma.mma_async.sync.aligned.m64n$(N)k16.f32.$dtype.$dtype"
     init = [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
     ops = [begin
         name = Symbol(:part,j%P)

@@ -29,35 +29,37 @@ end
 
 @inline function Tylo.wait_load(p::PendingLoad{N}) where N
     words = _wait_words(p.words)
-    RowFragment(ntuple(i -> reinterpret(Float32,words[i]),Val(N)))
+    Fragment(ntuple(i -> reinterpret(Float32,words[i]),Val(N)),p.ownership)
 end
 
 for N in (16,32,64)
-    ld = Expr(:macrocall, Symbol("@ptx_str"), LineNumberNode(0), "tcgen05.ld.sync.aligned.32x32b.x$N.b32")
-    st = Expr(:macrocall, Symbol("@ptx_str"), LineNumberNode(0), "tcgen05.st.sync.aligned.32x32b.x$N.b32")
+    ld = ptx"tcgen05.ld.sync.aligned.32x32b.x$N.b32"
+    st = ptx"tcgen05.st.sync.aligned.32x32b.x$N.b32"
     @eval begin
-        @inline Tylo.load_async(t::TmemRows{Float32,$N}) = PendingLoad($ld(t.address))
-        @inline function Tylo.store_async!(t::TmemRows{Float32,$N}, f::RowFragment{Float32,$N})
+        @inline Tylo.load_async(t::Tylo.TmemPartition{Float32,$N}) = PendingLoad($ld(t.address),Tylo.Layouts.layout(t))
+        @inline function Tylo.store_async!(t::Tylo.TmemPartition{Float32,$N}, f::Fragment{Float32,$N})
+            Tylo._check_tmem_store(t,f)
             $st(t.address,ntuple(i -> reinterpret(UInt32,f.data[i]),Val($N)))
             nothing
         end
-        @inline function Tylo.store_async!(t::TmemRows{BFloat16,$(2N)}, f::PackedBF16{$N})
+        @inline function Tylo.store_async!(t::Tylo.TmemPartition{BFloat16,$N}, f::PackedBF16{$N})
+            Tylo._check_tmem_store(t,f)
             $st(t.address,f.data)
             nothing
         end
     end
 end
 
-@generated function Tylo.pack_bf16(f::RowFragment{Float32,N}) where N
+@generated function Tylo.pack_bf16(f::Fragment{Float32,N}) where N
     iseven(N) || error("packing BF16 requires an even number of values")
     words = [:(PTX.bf16x2_pack(f.data[$(2i-1)],f.data[$(2i)])) for i in 1:N÷2]
     quote
         Base.@inline
-        PackedBF16(($(words...),))
+        PackedBF16(($(words...),),Tylo.Layouts.layout(f))
     end
 end
 
-@generated function Tylo.store_row!(ptr::Core.LLVMPtr{UInt16,PTX.AS.Global},
+@generated function Tylo.store!(ptr::Core.LLVMPtr{UInt16,PTX.AS.Global},
                                     f::PackedBF16{W}) where W
     W % 4 == 0 || error("vector stores require a multiple of eight BF16 values")
     stores = [:(ptx"st.global.v4.b32"(ptr + $(16i),

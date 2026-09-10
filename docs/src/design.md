@@ -1,94 +1,156 @@
-# Representation and completion
+# Design and boundaries
 
-Tylo's first experiment has two consumers in mind: standalone attention
-kernels and the operations scheduled by Megakernels. Work scheduling belongs
-to those consumers. Tylo describes data and the operations on that data.
+Tylo describes data and operations inside a kernel. Its two main consumers are
+standalone kernels and Megakernels operations. A complete kernel still chooses
+its grid, assigns work to blocks and warps, allocates storage, and schedules
+reuse. Those choices can differ while using the same Tylo primitive.
 
-## Three independent questions
+## Four facts, kept separate
 
-**Ownership:** which logical values does a thread hold? The initial
-`Layouts.LaneRows{N}` mapping gives each of 32 lanes a row of N elements.
-This mapping is deliberately specific. An MMA accumulator with a different
-thread/value distribution needs a different representation.
+| Fact | Representation | What it does not establish |
+|:--|:--|:--|
+| Logical domain and storage | `GlobalTile`, `SharedTile`, `TmemTile`, with a layout | Which thread owns a value, or whether the storage is ready |
+| Register values and ownership | `Fragment(values, ownership)` | A memory address, or a valid MMA operand representation |
+| A supported operation | `CopyPlan`, `TiledMMA`, `TMALoad`, `WGMMA64`, `TmemTransfer` | A complete pipeline or an arbitrary layout conversion |
+| Completion | Explicit waits/fences, with pending types for TMEM loads and WGMMA results | Allocation lifetime, converged participation, or exclusive access |
 
-**Storage:** where do those values reside? A `TmemTile{T,N}` borrows 128
-TMEM rows; `warp_rows` selects the 32-row band accessible to one warp.
-An FP32 element occupies one physical column, while two BF16 elements share
-one physical column. The warp-band field is separate from the column field.
+Two maps explain most of the interface:
 
-**Completion:** when can another operation use the storage or registers?
-`load_async` returns a pending value. `wait_load` makes its register
-fragment available; the GPU implementation ties the registers through the
-wait at LLVM level. Store completion and thread-synchronization fences
-remain explicit.
+```text
+(thread, local value slot) -- ownership --> logical coordinate
+logical coordinate        -- storage   --> offset within an allocation
+```
 
-The hardware address and completion rules follow the
-[NVIDIA PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html).
-All lanes of a warp must participate in the aligned collective operations
-with the required uniform addresses. Julia's types do not prove collective
-participation or unique ownership.
+The storage map does not decide register ownership. A load instruction connects
+specific storage and ownership arrangements. A general layout can describe a
+map even when Tylo has no compatible instruction implementation for it.
 
-## Views and conversion
+For example, `Fragment` can hold a thread's 2×2 patch and broadcast a scalar
+function over its values. That alone supplies neither an MMA operand encoding
+nor a reduction over a distributed axis. See [Register fragments](rows.md).
 
-`reinterpret_tile(BFloat16, scores)` describes the same TMEM footprint with
-twice as many logical columns. It changes no values. A subsequent column
-slice can name the part used for probabilities. The kernel must ensure that
-overwriting those scores is permitted.
+## Logical axes and physical organization
 
-`pack_bf16(values)` numerically converts FP32 register values, with adjacent
-BF16 elements packed low-first. It preserves the lane/row distribution.
+A logical row fixes coordinate 1 and varies coordinate 2. Whether those values
+are contiguous in memory, scattered across lanes, or replicated is a separate
+question. Julia's usual column-major arrays are one possible storage choice;
+a kernel can use another layout without redefining its mathematics.
 
-Register column offsets are static because dynamic tuple indexing can
-materialize registers in local memory. TMEM column offsets may be runtime
-values: they are address arithmetic, and forcing them to be static can
-unnecessarily unroll the kernel's loops. Both kinds of view retain a static
-width.
+`permutedims` on supported layouts, fragments and TMEM views exchanges logical
+axes. The values can remain in the same physical locations and local slots.
+The matching operation also changes axes: a reduction over dimension 2 becomes
+a reduction over dimension 1. Moving data into a required MMA distribution is
+a different operation and can require communication.
 
-The raw constructors borrow storage; they do not allocate or free it.
-A caller must supply an address within a sufficiently large allocation.
-The kernel remains responsible for its allocation lifetime and reuse.
+TMEM has physical lane and word-column coordinates. Tylo's TMEM storage adapter
+encodes those hardware units; logical matrix axes remain independent. The
+current transfer recipe is narrow, with explicit compatibility checks. See
+[TMEM tiles and transfers](tmem.md).
 
-## Completion remains visible
+## Julia arithmetic is a real interface boundary
 
-Waiting for a load and releasing its source are separate decisions. In the
-attention epilogue the final read completes before normalization and global
-stores. Releasing the readout barriers at that point allows the next work
-item to overlap that remaining arithmetic and output traffic.
+A ready fragment supports `map` and fused dotted expressions over its local
+values. `exp.(f)` uses the same broadcast machinery as a user-defined scalar
+function or a scalar PTX callable. The scalar implementation determines the
+numerical behavior; Tylo preserves the ownership and reconstructs register
+values. It does not keep a special list of tile-level activation functions.
 
-Likewise, a sequence of TMEM stores may complete together. The kernel calls
-`wait_stores()`, then `fence_before_thread_sync()`, then its barrier
-arrival. Those operations are not hidden inside each individual store.
+Reductions have more obligations. `maximum(f; dims=2)` must account for every
+logical value along that axis and record where the result is replicated.
+Only supported ownerships have such a recipe. Broadcasting a reduction back
+checks that its distribution matches the destination fragment.
 
-Pending values prevent accidental use through the fragment API. They are
-ordinary Julia structs, not linear resources. A load wait completes all
-prior loads of the executing threads; it is not an independently scoped
-hardware event for one object.
+This is not a complete `AbstractArray` implementation. There is no general
+indexing, iteration, mutable dotted assignment, or automatic redistribution.
+Packed MMA operands and pending values have stricter interfaces. WGMMA's ready
+fragment has not yet joined the generic broadcast/reduction interface either.
+These boundaries are listed in [the fragment support table](rows.md).
 
-## Layout module boundary
+## Why static parameters and generated functions appear
 
-`Tylo.Layouts` currently holds the row ownership mapping and common static
-column-interval validation. It is pure and independently testable. It also
-supports hierarchical affine layouts, composition, XOR swizzles,
-factorization and parent-relative windows; see [Layouts, storage and ownership](@ref).
+Tile capacities, instruction shapes, and register slot selections usually need
+to be known to inference. Julia can specialize on types and `Val` parameters;
+`@Layout` makes static shape/stride leaves concise. Runtime matrix dimensions,
+leading strides and storage-window offsets can remain ordinary integers.
 
-The shared-memory GEMM path now uses those operations alongside distinct
-MMA thread/value ownership mappings. A coherent mathematical API can later
-move into Laythe.
-Instruction compatibility, descriptors, and synchronization stay in Tylo.
+An immutable tuple gives the compiler individual SSA values. Generated functions
+build fixed accesses to those values, avoiding dynamic tuple indexing that could
+materialize an array in local memory. Immutability does not imply an allocation
+or a fresh physical register for every expression, but it also does not guarantee
+low register pressure. Assembly and runtime resource measurements decide that.
 
-## Current implementation limits
+The short layout core is a small algebra, not a hidden implementation of all
+of CuTe. Much of the GPU compiler and instruction support lives in Julia,
+CUDACore and PTX.jl; much of the missing generality remains missing. Review both
+the supported maps and the consuming instruction methods before judging scope.
 
-Device operations currently support FP32 TMEM row loads/stores of 16, 32,
-or 64 values per thread and packed BF16 stores of 32, 64, or 128 values.
-Global BF16 stores require 16-byte alignment and a multiple of eight values.
-There is no bounds mask or partial-warp participation.
+## Completion and reuse stay visible
 
-Shared/global tiles, cp.async copy plans, and warp MMA atoms/tiling are now
-implemented in the complete GEMM example. TMA and Hopper WGMMA are also
-implemented in a producer/consumer GEMM and used by Megakernels; see
-[the Hopper path](hopper.md). TMA has GB10 runtime coverage, while WGMMA
-execution still requires H100/H200 validation.
+The GEMM example has two distinct synchronization points: make the producer's
+completed copies visible to consumers, then wait for all consumers before
+reusing a shared stage. Neither can be replaced by a shape check.
 
-Tcgen05 MMA, arbitrary register redistribution, and allocation management
-remain future work. The attention experiment still replaces only correction
-and epilogue; its TMEM execution requires datacenter Blackwell validation.
+TMEM `wait_load` and WGMMA `wait_mma` also carry compiler dependencies through
+returned registers. A memory clobber alone does not force arithmetic on an
+already-produced SSA value to remain after an asynchronous wait. These small
+PTX adapters are deliberate; their tests inspect instruction ordering.
+
+A pending type makes accidental arithmetic harder, but it is an ordinary Julia
+struct, not a linear resource. The caller still establishes allocation lifetime,
+correct barrier phases and collective participation. A wait may complete all
+prior operations of its hardware scope, rather than just one Julia object.
+
+## Position in the ecosystem
+
+| Layer | Responsibility in this project |
+|:--|:--|
+| Julia and CUDACore | GPU compilation, launch, device arrays, stream and lifetime integration |
+| PTX.jl | Instruction callables, operand contracts, descriptors and low-level utilities |
+| Tylo | Layout-bearing views, register ownership, supported tile operations and completion wrappers |
+| Kernel author / Megakernels | Work assignment, allocation, pipeline, barriers, scheduling and reuse |
+
+ThunderKittens provides curated register/shared/TMEM tile types and compatible
+operations, with a consistent cooperative-group vocabulary. Its core kernel
+interface is CUDA C++, and it also has axis-parameterized reductions. Tylo
+borrows the emphasis on usable hardware-compatible primitives while exposing
+more of the mapping as explicit Julia objects. It currently has much less
+operation and hardware coverage. See TK's
+[register types](https://github.com/HazyResearch/ThunderKittens/blob/main/include/types/register/rt.cuh)
+and [reductions](https://github.com/HazyResearch/ThunderKittens/blob/main/include/ops/group/register/tile/reductions.cuh).
+
+CuTe supplies a richer tensor/layout vocabulary and many established partitions
+and instruction mappings. Tylo carries forward the separation of data from its
+mapping, without claiming a comparable algebra or operation set. The
+[CuTe tensor implementation](https://github.com/NVIDIA/cutlass/blob/main/include/cute/tensor_impl.hpp)
+is a useful reference for that distinction.
+[cuTile.jl](https://github.com/JuliaGPU/cuTile.jl) has a different division of
+responsibility: its compiler controls substantially more of tile lowering.
+Tylo exposes concrete ownership, storage and participation to the kernel author.
+
+From the earlier Laythe/Tylo prototypes, the retained ideas are hierarchical
+coordinates, mixed static/runtime leaves, memory spaces and operand roles.
+The present approach requires each hardware mapping to have an explicit
+contract and a worked consumer. An independent Laythe package is a possible
+future extraction of shared mathematics, not a prerequisite for this codebase.
+
+## Decisions still worth challenging
+
+- **Plan ergonomics.** `CopyPlan{...}()`, `WGMMA64(..., Val(...))` and
+  `partition(TmemTransfer{...}(), tile)` expose related choices in different
+  ways. Their contracts are useful; a coherent convenience layer is unfinished.
+- **Fragment coverage.** Generic scalar arithmetic is broader than reductions,
+  register windows or stores. WGMMA and `SoftmaxState` retain specialized APIs.
+  A new ownership should acquire operations through concrete mappings and tests.
+- **Collective scope.** Tylo has no single counterpart to TK's `group<N>` yet.
+  Whether one improves composition should be tested against the existing warp,
+  warpgroup and producer/consumer kernels.
+- **Hardware-shaped storage.** TMEM typed-slot strides and canonical TMA layouts
+  expose real constraints, but callers should not have to rederive common
+  compatible constructions in every kernel.
+- **Performance.** Equivalent machine code for a checked replacement establishes
+  that replacement's cost on that toolchain. It does not establish efficient
+  scheduling, broad performance parity or good register pressure for new shapes.
+
+The next useful improvements should remove friction in a complete consumer or
+add a demonstrated missing operation. A larger catalogue of descriptors without
+such a consumer would not by itself make the library more composable.

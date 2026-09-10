@@ -3,14 +3,13 @@ include("../../examples/softmax/streaming.jl")
 function online_probe!(maxima,sums,numerator,input,values,kind,::Val{N}) where N
     tid=Int32(threadIdx().x)-Int32(1)
     prototype=row_fragment(kind,ntuple(_ -> 0f0,Val(N)))
-    state=SoftmaxState(prototype); out=row_sum(prototype)
+    state=SoftmaxState(prototype); out=sum(prototype;dims=2)
     for chunk in Int32(1):size(input,3)%Int32
         f=row_fragment(kind,ntuple(e -> @inbounds(input[e,tid+Int32(1),chunk]),Val(N)))
         v=row_fragment(kind,ntuple(e -> @inbounds(values[e,tid+Int32(1),chunk]),Val(N)))
         u=softmax_update(state,f)
-        p=row_words(u.weights); vv=row_words(v)
-        weighted=row_fragment(kind,ntuple(e -> p[e]*vv[e],Val(N)))
-        out=Tylo._row_zip(muladd,u.rescale,out,row_sum(weighted))
+        weighted=u.weights .* v
+        out=muladd.(u.rescale,out,sum(weighted;dims=2))
         state=u.state
     end
     let state=state,out=out

@@ -3,6 +3,7 @@ include("codegen.jl")
 include("layouts.jl")
 include("fragments.jl")
 include("tmem.jl")
+include("tmem_views.jl")
 include("gemm.jl")
 include("tma.jl")
 include("wgmma.jl")
@@ -11,6 +12,7 @@ if "--attention" in ARGS
 end
 
 include("rows.jl")
+include("arrayops.jl")
 
 include("softmax.jl")
 
