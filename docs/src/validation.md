@@ -1,6 +1,6 @@
 # Current status and validation
 
-This page describes the current working tree as of 2026-09-10. The detailed
+This page describes the current working tree as of 2026-09-11. The detailed
 [validation history](validation-history.md) records older revisions, compiler
 versions, numerical contracts and measurements. Historical sanitizer or timing
 results do not automatically validate later changes.
@@ -24,6 +24,19 @@ online `SoftmaxState` API still uses its original dimension-2 row distributions;
 it has not been generalized to every fragment or logical orientation.
 
 ## Most recent checks
+
+The CI compatibility work was checked locally on GB10 with Julia 1.10.12 and
+1.13.0, using fresh test environments, CUDACore 6.3.1, CUDA compiler 13.3.73
+and the pinned PTX revision below. Each version passed 36,610 host checks and
+3,176 GPU/assembly checks, with three expected hardware skips. All 107 saved
+Julia 1.13 kernel binaries retained the baseline's executable sections after
+the static-metadata and inlining fixes needed by Julia 1.10.
+
+The offline suite also passed with the GPU hidden; requiring GPU execution in
+that environment failed as intended. These are local checks, not a receipt of
+hosted x86_64 CI execution. No new sanitizer run is claimed.
+
+### Preceding fragment API checks
 
 The fragment/TMEM API work used Julia 1.13.0, CUDACore 6.3.1, CUDA compiler
 13.3.73, and PTX revision `32e36c122bc1c7af5f171cf478324b628b06af3a`.
@@ -75,18 +88,36 @@ Host tests run without PTX or a CUDA device:
 julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 ```
 
-With Julia 1.12+ and a sibling PTX checkout, instantiate and run the GPU suite:
+With Julia 1.10+ and a sibling PTX checkout, instantiate and run the GPU suite:
 
 ```sh
-julia --project=test/gpu -e 'using Pkg; Pkg.instantiate()'
+julia --project=test/gpu -e 'using Pkg; Pkg.develop([PackageSpec(path="."), PackageSpec(path="../PTX")]); Pkg.instantiate()'
 julia --project=test/gpu test/gpu/runtests.jl
 ```
 
 The default suite includes complete GEMM and streaming-attention checks. It
 also assembles architecture-specific kernels that cannot run on the local
-GPU; those execution paths are explicitly skipped. CI has an offline assembly
-job using the pinned PTX revision. A CI configuration is not a receipt that the
-current uncommitted tree has run remotely.
+GPU; those execution paths are explicitly skipped. CI tests Julia `1.10` and
+`1` (latest stable) on the GB10 `blackwell` runner and hosted x86_64 machines,
+using the pinned PTX revision. The GB10 job sets `TYLO_REQUIRE_GPU_RUNTIME=true`
+so a missing GPU fails the job. A CI configuration is not a receipt that a
+working tree has run remotely.
+
+On a machine without a CUDA driver, explicitly select compiler artifacts before
+starting the tests. Without a driver or a version preference, the CUDA compiler
+JLL may have no selected artifact, leaving `ptxas` unavailable:
+
+```sh
+julia --project=test/gpu -e 'using CUDACore; CUDACore.set_runtime_version!(v"13.3"; local_toolkit=false)'
+julia --project=test/gpu --check-bounds=auto test/gpu/runtests.jl --attention
+```
+
+The preference applies to this test environment. The second command starts a
+fresh Julia process, which loads the selected toolkit. Both CI jobs use normal
+bounds semantics and disable GPU coverage instrumentation for the exact code
+comparison; host contracts supply coverage separately. Explicit
+`Pkg.develop` in the setup command also supports Julia 1.10, which does not
+resolve the sibling paths from `[sources]`.
 
 The optional datacenter attention comparison requires the exact reference file
 whose SHA256 is recorded in `examples/flash_attention/README.md`. Set

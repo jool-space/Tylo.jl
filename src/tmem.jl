@@ -14,7 +14,7 @@ struct TmemTile{T,L<:Layouts.AbstractLayout}
     address::UInt32
     layout::L
     function TmemTile(::Type{T},address::UInt32,l::L) where {T,L<:Layouts.AbstractLayout}
-        T in (Float32,BFloat16) || throw(ArgumentError("TMEM views currently support FP32 and BF16"))
+        (T === Float32 || T === BFloat16) || throw(ArgumentError("TMEM views currently support FP32 and BF16"))
         length(size(l)) == 2 || throw(ArgumentError("TMEM views require two logical modes"))
         isbitstype(L) || throw(ArgumentError("TMEM layouts must be isbits"))
         new{T,L}(address,l)
@@ -28,7 +28,7 @@ _tmem_packing(::Type{Float32}) = 1
 _tmem_packing(::Type{BFloat16}) = 2
 Base.@propagate_inbounds window(t::TmemTile,o::Tuple,s::Val) =
     TmemTile(eltype(t),t.address,Layouts.window(t.layout,o,s))
-Base.permutedims(t::TmemTile,perm=(2,1)) =
+@inline Base.permutedims(t::TmemTile,perm=(2,1)) =
     TmemTile(eltype(t),t.address,permutedims(t.layout,perm))
 
 """
@@ -89,7 +89,7 @@ are 16, 32 or 64 words per thread: FP32 loads/stores, and packed BF16 stores.
 Instruction shape, ownership and storage compatibility are checked explicitly.
 """
 struct TmemTransfer{S,Axis}
-    function TmemTransfer{S,Axis}() where {S,Axis}
+    @inline function TmemTransfer{S,Axis}() where {S,Axis}
         S isa Tuple && length(S) == 2 && all(n -> n isa Int && n > 0,S) &&
             Axis isa Int && Axis in (1,2) && S[3-Axis] == 32 ||
             throw(ArgumentError("TMEM transfer needs 32 threads along one logical axis"))
@@ -103,7 +103,7 @@ _register_count(::TmemTransfer{S,A}) where {S,A} = S[A]
     E isa Int && 0 <= E < S[A] || throw(BoundsError())
     A == 2 ? (t,oftype(t,E)) : (oftype(t,E),t)
 end
-function Base.permutedims(p::TmemTransfer{S,A},perm=(2,1)) where {S,A}
+@inline function Base.permutedims(p::TmemTransfer{S,A},perm=(2,1)) where {S,A}
     perm isa Tuple{Integer,Integer} || throw(ArgumentError("expected a two-axis permutation tuple"))
     perm == (1,2) && return p
     perm == (2,1) || throw(ArgumentError("expected a permutation of (1,2)"))
@@ -118,7 +118,7 @@ Base.eltype(::Type{<:TmemPartition{T}}) where T = T
 Base.eltype(p::TmemPartition) = eltype(typeof(p))
 Layouts.layout(p::TmemPartition) = p.transfer
 Base.size(p::TmemPartition) = size(p.transfer)
-Base.permutedims(p::TmemPartition{T,W},perm=(2,1)) where {T,W} =
+@inline Base.permutedims(p::TmemPartition{T,W},perm=(2,1)) where {T,W} =
     TmemPartition{T,W,typeof(permutedims(p.transfer,perm))}(p.address,permutedims(p.transfer,perm))
 
 """
@@ -163,7 +163,7 @@ consecutive storage positions. BF16-to-FP32 views require complete aligned pairs
 """
 Base.@constprop :aggressive Base.@propagate_inbounds function reinterpret_tile(::Type{T},t::TmemTile{U};dims) where {T,U}
     dims isa Integer && dims in (1,2) || throw(ArgumentError("choose logical axis 1 or 2"))
-    T in (Float32,BFloat16) || throw(ArgumentError("TMEM views support FP32 and BF16"))
+    (T === Float32 || T === BFloat16) || throw(ArgumentError("TMEM views support FP32 and BF16"))
     T === U && return t
     all(n -> n isa Layouts.IntLike,Layouts.shape(t.layout)) ||
         throw(ArgumentError("reinterpretation requires flat logical modes"))

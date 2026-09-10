@@ -260,24 +260,27 @@ register indexing and implicit redistribution are not provided.
 """
 @generated function window(f::Fragment{T,N,L},::Val{O},::Val{S}) where {T,N,L,O,S}
     axis = _check_register_window(L,O,S)
+    # Ownership depends only on static parameters; construct it during generation.
+    ownership = _window_ownership(L,S)
     values = [:(f.data[$i]) for i in O[axis]+1:O[axis]+S[axis]]
     quote
         Base.@inline
-        Fragment(($(values...),),_window_ownership($L,$S))
+        Fragment(($(values...),),$ownership)
     end
 end
 @generated function window(f::PackedBF16{N,L},::Val{O},::Val{S}) where {N,L,O,S}
     axis = _check_register_window(L,O,S;packed=true)
+    ownership = _window_ownership(L,S)
     values = [:(f.data[$i]) for i in O[axis]÷2+1:(O[axis]+S[axis])÷2]
     quote
         Base.@inline
-        PackedBF16(($(values...),),_window_ownership($L,$S))
+        PackedBF16(($(values...),),$ownership)
     end
 end
 _swap_packed_ownership(l) = PermutedOwnership(l)
 _swap_packed_ownership(l::PermutedOwnership) = l.parent
 _swap_packed_ownership(l::TmemTransfer) = permutedims(l)
-function Base.permutedims(f::PackedBF16,perm=(2,1))
+@inline function Base.permutedims(f::PackedBF16,perm=(2,1))
     Layouts._check_permutation(perm)
     perm == (1,2) ? f : PackedBF16(f.data,_swap_packed_ownership(Layouts.layout(f)))
 end

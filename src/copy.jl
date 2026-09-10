@@ -13,7 +13,7 @@ pointers must additionally be 16-byte aligned. Reusing a shared allocation
 requires synchronization with its readers, separately from copy completion.
 """
 struct CopyPlan{S,Threads,Axis}
-    function CopyPlan{S,Threads,Axis}() where {S,Threads,Axis}
+    @inline function CopyPlan{S,Threads,Axis}() where {S,Threads,Axis}
         S isa Tuple && length(S) == 2 && all(n -> n isa Int && n > 0,S) &&
             Threads isa Int && 0 < Threads <= 1024 && Threads % 32 == 0 &&
             Axis isa Int && Axis in (1,2) || throw(ArgumentError("invalid collective copy shape"))

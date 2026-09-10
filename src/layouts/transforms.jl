@@ -94,20 +94,20 @@ Base.size(::Ownership{S}) where S = S
 end
 
 # Logical axis permutation preserves the storage map and parent-relative origin.
-function _check_permutation(perm)
+@inline function _check_permutation(perm)
     perm isa Tuple{Integer,Integer} && perm in ((1,2),(2,1)) ||
         throw(ArgumentError("expected a permutation tuple of (1,2)"))
     nothing
 end
-function Base.permutedims(l::Layout,perm=(2,1))
+@inline function Base.permutedims(l::Layout,perm=(2,1))
     _check_permutation(perm)
     length(shape(l)) == 2 || throw(ArgumentError("axis permutation currently requires two modes"))
     perm == (1,2) ? l : Layout(reverse(shape(l)),reverse(strides(l)))
 end
-function Base.permutedims(l::Window{S},perm=(2,1)) where S
+@inline function Base.permutedims(l::Window{S},perm=(2,1)) where S
     _check_permutation(perm)
     length(S) == 2 || throw(ArgumentError("axis permutation currently requires two modes"))
     perm == (1,2) && return l
     Window{reverse(S),typeof(permutedims(l.parent)),typeof(reverse(l.origin))}(permutedims(l.parent),reverse(l.origin))
 end
-Base.permutedims(l::Composition,perm=(2,1)) = compose(l.outer,permutedims(l.inner,perm))
+@inline Base.permutedims(l::Composition,perm=(2,1)) = compose(l.outer,permutedims(l.inner,perm))

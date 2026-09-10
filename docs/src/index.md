@@ -83,10 +83,10 @@ From this checkout, host tests need no GPU:
 julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 ```
 
-The GPU environment expects a sibling `../PTX` checkout and Julia 1.12 or later:
+The GPU environment expects a sibling `../PTX` checkout and Julia 1.10 or later:
 
 ```sh
-julia --project=test/gpu -e 'using Pkg; Pkg.instantiate()'
+julia --project=test/gpu -e 'using Pkg; Pkg.develop([PackageSpec(path="."), PackageSpec(path="../PTX")]); Pkg.instantiate()'
 julia --project=test/gpu test/gpu/runtests.jl
 julia --project=test/gpu examples/gemm/run.jl 65 97 73
 ```
