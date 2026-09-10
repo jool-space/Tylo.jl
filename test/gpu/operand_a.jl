@@ -1,3 +1,5 @@
+using Tylo.Layouts: @Layout
+
 function conversion_probe!(out,input,atom)
     lane=Int32(threadIdx().x)-Int32(1)
     left=Tylo.MMAFragment(Float32,Accumulator(),ntuple(i -> @inbounds(input[i,lane+1]),Val(4)))
@@ -18,18 +20,16 @@ function conversion_shared_probe!(out,input,atom::MMA16x8x16{T}) where T
         @inbounds smem[16r+c+1]=T(input[i,lane+1])
     end
     sync_threads()
-    tile=SharedTile(pointer(smem),Tylo.Layouts.Layout((Tylo.Layouts.static(16),Tylo.Layouts.static(16)),
-                                                    (Tylo.Layouts.static(16),Tylo.Layouts.static(1))))
+    tile=SharedTile(pointer(smem),@Layout((16, 16), (16, 1)))
     a=@inbounds load_a(atom,tile,lane)
     ntuple(i -> (@inbounds out[i,lane+1]=a.data[i]),Val(4))
     nothing
 end
 function chained_mma_kernel!(out,a_data,b_data,v_data,atom::MMA16x8x16{T}) where T
     s=CuStaticSharedArray(T,640);tid=Int32(threadIdx().x)-Int32(1)
-    L=Tylo.Layouts.Layout;st=Tylo.Layouts.static
-    sa=SharedTile(pointer(s),L((st(16),st(16)),(st(16),st(1))))
-    sb=SharedTile(pointer(s)+512,L((st(16),st(16)),(st(1),st(16))))
-    sv=SharedTile(pointer(s)+1024,L((st(16),st(8)),(st(1),st(16))))
+    sa=SharedTile(pointer(s),@Layout((16, 16), (16, 1)))
+    sb=SharedTile(pointer(s)+512,@Layout((16, 16), (1, 16)))
+    sv=SharedTile(pointer(s)+1024,@Layout((16, 8), (1, 16)))
     @inbounds begin
         copy_async!(CopyPlan{(16,16),32,2}(),sa,GlobalTile(pointer(a_data),sa.layout),tid)
         copy_async!(CopyPlan{(16,16),32,1}(),sb,GlobalTile(pointer(b_data),sb.layout),tid)
@@ -43,7 +43,7 @@ function chained_mma_kernel!(out,a_data,b_data,v_data,atom::MMA16x8x16{T}) where
         c0=mma(atom,aa,b0,zero_accumulator(atom))
         c1=mma(atom,aa,b1,zero_accumulator(atom))
         c=mma(atom,pack_operand_a(atom,c0,c1),load_b(atom,sv,tid),zero_accumulator(atom))
-        store!(GlobalTile(pointer(out),L((st(16),st(8)),(st(1),st(16)))),c,tid)
+        store!(GlobalTile(pointer(out),@Layout((16, 8), (1, 16))),c,tid)
     end
     nothing
 end

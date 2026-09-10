@@ -38,8 +38,8 @@ function operand_load_kernel!(outa,outb,ina,inb,config)
     smem = @inbounds CuDynamicSharedArray(T,2048)
     sa = SharedTile(pointer(smem),config.sa)
     sb = SharedTile(pointer(smem)+2048,config.sb)
-    a = GlobalTile(pointer(ina),Layout((static(32),static(32)),(static(32),static(1))))
-    b = GlobalTile(pointer(inb),Layout((static(32),static(32)),(static(1),static(32))))
+    a = GlobalTile(pointer(ina),@Layout((32, 32), (32, 1)))
+    b = GlobalTile(pointer(inb),@Layout((32, 32), (1, 32)))
     @inbounds begin
         copy_async!(CopyPlan{(32,32),32,2}(),sa,a,tid)
         copy_async!(CopyPlan{(32,32),32,1}(),sb,b,tid)
@@ -60,8 +60,8 @@ function operand_load_kernel!(outa,outb,ina,inb,config)
 end
 
 function check_operand_load(T,swizzled)
-    la = Layout((static(32),static(32)),(static(32),static(1)))
-    lb = Layout((static(32),static(32)),(static(1),static(32)))
+    la = @Layout((32, 32), (32, 1))
+    lb = @Layout((32, 32), (1, 32))
     config = (sa=swizzled ? compose(Swizzle{2,3,2}(),la) : la,
               sb=swizzled ? compose(Swizzle{2,3,2}(),lb) : lb)
     # All entries distinguishable as BF16 too; no arithmetic involved.
@@ -95,7 +95,8 @@ function check_gemm(T,config,m,n,k;pad=0,relu=false)
     hd[1:m,:] .= NaN32
     da,db,dd = CuArray(ha),CuArray(hb),CuArray(hd)
     # Validate the actual runtime leading dimensions before launching.
-    la = Layout((m,k),(lda,1)); lb = Layout((k,n),(1,ldb))
+    la = @Layout ($m, $k) ($lda, $1)
+    lb = @Layout ($k, $n) ($1, $ldb)
     validate_copy(config.ac,T,config.sa,Tylo.Layouts.window(la,(0,0),Val((bm,bk))))
     validate_copy(config.bc,T,config.sb,Tylo.Layouts.window(lb,(0,0),Val((bk,bn))))
     alpha = relu ? -0.75f0 : 1f0

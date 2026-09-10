@@ -76,7 +76,7 @@ function wgmma_operand_probe!(out,p::WGMMA64{T,N,K},k0::Int32) where {T,N,K}
     @inbounds ad = wgmma_operand(p,OperandA(),a,(Int32(64),k0))
     @inbounds bd = wgmma_operand(p,OperandB(),b,(k0,Int32(8)))
     c = finish_mma(wait_mma(mma_async(p,ad,bd,zero_accumulator(p))))
-    dst = GlobalTile(pointer(out),Layout((static(64),static(N)),(static(1),static(64))))
+    dst = GlobalTile(pointer(out),@Layout((64, N), (1, 64)))
     store!(dst,c,tid)
     nothing
 end

@@ -17,9 +17,9 @@ for a runtime dimension or leading stride. Runtime strides do not become
 new type parameters.
 
 ```jldoctest
-julia> using Tylo.Layouts: Layout, static;
+julia> using Tylo.Layouts: @Layout;
 
-julia> l = Layout((static(16), static(32)), (static(32), static(1)));
+julia> l = @Layout (16, 32) (32, 1);
 
 julia> l((Int32(3), Int32(7)))
 103
@@ -104,9 +104,9 @@ The disjoint-field check is essential: overlapping fields can destroy
 information instead of permuting addresses.
 
 ```jldoctest
-julia> using Tylo.Layouts: Layout, static, Swizzle, compose;
+julia> using Tylo.Layouts: @Layout, Swizzle, compose;
 
-julia> l = compose(Swizzle{2,3,2}(), Layout((static(32), static(32)), (static(32), static(1))));
+julia> l = compose(Swizzle{2,3,2}(), @Layout((32, 32), (32, 1)));
 
 julia> w = Tylo.Layouts.window(l, (1, 8), Val((16, 16)));
 

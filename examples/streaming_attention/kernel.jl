@@ -1,6 +1,6 @@
 module StreamingAttention
 using Tylo, PTX, CUDACore, BFloat16s
-using Tylo.Layouts: Layout, Swizzle, compose, static, coordinate, cosize
+using Tylo.Layouts: @Layout, Swizzle, compose, coordinate, cosize
 
 # One CTA owns 64 queries. Four warps own disjoint groups of 16 rows,
 # each with all 32 score columns and all 64 output columns.
@@ -8,9 +8,9 @@ function configuration()
     atom=MMA16x8x16(BFloat16)
     scores=TiledMMA(atom,Val((4,1)),Val((1,4)),Val(64))
     output=TiledMMA(atom,Val((4,1)),Val((1,8)),Val(32))
-    q=compose(Swizzle{3,3,3}(),Layout((static(64),static(64)),(static(64),static(1))))
-    k=compose(Swizzle{3,3,3}(),Layout((static(64),static(32)),(static(1),static(64))))
-    v=compose(Swizzle{2,3,2}(),Layout((static(32),static(64)),(static(1),static(32))))
+    q=compose(Swizzle{3,3,3}(),@Layout((64, 64), (64, 1)))
+    k=compose(Swizzle{3,3,3}(),@Layout((64, 32), (1, 64)))
+    v=compose(Swizzle{2,3,2}(),@Layout((32, 64), (1, 32)))
     (;scores,output,q,k,v)
 end
 shared_bytes(::Any)=16384 # Q: 64×64; K: 64×32; V: 32×64, all BF16
@@ -80,9 +80,9 @@ function attention_kernel!(output,q_data,k_data,v_data,mask,m::Int32,n::Int32,co
     sq=SharedTile(pointer(memory),config.q)
     sk=SharedTile(pointer(memory)+8192,config.k)
     sv=SharedTile(pointer(memory)+12288,config.v)
-    q=GlobalTile(pointer(q_data),@inbounds Layout((m,static(64)),(static(64),static(1))))
-    k=GlobalTile(pointer(k_data),@inbounds Layout((static(64),n),(static(1),static(64))))
-    v=GlobalTile(pointer(v_data),@inbounds Layout((n,static(64)),(static(1),size(v_data,1))))
+    q=GlobalTile(pointer(q_data),@inbounds @Layout(($m, 64), (64, 1)))
+    k=GlobalTile(pointer(k_data),@inbounds @Layout((64, $n), (1, 64)))
+    v=GlobalTile(pointer(v_data),@inbounds @Layout(($n, 64), (1, $(size(v_data,1)))))
     copy_tile!(CopyPlan{(64,64),128,2}(),sq,q,(row,Int32(0)),tid,Val(2))
     commit_copies();wait_copies(Val(0));sync_threads()
     state=SoftmaxState(zero_accumulator(config.scores))
@@ -97,7 +97,7 @@ function attention_kernel!(output,q_data,k_data,v_data,mask,m::Int32,n::Int32,co
         state=update.state
         sync_threads() # every warp has finished reading K/V before reuse
     end
-    dst=GlobalTile(pointer(output),@inbounds Layout((m,static(64)),(static(64),static(1))))
+    dst=GlobalTile(pointer(output),@inbounds @Layout(($m, 64), (64, 1)))
     @inbounds store!(config.output,dst,softmax_normalize(out,state),(row,Int32(0)),tid)
     nothing
 end

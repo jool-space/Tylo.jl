@@ -1,5 +1,5 @@
 using Tylo, CUDACore, BFloat16s
-using Tylo.Layouts: Layout, Swizzle, compose, static, cosize
+using Tylo.Layouts: @Layout, Swizzle, compose, cosize
 
 value(::Val{N}) where N = N
 
@@ -9,8 +9,8 @@ function gemm_config(::Type{T}=BFloat16; block=(64,64,32),warps=(2,2),swizzled=t
     bm % (16warps[1]) == bn % (8warps[2]) == 0 || throw(ArgumentError("warp tiles must divide block"))
     bk in (16,32,64) || throw(ArgumentError("supported K tiles: 16,32,64"))
     plan = TiledMMA(MMA16x8x16(T),Val(warps),Val((bm÷(16warps[1]),bn÷(8warps[2]))),Val(bk))
-    a = Layout((static(bm),static(bk)),(static(bk),static(1)))
-    b = Layout((static(bk),static(bn)),(static(1),static(bk)))
+    a = @Layout (bm, bk) (bk, 1)
+    b = @Layout (bk, bn) (1, bk)
     bits = trailing_zeros(bk)-3
     sa = swizzled ? compose(Swizzle{bits,3,bits}(),a) : a
     sb = swizzled ? compose(Swizzle{bits,3,bits}(),b) : b
@@ -65,9 +65,9 @@ function tiled_gemm_kernel!(out,a_data,b_data,m::Int32,n::Int32,k::Int32,
     stages = value(config.stages)
     smem = @inbounds CuDynamicSharedArray(T,stages*(value(config.a_span)+value(config.b_span)))
     ptr = pointer(smem)
-    a = GlobalTile(pointer(a_data),@inbounds Layout((m,k),(lda,static(1))))
-    b = GlobalTile(pointer(b_data),@inbounds Layout((k,n),(static(1),ldb)))
-    d = GlobalTile(pointer(out),@inbounds Layout((m,n),(static(1),ldc)))
+    a = GlobalTile(pointer(a_data),@inbounds @Layout(($m, $k), ($lda, 1)))
+    b = GlobalTile(pointer(b_data),@inbounds @Layout(($k, $n), (1, $ldb)))
+    d = GlobalTile(pointer(out),@inbounds @Layout(($m, $n), (1, $ldc)))
     tid = Int32(threadIdx().x)-Int32(1)
     row = (Int32(blockIdx().x)-Int32(1))*Int32(bm)
     col = (Int32(blockIdx().y)-Int32(1))*Int32(bn)

@@ -1,5 +1,5 @@
 using Tylo, PTX, CUDACore, BFloat16s
-using Tylo.Layouts: Layout, static
+using Tylo.Layouts: @Layout
 
 # A small, complete pipeline, separate from Megakernels' scheduler: one producer
 # warp and one consumer warpgroup. Full 64×N outputs, K tail zero-filled by TMA.
@@ -47,7 +47,7 @@ function hopper_gemm_kernel!(out,a,b,plan,total_k::Int32,::Val{Stages}) where St
             acc = wait_mma(mma_async(plan,ad,bd,acc))
             ptx"mbarrier.arrive.shared.b64"(done+slot*Int32(8))
         end
-        dst = GlobalTile(pointer(out),Layout((static(64),static(n)),(static(1),static(64))))
+        dst = GlobalTile(pointer(out),@Layout((64, n), (1, 64)))
         store!(dst,finish_mma(acc),tid)
     end
     sync_threads()

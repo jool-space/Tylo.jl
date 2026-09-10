@@ -22,15 +22,15 @@ end
 function check_boundary_copy(T,axis,step,origin)
     s=(19,23);ld=(s[axis]+3)*step
     strides=axis==1 ? (step,ld) : (ld,step)
-    src=Layout(s,strides)
+    src=@Layout $s $strides
     host=fill(T(NaN32),Int(cosize(src)))
     logical=T===Float32 ? reshape(Float32.(1:prod(s)),s) :
         reshape(reinterpret(T,UInt16.(0x3800:0x3800+prod(s)-1)),s)
     for r in 0:s[1]-1,c in 0:s[2]-1
         host[r*strides[1]+c*strides[2]+1]=logical[r+1,c+1]
     end
-    parent=axis==1 ? Layout((static(64),static(32)),(static(1),static(64))) :
-                     Layout((static(32),static(64)),(static(64),static(1)))
+    parent=axis==1 ? @Layout((64, 32), (1, 64)) :
+                     @Layout((32, 64), (64, 1))
     start=axis==1 ? (8,3) : (3,8)
     dst=Tylo.Layouts.window(compose(Swizzle{3,3,3}(),parent),map(Int32,start),Val((16,16)))
     p=CopyPlan{(16,16),32,axis}()

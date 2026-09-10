@@ -1,21 +1,20 @@
-using Tylo.Layouts: Layout, Swizzle, compose, cosize, shape, static
+using Tylo.Layouts: @Layout, Layout, Swizzle, compose, cosize, shape, static
 const TL = Tylo.Layouts
 
 @testset "Hierarchical memory layouts" begin
-    l = Layout((static(16),static(32)),(static(32),static(1)))
+    l = @Layout (16, 32) (32, 1)
     @test size(l) == (16,32)
     @test cosize(l) == 512
     @test l((Int32(3),Int32(7))) === Int32(103)
     @test l((static(3),static(7))) === static(103)
-    mixed = Layout((static(16),Int32(32)),(Int32(40),static(1)))
+    mixed = @Layout (16, $(Int32(32))) ($(Int32(40)), 1)
     @test mixed((Int32(3),Int32(7))) === Int32(127)
     @test cosize(mixed) == 632
     factored = TL.tile(l,Val((8,16)))
     @test shape(factored) == ((8,2),(16,2))
     @test factored(((3,1),(7,1))) == l((11,23))
     @test all(factored(i) == l(i) for i in 0:511)
-    coalesced = TL.coalesce(Layout(((static(4),static(2)),static(1),static(3)),
-                                  ((static(1),static(4)),static(0),static(8))))
+    coalesced = TL.coalesce(@Layout(((4, 2), 1, 3), ((1, 4), 0, 8)))
     @test shape(coalesced) == (24,)
     @test all(coalesced(i) == i for i in 0:23)
     @test_throws ArgumentError Layout((16,0),(1,16))
@@ -31,7 +30,7 @@ end
     end
     @test_throws ArgumentError Swizzle{2,3,1}() # overlapping fields are not a permutation
     @test_throws ArgumentError Swizzle{1,-1,1}()
-    l = compose(Swizzle{2,3,2}(),Layout((static(32),static(32)),(static(32),static(1))))
+    l = compose(Swizzle{2,3,2}(),@Layout((32, 32), (32, 1)))
     @test Set(l(i) for i in 0:1023) == Set(0:1023)
     @test cosize(l) == 1024
     @test l((Int32(1),Int32(0))) === Int32(40)
@@ -52,10 +51,10 @@ end
 @testset "Copy vector contracts" begin
     for k in (16,32,64),axis in (1,2)
         s = axis == 1 ? (k,64) : (64,k)
-        d = axis == 1 ? (static(1),static(k)) : (static(k),static(1))
-        plain = Layout(map(static,s),d)
+        d = axis == 1 ? (1,k) : (k,1)
+        plain = @Layout s d
         swiz = compose(Swizzle{trailing_zeros(k)-3,3,trailing_zeros(k)-3}(),plain)
-        src = Layout(s,axis == 1 ? (1,k+8) : (k+8,1))
+        src = @Layout $s $(axis == 1 ? (1,k+8) : (k+8,1))
         plan = CopyPlan{s,128,axis}()
         @test validate_copy(plan,BFloat16,swiz,src) === nothing
         @test validate_copy(plan,Float16,plain,src) === nothing
@@ -101,9 +100,9 @@ end
 end
 
 @testset "Address-space units" begin
-    l = Layout((Int32(65536),Int32(65536)),(Int32(65536),static(1)))
+    l = @Layout ($(Int32(65536)), $(Int32(65536))) ($(Int32(65536)), 1)
     @test Tylo._byte_offset(Val(1),BFloat16,l,(Int32(65535),Int32(65535))) == 2*(Int64(65536)^2-1)
-    small = Layout((static(16),static(32)),(static(32),static(1)))
+    small = @Layout (16, 32) (32, 1)
     @test Tylo._byte_offset(Val(3),BFloat16,small,(Int32(2),Int32(3))) === Int32(134)
     @test Tylo._byte_offset(Val(3),BFloat16,small,(static(2),static(3))) == 134
 end
