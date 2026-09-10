@@ -1,164 +1,221 @@
-# GB10 batch: reductions, broadcasts, and boundary tiles
+# Next batch: streaming row state and chained warp MMA
 
-Scoped 2026-09-10. All four implementation milestones are complete on GB10.
-The acceptance plan is retained below; the final checkpoint is recorded in
-`docs/src/validation.md` and `reports/rows-boundaries-2026-09-10/`.
+Scoped 2026-09-10. This is a proposed execution plan; implementation has not
+started. Baselines are Tylo `f0315403edb2e44c7598aa0a6aff8b4d12ec3397` and
+Megakernels `121875b24a78fc964b2b29c2c37a83dd4e42b5b4`.
+The [completed batch](plans/2026-09-10-rows-boundaries.md) and
+[validation checkpoint](docs/src/validation.md) remain the starting evidence.
 
-## Outcome
+## Outcome and scope
 
-Make Tylo useful for normalization and softmax as well as matrix multiplication.
-Deliver reusable row reductions and broadcasts, complete standalone kernels, and
-an actual Megakernels consumer. Then extend the existing warp GEMM to boundary
-tiles. All required runtime acceptance can happen on the local GB10.
+Build a readable forward attention example that executes on GB10 and keeps its
+score/probability tiles off global memory. Use it to establish two concrete
+primitives: stable row statistics across tiles, and a checked conversion from
+warp MMA accumulators to a later MMA operand. Keep the dataflow visible in the
+kernel. This batch needs no Hopper or datacenter Blackwell rental.
 
-Work in the order below. Finish and validate each milestone before expanding its
-API. If the primary work finishes early, continue to the next milestone; the
-optional migration is the last item, not a competing redesign.
+Start with BF16 Q/K/V, head dimension 64, FP32 statistics/output accumulation,
+and one independent head per launch. Support runtime query/key lengths,
+rectangular tails, finite valid inputs, and a Boolean validity mask. Add causal
+masking only after the dense/masked path passes. The first schedule owns one
+query tile per CTA and streams key/value tiles using warp MMA and explicit copy
+waits/barriers. A small fixed tile choice is sufficient; sequence lengths must
+not become type parameters or grow register tuples.
 
-## 1. Row operations with explicit ownership
+A complete, measured kernel is the main deliverable. General attention APIs,
+backward kernels, dropout, paged KV caches, GQA, mixed head sizes, automatic
+pipelines, and additional instruction families are outside this batch.
 
-Introduce the smallest row-result representation and reduction/broadcast API
-needed by the consumers below. Names should follow the existing Julia interface
-once the first kernels make the contracts concrete.
+## 1. Bound the projection spill investigation
 
-Support three specific distributions:
+The current two-copy-warp persistent projection uses 80 registers, a 104-byte
+stack frame, and 144/324 bytes of spill stores/loads according to ptxas. It is
+already faster than the historical raw implementation. Fewer spills alone are
+not an acceptance criterion for replacing it.
 
-- `RowFragment`: one logical row's values are local to a lane.
-- Warp MMA accumulators: a row is distributed across the atom's lane group;
-  support repeated atoms within a warp as needed by the example.
-- A row striped over a warp: required for Megakernels' existing normalization,
-  where each lane accumulates a subset of the features.
+Use the newly committed projection as the before baseline. Keep the older
+`7770d93` comparison available, but do not label that older implementation as
+this batch's baseline. Attribute the spill instructions to producer, consumer,
+or shared control flow before changing the code; register count alone does not
+identify the cause. Examine at most two focused candidate families, such as
+shorter producer address/value live ranges and moving invariant predicates out
+of repeated copy work. Preserve 64-bit global offset safety and logical bounds.
 
-The third case matters: normalization currently combines eight warp partials
-through caller-owned shared scratch. Supporting only lane-local rows and MMA
-fragments would not establish reuse in that consumer.
+Compare persistent and separate execution, both copy-warp counts and stage
+counts, full/partial row tiles, and GEMM/gate-up operations. Retain task waits,
+ready/release barriers, immutable-weight prefetch, and timeout drain behavior.
+A candidate must pass raw-byte comparisons, representative sanitizers, and
+interleaved paired timings against the committed Tylo-backed implementation.
+Report register/stack/spill differences, resource residency and latency together.
+If neither candidate wins convincingly, retain the current path and document
+what was learned. This investigation must not delay the attention milestones.
 
-Provide FP32 row sum/max and application of a row result to its corresponding
-values, sufficient for subtraction, scaling, and normalization. Represent which
-logical rows a result belongs to and where it is replicated. A broadcast must
-preserve ownership or explicitly perform communication. Support known mappings;
-an arbitrary-layout reduction compiler is not required.
+## 2. Stable online row state
 
-Keep local arithmetic, shuffle communication, and shared-memory communication
-identifiable in the implementation and documentation. A metadata view cannot
-redistribute values. Specify collective participation independently of data
-validity; invalid values contribute identities while participating lanes still
-execute the collective. Reject unsupported distributions clearly.
+Design a small FP32 state around the existing row-ownership vocabulary. It
+carries a row maximum and an unnormalized exponential sum. Updating it with a
+score tile must expose the factor needed to rescale an existing weighted output
+accumulator, as well as the new tile's unnormalized exponential weights.
+Choose public names after the two consumers below establish the interface.
 
-Acceptance:
+For a nonempty update, the mathematical contract is:
 
-- CPU coordinate oracles cover every lane/value and resulting logical row for
-  the supported mappings, including atom repetition and row-result replication.
-- GPU reductions and broadcasts agree with independent references on asymmetric
-  data that exposes lane or row mixups, cancellation, and non-power-of-two widths.
-- Small representative probes show the intended shuffle groups and no accidental
-  local-memory materialization from dynamic tuple indexing.
-- Host-only loading continues to work without CUDA.
+```text
+m_new = max(m_old, row_max(scores))
+alpha = exp(m_old - m_new)
+p     = exp(scores - m_new), with masked entries set to zero
+l_new = alpha * l_old + row_sum(p)
+o_new = alpha * o_old + p * V
+output = o / l
+```
 
-## 2. Complete softmax examples and Megakernels normalization
+The empty state is `(m=-Inf, l=0)`. Define the empty-state and empty-chunk
+branches explicitly: never evaluate `-Inf - -Inf` or divide by zero. Fully
+masked rows produce zero output; log-sum-exp, if exposed, is `-Inf` there.
+Valid scores are finite. The weighted numerator and final normalization must
+be distinguished from already normalized probabilities.
 
-Build standalone row-softmax examples using lane-local and distributed rows,
-including a warp-MMA accumulator consumer. At least one example must actually
-produce the accumulator with MMA before applying softmax. This is a tile-local
-softmax example; do not imply it implements full attention or normalizes across
-independently scheduled output tiles.
-
-Use max subtraction and FP32 accumulation. Support finite valid inputs and
-explicitly masked entries; masked entries produce zero and a fully masked row
-produces zeros. Define this behavior before implementation. Document any other
-non-finite-input limits instead of silently inheriting incidental shuffle/max
-behavior. BF16/FP16 storage should use their Julia element types.
-
-In Megakernels, migrate the shared `RMSNorm`/`ResidualNorm` implementation and
-`AddRMSNorm` to the same row-reduction vocabulary. Preserve the scheduler's
-scratch ownership, dependency waits, worker barrier, and eight-warp combination.
-Keep the cross-warp step explicit; a new CTA synchronization framework is not
-needed to replace the warp-local reduction.
-
-Preserve the operations' distinct numerical contracts:
-
-- `ResidualNorm` rounds the updated residual to its storage type before computing
-  the norm and exposes that rounded residual to later operations.
-- `AddRMSNorm` reduces the unrounded FP32 sum already kept in shared scratch.
-
-A different reduction order may change rounding; validate against the correct
-operation reference with justified tolerances, not bitwise equality by default.
-Do not migrate unrelated attention or projection reductions as incidental cleanup.
+State and rescale factors preserve row identity and replication. A row result
+may apply to a differently wide accumulator only when its row ownership agrees.
+Retain the one-N-warp restriction; no implicit shared-memory collective or
+arbitrary-layout reduction compiler is required. Keep local arithmetic separate
+from shuffles and caller-owned synchronization.
 
 Acceptance:
 
-- Softmax checks include shifted logits, extreme finite ranges, masks, entirely
-  masked rows, irregular widths, and correct normalization of valid rows.
-- Normalization checks include widths below a warp, irregular tails, multiple
-  batches, residual rounding cases, and replay with changed input values.
-- Existing Megakernels executor and dependency tests remain green, with focused
-  integration coverage for the changed operations.
-- Run matching-toolkit memcheck, racecheck, and synccheck on representative new
-  kernels and the normalization integration. Preserve caller synchronization.
-- Benchmark against simple standalone baselines and the pre-change Megakernels
-  implementation on fixed inputs and launch settings. Report latency and
-  resource differences even if there is no speedup.
+- Independent Float64 references cover uneven chunk boundaries, changing maxima,
+  cancellation in weighted sums, large finite score shifts, and empty chunks
+  before/between/after valid chunks.
+- Chunking and merge-order checks use justified tolerances rather than assuming
+  floating-point associativity or byte identity.
+- Exercise lane-local, warp-striped and MMA row ownership only through mappings
+  already supported by Tylo; verify rescaling across differing score/output
+  widths with the same logical rows.
+- A standalone wide-row softmax uses fixed-capacity fragments: first stream to
+  compute final statistics, then reread inputs to normalize and store. It must
+  not claim to emit final probabilities before the complete denominator exists.
+- Compare the two-pass kernel with the existing softmax implementations across
+  small and wide rows. Report the extra pass and show bounded register use as
+  logical row width grows. Preserve masks and BF16/FP16 storage conversions.
 
-This is the primary deliverable: two packages using the same row operations,
-with readable examples and measured evidence.
+## 3. A checked accumulator-to-A conversion
 
-## 3. Predicated copies and ragged warp GEMM
+For the existing m16n8k16 ownership, two horizontally adjacent 16x8 C atoms
+supply a 16x16 A operand in the same lanes. A planning check compared all 256
+lane/value coordinates: A slot `e` corresponds to C slot `e % 4` in tile
+`e ÷ 4`, offset by eight columns for the second tile. This is a host coordinate
+check, not yet a GPU conversion implementation or validation.
 
-Extend the existing BF16/FP16 warp GEMM example to arbitrary positive M, N, and K
-within its existing datatype and layout scope. Derive validity from logical
-coordinates using the same partitioning as the data. Preserve the distinction
-between a tile's static capacity and its runtime valid extent.
-
-Keep the aligned interior copy path. Handle partial vectors with an explicit,
-correct boundary path: use supported zero-fill copy forms where applicable and
-a scalar fallback where alignment or a partial element vector requires it.
-Check the PTX contract before choosing the instruction path. Zero every invalid
-shared-memory element consumed by MMA, predicate output stores, and retain full
-collective participation. Test nonzero windows without losing swizzle phase.
+Implement the narrow typed conversion: FP32 values are rounded to BF16/FP16
+and packed into the instruction's four A register words, with logical
+coordinates preserved. It is numerical conversion and register packing, not a
+bit reinterpretation of FP32 values. Start at the existing atom/fragment level;
+add a plan-level overload only when the worked kernel needs it. Do not infer
+register counts from tile area or let a metadata reshape imply redistribution.
 
 Acceptance:
 
-- Cover independent M/N/K tails, dimensions smaller than a tile, one- and
-  two-stage pipelines, plain/swizzled shared layouts, and padded leading strides.
-- Compare with an independent numerical reference and use output sentinels plus
-  sanitizer runs to detect invalid reads/writes and stale shared-memory tails.
-- Recheck representative aligned code generation and timing; explain any
-  regression. Measure boundary overhead separately from aligned throughput.
-- Document the coordinate/mask contract with one worked edge-tile example.
+- An independent coordinate oracle checks every source/destination value,
+  repeated M atoms, adjacent N atoms, and rejection of incompatible ownership.
+- GPU round-trip probes compare packed words with the established shared-memory
+  store/load route, including rounding ties, signed zero, finite extremes, and
+  asymmetric per-lane values. Spell out the non-finite conversion contract.
+- A chained MMA computes a first product, converts its result, and consumes it
+  in a second product; compare with a reference that rounds at the same boundary.
+- Representative generated code has the required conversions/packing, without
+  unexpected lane shuffles, local-memory materialization or shared staging for
+  this same-lane mapping. A mapping that needs communication must be rejected
+  or use an explicitly implemented communication path.
 
-## 4. Optional: migrate the legacy warp projection
+This is the next concrete layout lesson: identify when a conversion is local,
+prove the coordinate correspondence, and make any movement explicit. A generic
+register redistribution engine or separate Laythe package is not a prerequisite.
 
-After milestones 1–3 are complete, assess `AsyncProjection` in Megakernels as a
-second consumer of Tylo's warp MMA and copy primitives. Migrate it only if the
-existing APIs express its ownership and pipeline without inventing a new general
-framework. Preserve GEMM/gate-up behavior and the scheduler's synchronization.
+## 4. A complete streaming attention consumer
 
-Require runtime comparisons, resource inspection, and before/after timings for
-this migration too. Remove private tile helpers only when all their real users
-have moved. If it exposes a larger missing abstraction, write the concrete gap
-and leave this migration for the following batch.
+Compose QK transpose, online softmax, output rescaling, the checked probability
+conversion, and PV into a forward kernel in a new example directory. Preserve
+the existing datacenter Blackwell attention example and its reference digest.
+Use the current explicit storage views, bounded copies and caller-owned stage
+protocol; begin with a simple schedule before attempting overlap optimization.
 
-## Execution and evidence
+Keep row ownership compatible between score and output accumulators so the
+online rescale factor applies without cross-warp communication. Store only the
+final output to global memory; the score/probability workspace must not scale
+as query length times key length. Query/key tails still participate in full
+warp collectives and contribute masked values. A real validity mask should
+exercise fully masked rows even when dense causal attention would not.
 
-Use an isolated test environment with the last validated PTX revision
-`32e36c122bc1c7af5f171cf478324b628b06af3a`, or deliberately update that pin with
-fresh validation if a needed capability requires it. Do not consume unrelated
-in-progress PTX checkout changes as a moving dependency.
+BF16 probability conversion before PV is an explicit numerical boundary.
+Statistics remain FP32, while the numerator uses the converted weights. Use
+both an independent high-precision attention reference and a diagnostic
+reference with the same conversion boundary. Do not silently compare differently
+rounded algorithms as if they were byte-identical. Use absolute error criteria
+for cancellation near zero as well as relative/scale-aware checks elsewhere.
 
-Run focused checks while iterating, then the relevant complete Tylo and
-Megakernels suites once the batch settles. Existing Hopper/TMEM assembly tests
-remain regression checks; their execution status stays hardware-pending.
-Keep validation proportional to changed behavior rather than maximizing counts.
+Acceptance:
 
-Produce a dated report with exact source/dependency revisions or hashes, commands,
-correctness and sanitizer results, compiler/resource evidence, and reproducible
-warm benchmark results. Separate compilation, packing, and transfer costs from
-steady-state kernel timing; distinguish individual operations from whole-program
-measurements. End with a short explanation of which abstraction became reusable,
-where specialization remains, and what the measurements justify doing next.
+- Execute multiple key-tile iterations, query/key tails, nonzero tile origins,
+  changed-input graph replay, fully masked rows, and extreme finite inputs.
+- Validate lengths below a tile and several uneven larger lengths. Keep head
+  dimension 64 and BF16 inputs fixed for this batch's required attention path.
+- Run memcheck, racecheck and synccheck on the entire copy/compute/reuse protocol.
+- Compare steady-state kernel time and allocated workspace with a materialized
+  QK/softmax/PV baseline using the same inputs, masks, scaling and documented
+  rounding. Use cuBLAS for baseline matrix products where available; keep
+  precision settings explicit. This is not a claim against a tuned FA library.
+- Save PTX, cubins and ptxas/SASS resource evidence. Separate compilation,
+  preparation/packing and transfers from warm kernel timings. Report regressions
+  and resource limits alongside improvements.
 
-The main work needs no Hopper rental. Keep the existing TMA/WGMMA runtime suite
-ready for H100/H200, and TMEM/tcgen05 execution for datacenter Blackwell. Further
-WGMMA pipeline tuning, full attention, automatic pipelines, generic register
-redistribution, new numerical formats, and extracting Laythe are outside this
-batch. Recover old layout-algebra ideas only when a concrete operation needs them.
+Do not retune the Megakernels scheduler or replace decoder attention just to
+install the new standalone kernel. Prefill tiles and single-query decode have
+different reuse and parallelism constraints.
+
+## 5. Optional second consumer: split-attention statistics
+
+After the standalone kernel passes, assess `Megakernels.AttentionMerge` as a
+consumer of the same stable summary/merge arithmetic. Its existing contract is
+one maximum, exponential sum, and unnormalized weighted numerator per KV split.
+It already demonstrates why the empty split and rescale rules matter.
+
+Migrate only if the new helper expresses that arithmetic without widening its
+ownership model or changing the task graph. Preserve scratch ownership, task
+dependencies, final normalization, and empty-split behavior. Run the decoder
+reference/replay suite, paired before/after timing, and the full sanitizer
+workload. No decode speedup is assumed. If it needs a distinct communication
+abstraction, document the gap and leave this consumer unchanged.
+
+## Reference study and evidence
+
+Read the specific operations that motivate this batch, not entire frameworks:
+
+- CUTLASS `examples/python/CuTeDSL/cute/ampere/kernel/attention/flash_attention_v2.py`:
+  online row state, output rescaling, and its accumulator-to-A layout conversion.
+  Inspected checkout: `147295a3d4b75f3aeff247c25b8927cea9a7006a`.
+- CUTLASS `examples/41_fused_multi_head_attention/kernel_forward.h`:
+  `iterative_softmax`, empty-state handling and weighted-output rescaling.
+- ThunderKittens `kernels/attention/mha_h100/mha_h100.cu`:
+  row max/sum, probability conversion and the division of responsibility between
+  register primitives and the surrounding pipeline. Its WGMMA schedule is a
+  reference to study, not a schedule validated for GB10.
+  Inspected checkout: `be0e7e57e90858dfa2bbeab7296ff252755f8a37`.
+- Existing Tylo MMA/softmax and Megakernels `DecodeAttention`/`AttentionMerge`:
+  the local ownership and numerical contracts that must remain coherent.
+
+Keep the isolated PTX revision
+`32e36c122bc1c7af5f171cf478324b628b06af3a` unless a concrete missing capability
+justifies a separately validated update. Do not use the moving PTX working tree
+as an accidental dependency. Record hashes of any modified reference source.
+
+Finish focused checks while iterating, then run the relevant complete suites,
+documentation and final sanitizers once code settles. Keep the old aligned GEMM,
+TMA, Hopper assembly and datacenter Blackwell attention comparisons as regression
+checks. H100/H200 WGMMA runtime and B200/B300 TMEM/attention runtime remain pending;
+GB10 results must not relabel those as validated.
+
+Produce a dated report with exact source/dependency revisions, raw paired timing
+samples, numerical/error criteria, resource evidence and commands. Include a
+short explanation of what row state and the operand conversion made reusable,
+and which communication/lifetime choices remain in the kernel. Commit completed
+milestones with their evidence before opening another batch.
