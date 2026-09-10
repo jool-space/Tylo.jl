@@ -1,0 +1,686 @@
+[[kernels]]
+name = "attention-ReferenceAttention-100-arch-splitpfalse"
+instructions = 3960
+local_loads = 16
+local_stores = 19
+target = "sm_100a"
+resources = ["88 bytes stack frame, 60 bytes spill stores, 72 bytes spill loads", "Used 128 registers, used 16 barriers, 88 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-ReferenceAttention-100-arch-splitptrue"
+instructions = 4400
+local_loads = 95
+local_stores = 99
+target = "sm_100a"
+resources = ["80 bytes stack frame, 380 bytes spill stores, 388 bytes spill loads", "Used 128 registers, used 16 barriers, 80 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-ReferenceAttention-100-family-splitpfalse"
+instructions = 3960
+local_loads = 16
+local_stores = 19
+target = "sm_100f"
+resources = ["88 bytes stack frame, 60 bytes spill stores, 72 bytes spill loads", "Used 128 registers, used 16 barriers, 88 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-ReferenceAttention-100-family-splitptrue"
+instructions = 4400
+local_loads = 95
+local_stores = 99
+target = "sm_100f"
+resources = ["80 bytes stack frame, 380 bytes spill stores, 388 bytes spill loads", "Used 128 registers, used 16 barriers, 80 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-ReferenceAttention-103-arch-splitpfalse"
+instructions = 3904
+local_loads = 33
+local_stores = 33
+target = "sm_103a"
+resources = ["136 bytes stack frame, 116 bytes spill stores, 140 bytes spill loads", "Used 128 registers, used 16 barriers, 136 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-ReferenceAttention-103-arch-splitptrue"
+instructions = 4344
+local_loads = 109
+local_stores = 110
+target = "sm_103a"
+resources = ["128 bytes stack frame, 424 bytes spill stores, 444 bytes spill loads", "Used 128 registers, used 16 barriers, 128 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-TiledAttention-100-arch-splitpfalse"
+instructions = 3960
+local_loads = 16
+local_stores = 19
+target = "sm_100a"
+resources = ["88 bytes stack frame, 60 bytes spill stores, 72 bytes spill loads", "Used 128 registers, used 16 barriers, 88 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-TiledAttention-100-arch-splitptrue"
+instructions = 4400
+local_loads = 95
+local_stores = 99
+target = "sm_100a"
+resources = ["80 bytes stack frame, 380 bytes spill stores, 388 bytes spill loads", "Used 128 registers, used 16 barriers, 80 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-TiledAttention-100-family-splitpfalse"
+instructions = 3960
+local_loads = 16
+local_stores = 19
+target = "sm_100f"
+resources = ["88 bytes stack frame, 60 bytes spill stores, 72 bytes spill loads", "Used 128 registers, used 16 barriers, 88 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-TiledAttention-100-family-splitptrue"
+instructions = 4400
+local_loads = 95
+local_stores = 99
+target = "sm_100f"
+resources = ["80 bytes stack frame, 380 bytes spill stores, 388 bytes spill loads", "Used 128 registers, used 16 barriers, 80 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-TiledAttention-103-arch-splitpfalse"
+instructions = 3904
+local_loads = 33
+local_stores = 33
+target = "sm_103a"
+resources = ["136 bytes stack frame, 116 bytes spill stores, 140 bytes spill loads", "Used 128 registers, used 16 barriers, 136 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "attention-TiledAttention-103-arch-splitptrue"
+instructions = 4344
+local_loads = 109
+local_stores = 110
+target = "sm_103a"
+resources = ["128 bytes stack frame, 424 bytes spill stores, 444 bytes spill loads", "Used 128 registers, used 16 barriers, 128 bytes cumulative stack size", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads"]
+[[kernels]]
+name = "correction"
+instructions = 160
+local_loads = 0
+local_stores = 0
+target = "sm_100a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 94 registers, used 0 barriers"]
+[[kernels]]
+name = "epilogue"
+instructions = 128
+local_loads = 0
+local_stores = 0
+target = "sm_100a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 72 registers, used 0 barriers"]
+[[kernels]]
+name = "fragments"
+instructions = 192
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 40 registers, used 0 barriers"]
+[[kernels]]
+name = "gemm-BFloat16-false-sm\"100a\""
+instructions = 520
+local_loads = 0
+local_stores = 0
+target = "sm_100a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-BFloat16-false-sm\"121a\""
+instructions = 536
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-BFloat16-false-sm\"80\""
+instructions = 504
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers, 492 bytes cmem[0]"]
+[[kernels]]
+name = "gemm-BFloat16-false-sm\"90a\""
+instructions = 520
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-BFloat16-true-sm\"100a\""
+instructions = 536
+local_loads = 0
+local_stores = 0
+target = "sm_100a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-BFloat16-true-sm\"121a\""
+instructions = 552
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-BFloat16-true-sm\"80\""
+instructions = 520
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers, 492 bytes cmem[0]"]
+[[kernels]]
+name = "gemm-BFloat16-true-sm\"90a\""
+instructions = 536
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-Float16-false-sm\"100a\""
+instructions = 520
+local_loads = 0
+local_stores = 0
+target = "sm_100a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-Float16-false-sm\"121a\""
+instructions = 536
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-Float16-false-sm\"80\""
+instructions = 504
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers, 492 bytes cmem[0]"]
+[[kernels]]
+name = "gemm-Float16-false-sm\"90a\""
+instructions = 520
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-Float16-true-sm\"100a\""
+instructions = 536
+local_loads = 0
+local_stores = 0
+target = "sm_100a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-Float16-true-sm\"121a\""
+instructions = 552
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "gemm-Float16-true-sm\"80\""
+instructions = 520
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers, 492 bytes cmem[0]"]
+[[kernels]]
+name = "gemm-Float16-true-sm\"90a\""
+instructions = 536
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 80 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n128-p1-s1"
+instructions = 728
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 90 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n128-p1-s2"
+instructions = 736
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 90 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n16-p1-s1"
+instructions = 280
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 34 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n16-p1-s2"
+instructions = 288
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 34 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n24-p1-s1"
+instructions = 304
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n24-p1-s2"
+instructions = 320
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n256-p1-s1"
+instructions = 1256
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 154 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n256-p1-s2"
+instructions = 1272
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 154 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n64-p1-s1"
+instructions = 472
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 58 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n64-p1-s2"
+instructions = 480
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 58 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n8-p1-s1"
+instructions = 216
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n8-p1-s2"
+instructions = 232
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n8-p4-s1"
+instructions = 240
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 42 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-BFloat16-n8-p4-s2"
+instructions = 256
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 42 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n128-p1-s1"
+instructions = 728
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 90 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n128-p1-s2"
+instructions = 736
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 90 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n16-p1-s1"
+instructions = 280
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 34 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n16-p1-s2"
+instructions = 288
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 34 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n24-p1-s1"
+instructions = 304
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n24-p1-s2"
+instructions = 320
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n256-p1-s1"
+instructions = 1256
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 154 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n256-p1-s2"
+instructions = 1272
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 154 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n64-p1-s1"
+instructions = 472
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 58 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n64-p1-s2"
+instructions = 480
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 58 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n8-p1-s1"
+instructions = 216
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n8-p1-s2"
+instructions = 232
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n8-p4-s1"
+instructions = 240
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 42 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-Float16-n8-p4-s2"
+instructions = 256
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 42 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n24-k16-p1"
+instructions = 200
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n24-k32-p1"
+instructions = 208
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n24-k32-p2"
+instructions = 232
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 50 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n24-k64-p1"
+instructions = 216
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n24-k64-p4"
+instructions = 288
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 74 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n8-k16-p1"
+instructions = 136
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n8-k32-p1"
+instructions = 144
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n8-k32-p2"
+instructions = 152
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 34 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n8-k64-p1"
+instructions = 152
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-BFloat16-n8-k64-p4"
+instructions = 176
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 42 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n24-k16-p1"
+instructions = 192
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n24-k32-p1"
+instructions = 200
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n24-k32-p2"
+instructions = 224
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 50 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n24-k64-p1"
+instructions = 208
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 38 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n24-k64-p4"
+instructions = 280
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 74 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n8-k16-p1"
+instructions = 128
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n8-k32-p1"
+instructions = 136
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n8-k32-p2"
+instructions = 144
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 34 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n8-k64-p1"
+instructions = 144
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 1 barriers"]
+[[kernels]]
+name = "hopper-origin-Float16-n8-k64-p4"
+instructions = 168
+local_loads = 0
+local_stores = 0
+target = "sm_90a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 42 registers, used 1 barriers"]
+[[kernels]]
+name = "operand-a-BFloat16-sm\"121a\""
+instructions = 48
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 20 registers, used 0 barriers"]
+[[kernels]]
+name = "operand-a-BFloat16-sm\"80\""
+instructions = 40
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 20 registers, used 0 barriers, 448 bytes cmem[0]"]
+[[kernels]]
+name = "operand-a-Float16-sm\"121a\""
+instructions = 48
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 20 registers, used 0 barriers"]
+[[kernels]]
+name = "operand-a-Float16-sm\"80\""
+instructions = 40
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 20 registers, used 0 barriers, 448 bytes cmem[0]"]
+[[kernels]]
+name = "ragged-gemm-sm\"121a\""
+instructions = 2768
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 96 registers, used 1 barriers"]
+[[kernels]]
+name = "ragged-gemm-sm\"80\""
+instructions = 2752
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 128 registers, used 1 barriers, 492 bytes cmem[0]"]
+[[kernels]]
+name = "rows-MMA16x8x16-4-sm\"121a\""
+instructions = 64
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 28 registers, used 0 barriers"]
+[[kernels]]
+name = "rows-MMA16x8x16-4-sm\"80\""
+instructions = 56
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 28 registers, used 0 barriers, 496 bytes cmem[0]"]
+[[kernels]]
+name = "rows-Val-17-sm\"121a\""
+instructions = 112
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 44 registers, used 0 barriers"]
+[[kernels]]
+name = "rows-Val-17-sm\"80\""
+instructions = 104
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 44 registers, used 0 barriers, 496 bytes cmem[0]"]
+[[kernels]]
+name = "rows-Val-3-sm\"121a\""
+instructions = 56
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 22 registers, used 0 barriers"]
+[[kernels]]
+name = "rows-Val-3-sm\"80\""
+instructions = 56
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 24 registers, used 0 barriers, 496 bytes cmem[0]"]
+[[kernels]]
+name = "softmax-mma"
+instructions = 1136
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 74 registers, used 1 barriers"]
+[[kernels]]
+name = "softmax-streaming-sm\"121a\""
+instructions = 560
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 29 registers, used 0 barriers"]
+[[kernels]]
+name = "softmax-streaming-sm\"80\""
+instructions = 528
+local_loads = 0
+local_stores = 0
+target = "sm_80"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 30 registers, used 0 barriers, 488 bytes cmem[0]"]
+[[kernels]]
+name = "softmax-warp"
+instructions = 360
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 26 registers, used 0 barriers"]
+[[kernels]]
+name = "streaming-attention-causal-false"
+instructions = 2576
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 191 registers, used 1 barriers"]
+[[kernels]]
+name = "streaming-attention-causal-true"
+instructions = 2680
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 190 registers, used 1 barriers"]
+[[kernels]]
+name = "tmem-roundtrip"
+instructions = 472
+local_loads = 0
+local_stores = 0
+target = "sm_100a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 136 registers, used 1 barriers, 4 bytes smem"]

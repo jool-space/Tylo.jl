@@ -1,0 +1,178 @@
+{
+  "README.md": {
+    "bytes": 815,
+    "sha256": "25c10cdb55a1c35f660d21d3106da7188e6999394d36a3a4e18e6e22ce84ddeb"
+  },
+  "attention-benchmark.log": {
+    "bytes": 1538,
+    "sha256": "899f8abc61d95d3eba629a6095e140da125f4cd10c860900f80587437ec63696"
+  },
+  "attention.toml": {
+    "bytes": 16570,
+    "sha256": "20ec57c5abb782fad7eaab8cb0b69f4293f8c6320df5f42f99f42138363798f8"
+  },
+  "checkpoint.md": {
+    "bytes": 17062,
+    "sha256": "be7bfc84458a0bdc23e31fc941fb57ebac8068c22faf02a74d1944a3612d88a8"
+  },
+  "codegen.tar.gz": {
+    "bytes": 4285805,
+    "sha256": "684111c6e041b4bb83debac1394d1cd0b661a43e4fe553fae87583bfb0aea340"
+  },
+  "megakernels-memcheck.log": {
+    "bytes": 813,
+    "sha256": "81e0d7479e5100cc26b0fd552ac39dda5efda792458c03b1441aa6728fcd260f"
+  },
+  "megakernels-racecheck.log": {
+    "bytes": 853,
+    "sha256": "7ca3f453e7320891403e3c3bf7385502f433df995aa93c26e98197e8487ffb27"
+  },
+  "megakernels-synccheck.log": {
+    "bytes": 813,
+    "sha256": "2f9dfbc67f7d6f58fc91515a25e4da48b2b6b5f8a062befcefb7cef5e97e7cff"
+  },
+  "megakernels-tylo-env-Manifest.toml": {
+    "bytes": 19729,
+    "sha256": "bea1179d6d3cf8b830a1e58e80d1235c6a9841ae11e5790ce63c2f6a573fe1b9"
+  },
+  "megakernels-tylo-env-Project.toml": {
+    "bytes": 696,
+    "sha256": "39d27746ad146b492faa225d18937b42449d71e2272698b10da128e104dae4a6"
+  },
+  "megakernels.log": {
+    "bytes": 1832,
+    "sha256": "894560f51699a248759bd539304b052d8455331778ee7d2711ce243df72a4727"
+  },
+  "package-streaming-evidence.py": {
+    "bytes": 4733,
+    "sha256": "059b7f7771a8f995d01f0cdc5b63ad385252266d3c891e6479904c6281e139f0"
+  },
+  "ptx-source-sha256.json": {
+    "bytes": 64800,
+    "sha256": "d8031bb37395a5d5fa53f080509ff05af5a0c1d8cbd797af48b3f38497d5322d"
+  },
+  "resources-final.log": {
+    "bytes": 15654,
+    "sha256": "e78d705002c0608b7b01fc03f1a7cda0ca83dc287665b15b8fbcf1425afe5ef3"
+  },
+  "resources.log": {
+    "bytes": 15654,
+    "sha256": "e78d705002c0608b7b01fc03f1a7cda0ca83dc287665b15b8fbcf1425afe5ef3"
+  },
+  "resources.toml": {
+    "bytes": 26435,
+    "sha256": "1043a074229dc20f610efb2a812b7edc88670fd37cd5eac6080c956d84f2aa3f"
+  },
+  "softmax-benchmark.log": {
+    "bytes": 1110,
+    "sha256": "409cf02a239ec41d19ee2a5153cc602ef1f3a022ccc7aacd14e709c5d56dcd63"
+  },
+  "softmax.toml": {
+    "bytes": 14562,
+    "sha256": "ba0f4ab5d72237e3a1a5a800e367dd2b47189c2de98a211fc3ce34c6973d9d06"
+  },
+  "source-sha256.json": {
+    "bytes": 13229,
+    "sha256": "ad55a1cd58f13b377767e942715ec32c93a658f88446a35e385a24a5ae01c272"
+  },
+  "source.tar.gz": {
+    "bytes": 129124,
+    "sha256": "7764809c8ab05fb4e5536ae84fd2664ebe8d0ca9cca0ade5dbc2c31c6bbd2f6c"
+  },
+  "spill-experiment.tar.gz": {
+    "bytes": 3030387,
+    "sha256": "77fe92174326c0c17d019615792c289f72fee66d6f829c56f16bae8c2b1dc0fc"
+  },
+  "streaming-docs-2.log": {
+    "bytes": 614,
+    "sha256": "57a7aa1479899ca57652f76ec0394bc4d0c5be5fe0b11bb65fba1f561e769e93"
+  },
+  "streaming-example-env-Manifest.toml": {
+    "bytes": 18226,
+    "sha256": "ff71d245a385cec9e10c4d7e8b74804ee412e205b2edf18117bbb251019e370b"
+  },
+  "streaming-example-env-Project.toml": {
+    "bytes": 405,
+    "sha256": "f97f2ef5a2b5650bb64bdc0740b192d3b93a47ef2ac1ec10884e6dff4700efb0"
+  },
+  "streaming-example-instantiate.log": {
+    "bytes": 3832,
+    "sha256": "90a34e5903ad2ead7f826d2c0ee485a37a920b3aa90dcd45ef2c5ecd9cb93736"
+  },
+  "streaming-final-docs.log": {
+    "bytes": 614,
+    "sha256": "57a7aa1479899ca57652f76ec0394bc4d0c5be5fe0b11bb65fba1f561e769e93"
+  },
+  "streaming-hopper-runner-2.log": {
+    "bytes": 2721,
+    "sha256": "dc42520270059dab693969f0b3029b0c62415549c1c593ac7da22bd1a587db54"
+  },
+  "streaming-host-loading.log": {
+    "bytes": 41,
+    "sha256": "3db6e8d74bbc4c2fff955c53c21ed70cc7837883ffbd5cbc7808b8ddf38589b4"
+  },
+  "streaming-offline-new.log": {
+    "bytes": 340,
+    "sha256": "ca134493b47ddde23963ca6b38c1b0a294fd10002b4d35412cab37bbe56b04eb"
+  },
+  "streaming-post-validation.py": {
+    "bytes": 1558,
+    "sha256": "41ea8dbb4e93064a418c3b429bca263e4cf810e0f03c766a2e0cba8352e8394b"
+  },
+  "streaming-validation.py": {
+    "bytes": 1595,
+    "sha256": "1e0928747ccd33aa971d2ca3fb63e29912c66f64b5bff3bce4f71fe208c20c12"
+  },
+  "tylo-gpu-final.log": {
+    "bytes": 3516,
+    "sha256": "3ae02c48a5dff469b47c6d95da821df1a30ca2e813fcfa579b39ae6d94c04189"
+  },
+  "tylo-gpu.log": {
+    "bytes": 3516,
+    "sha256": "32af444c82019fa80c1ce871e1ea05b1afbbaa037099cb4d3d74fa90bfae1e12"
+  },
+  "tylo-hopper-env-Manifest.toml": {
+    "bytes": 17936,
+    "sha256": "2d04b5b010e4fe17030155ee761497b534d80c9999d6b7821fd2e67aa504634d"
+  },
+  "tylo-hopper-env-Project.toml": {
+    "bytes": 527,
+    "sha256": "556f7c2a1ca04060406990c6e02e7f4392d99ddeadad7c6697d66be96e90e5f3"
+  },
+  "tylo-hopper-host111-env-Manifest.toml": {
+    "bytes": 4105,
+    "sha256": "41e6123dc2462f26aa584ba0835b24ce7ef0117088a152d71227c0fbbab5837d"
+  },
+  "tylo-hopper-host111-env-Project.toml": {
+    "bytes": 204,
+    "sha256": "46a13067072e0af3c8e40e2ef76c9ddb2f316f40f6911d91147b12737bd6a03f"
+  },
+  "tylo-host.log": {
+    "bytes": 1574,
+    "sha256": "92ba75136e2f2010aaad39fcb16505caaf2b09e7f4e5e4b0c621cf13570c1b72"
+  },
+  "tylo-host111.log": {
+    "bytes": 1696,
+    "sha256": "6a52bad08c36e64398468052c04cff5dc17e4795bb7b9a664efde0bfcc3adb28"
+  },
+  "tylo-memcheck.log": {
+    "bytes": 1831,
+    "sha256": "ccb147d0de9fc6b0e1b6f3fdba1043f6fd269d775131cd894f888855bc9464f1"
+  },
+  "tylo-racecheck.log": {
+    "bytes": 1869,
+    "sha256": "c6f3ae1aa34e378863c688ee94b000b685e8622d32eb05021d57f9f97b73eed4"
+  },
+  "tylo-synccheck.log": {
+    "bytes": 1831,
+    "sha256": "81872eae1286e9e2ec50e793af3d8b3baf1851d10ed26930a986a6783c2787c5"
+  },
+  "validation.json": {
+    "bytes": 7520,
+    "sha256": "f831794cd8103902c81ed343573c84bfe2e23e624df75e0f633de4f6b302109a"
+  },
+  "wide-softmax-resources.toml": {
+    "bytes": 513,
+    "sha256": "4ecfc9b0e83997e36146dc00bab429c5fa370238cd3e40ed19efc3c52a579d4a"
+  }
+}

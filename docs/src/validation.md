@@ -1,5 +1,129 @@
 # Validation
 
+## 2026-09-10: streaming row state and complete GB10 attention
+
+Implementation: `60dda118bfc6d65a3b5b0b72fcba8c3d728eb68f`. This batch adds
+`SoftmaxState`, stable tile updates/summary merges, a checked same-lane
+accumulator-to-A conversion, fixed-capacity two-pass softmax, and complete
+single-head BF16 forward attention with D=64. The dataflow and numerical
+contract are described in [Streaming rows and chained MMA](@ref).
+
+The isolated PTX dependency remains
+`32e36c122bc1c7af5f171cf478324b628b06af3a`; all 543 snapshot files were checked
+against that commit. GB10 uses Julia 1.12.7, CUDACore/cuBLAS 6.3.1, CUDA
+compiler 13.3.73 and runtime 13.3.0. Host checks also pass on Julia 1.11.9.
+
+| Check | Result |
+|:--|:--|
+| Host contracts, coordinates and arithmetic | 30,235 passed on each Julia version |
+| Host loading without CUDA; method ambiguities | Passed |
+| Full Tylo GPU suite | 2,985 passed; three expected hardware skips |
+| Offline / supported-runtime checks within that suite | 632 / 2,353 |
+| New assembly checks with CUDA devices hidden | 20 passed |
+| Megakernels complete suite | 238,348 passed; one expected Hopper skip |
+| Both packages: memcheck / racecheck / synccheck | All six passed, zero errors and race warnings |
+| Hopper runner tests | Nine passed using fixtures; no Hopper hardware claim |
+| Documentation and isolated example environment | Built; instantiated/loaded successfully |
+
+Runtime coverage includes empty chunks and key sets, changing maxima, weighted
+cancellation, BF16/FP16 rounding ties and subnormals, signed zero/non-finite
+conversion contracts, chained MMA, multiple key iterations, nonzero query tile
+origins, masks, causal tails, compact/padded V and changed-input graph replay.
+The 27,652 accumulator-conversion coordinate checks use an independent oracle.
+
+### Attention performance and workspace
+
+All timings below are microseconds: medians of 41 interleaved samples, each
+containing eight warmed graph repetitions. Inputs, effective masks and scale
+are identical within each pair. Compilation, preparation and transfers are
+excluded. Clocks were not fixed. These compare the worked kernel against a
+materialized cuBLAS QK / scalar warp softmax / cuBLAS PV baseline, not a tuned
+FlashAttention library.
+
+| Queries×keys | Mask/storage | Streaming | Materialized cuBLAS |
+|:--|:--|--:|--:|
+| 64×64 | masked | 22.15 | 11.98 |
+| 129×257 | masked | 105.85 | 34.46 |
+| 256×256 | masked | 61.20 | 23.05 |
+| 1024×1024 | masked | 186.39 | 120.64 |
+| 2048×2048 | masked | 355.90 | 429.65 |
+| 1024×1024 | causal | 206.46 | 105.48 |
+| 129×257 | masked, padded V | 76.25 | 34.38 |
+
+The 2048×2048 case is about 17% faster in this run and avoids the baseline's
+24 MiB of explicit score/probability buffers. Small/medium cases remain slower.
+The arbitrary Boolean mask is common input and still occupies M×N bytes;
+input/output storage and cuBLAS internal workspace are excluded from the
+workspace comparison. The streaming kernel uses 16 KiB shared memory per CTA
+and no explicit global score/probability workspace.
+
+Runtime compilation reports 193 registers and zero local bytes. Offline SM121a
+assembly reports 191 registers (masked) / 190 (causal), with zero stack frame
+and zero spill loads/stores. These are different compiler configurations;
+resource counters are kept with their corresponding artifacts. Runtime occupancy
+queries allow two 128-thread CTAs per SM, or 16.7% theoretical warp occupancy.
+GB10 has 48 SMs, while the benchmark grids contain only 1–32 query CTAs. This
+schedule consequently leaves substantial parallelism unused. The causal kernel
+also visits future key tiles, and compact ragged V often requires scalar copies.
+
+FP32 statistics use unrounded exponential weights; the numerator consumes BF16
+weights rounded per 32-key tile. The baseline rounds normalized probabilities
+to BF16. Both use FP32 matrix-product outputs; cuBLAS uses explicit
+`CUBLAS_COMPUTE_32F` and `DEFAULT_MATH`. The largest measured absolute error
+against the Float64 reference was 0.00244 for streaming and 0.00381 for the
+baseline (causal case). Runtime tests additionally use an independent reference
+with the per-tile BF16 boundary. Cancellation is assessed with absolute bounds.
+The baseline's device scalars are allocated before graph capture and retained
+across replay, as are all input/output/workspace buffers.
+
+### Fixed-capacity wide-row softmax
+
+These are medians of 41 interleaved samples of 16-kernel graphs, on 1,024 FP32
+rows with identical masks. All sequence widths use the same four-value-per-lane
+streaming specialization.
+
+| Width | Scalar three-pass | Full-row registers | Streaming two-pass | Registers: full / streaming |
+|--:|--:|--:|--:|--:|
+| 31 | 4.97 | 3.56 | 4.33 | 18 / 29 |
+| 97 | 8.79 | 6.35 | 6.36 | 27 / 29 |
+| 257 | 18.03 | 12.12 | 15.97 | 40 / 29 |
+| 1024 | 81.25 | 63.05 | 54.15 | 96 / 29 |
+| 4099 | 581.71 | 507.93 | 387.29 | 255 / 29 |
+
+The full-row implementation is preferable for small rows. Streaming becomes
+useful as register capacity limits the full-row approach. At width 4099, the
+runtime full-row kernel reports 255 registers and 328 local bytes; the separately
+emitted kernel has a 336-byte stack frame and 388/332 spill-store/load bytes.
+Streaming remains at 29 registers and zero local/stack/spill storage on GB10.
+Its extra read and per-chunk reductions are real costs, not hidden work.
+
+### Regressions and the layer boundary
+
+All 16 aligned GEMM assemblies retain 80 registers and zero stack/spill storage.
+The existing TMA and Hopper assembly checks pass. All six paired datacenter
+Blackwell attention comparisons retain identical executable bytes. H100/H200
+WGMMA execution and B200/B300 TMEM/attention execution remain pending; GB10
+results do not validate those paths.
+
+The bounded Megakernels spill experiment moved fast-path eligibility to host
+preparation. It removed spills in two-copy-warp cases but introduced them in a
+small one-copy-warp case, with only modest persistent timing gains. It was
+reverted; the candidate and paired data are preserved in Megakernels' report
+commit `650716a`. `AttentionMerge` remains unchanged: its two-pass scalar factor
+calculation is a different consumer than incremental weighted-output updates.
+
+The reusable parts are row identity/statistics and the proven local register
+conversion. Allocation, copy staging, collective participation and lifetime
+remain explicit in the consumer. Next performance work should test smaller
+query CTAs and copy overlap, with the same references and paired measurements,
+before adding another general scheduling or layout abstraction.
+
+Compact raw samples, resource tables, source hashes and commands are in
+[the evidence directory](https://github.com/jool-space/Tylo.jl/tree/main/docs/validation/streaming-2026-09-10).
+The local `reports/streaming-attention-2026-09-10/` archive additionally contains
+full logs, exact source/environment snapshots, PTX/cubins/SASS and an artifact
+SHA256 index. It stays outside Git; its receipt is included in the compact report.
+
 ## 2026-09-10: rows, boundaries, and two Megakernels consumers
 
 The GB10 batch adds FP32 row sums/maxima and broadcasts for lane-local,

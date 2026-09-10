@@ -1,0 +1,14 @@
+[[kernels]]
+name = "softmax-full-register-129"
+instructions = 9392
+local_loads = 73
+local_stores = 87
+target = "sm_121a"
+resources = ["336 bytes stack frame, 388 bytes spill stores, 332 bytes spill loads", "Used 255 registers, used 0 barriers, 336 bytes cumulative stack size"]
+[[kernels]]
+name = "softmax-full-register-32"
+instructions = 2352
+local_loads = 0
+local_stores = 0
+target = "sm_121a"
+resources = ["0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads", "Used 96 registers, used 0 barriers"]
