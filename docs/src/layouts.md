@@ -116,6 +116,10 @@ shared layouts and explicit completion rules. Megakernels is its second
 consumer. The next datacenter path can connect TMA, tcgen05 MMA and the
 existing TMEM operations. See [TMA and Hopper WGMMA](@ref) for current limits.
 
-General inverses/complements, arbitrary fragment redistribution, general masked
-partial tiles, additional dtypes and automatic allocation remain future
-work. They should arrive with kernels that need and validate them.
+Row reductions and broadcasts now cover lane-local, warp-striped, and tiled
+MMA distributions; see [Row reductions and broadcasts](@ref). Rectangular
+bounds and partial vectors are handled by [Boundary tiles](@ref).
+
+General inverses/complements, arbitrary fragment redistribution, additional
+dtypes and automatic allocation remain future work. They should arrive with
+kernels that need and validate them.

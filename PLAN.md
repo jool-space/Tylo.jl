@@ -1,6 +1,8 @@
-# Next batch: reductions, broadcasts, and boundary tiles
+# GB10 batch: reductions, broadcasts, and boundary tiles
 
-Scoped 2026-09-10. This is an execution plan; the work below is not yet implemented.
+Scoped 2026-09-10. All four implementation milestones are complete on GB10.
+The acceptance plan is retained below; the final checkpoint is recorded in
+`docs/src/validation.md` and `reports/rows-boundaries-2026-09-10/`.
 
 ## Outcome
 

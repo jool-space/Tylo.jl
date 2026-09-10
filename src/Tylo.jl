@@ -2,6 +2,8 @@ module Tylo
 
 using BFloat16s: BFloat16
 
+export WarpRowFragment, RowValues, row_ownership, row_coordinate, row_sum, row_max, row_map
+
 export TMALoad, prepare_tma, shared_layout, shared_tile, transfer_bytes, tma_load!,
        WGMMA64, validate_wgmma, wgmma_operand, mma_async, wait_mma, finish_mma
 
@@ -19,6 +21,7 @@ include("tmem.jl")
 include("memory.jl")
 include("copy.jl")
 include("mma.jl")
+include("rows.jl")
 include("tma.jl")
 include("wgmma.jl")
 

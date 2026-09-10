@@ -6,4 +6,11 @@ include("gemm.jl")
 
 include("tma.jl")
 include("wgmma.jl")
+
+include("rows.jl")
+
+include("softmax.jl")
+
+include("boundaries.jl")
+
 println("Tylo tile sanitizer workload completed")

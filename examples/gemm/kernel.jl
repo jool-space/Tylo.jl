@@ -3,7 +3,7 @@ using Tylo.Layouts: Layout, Swizzle, compose, static, cosize
 
 value(::Val{N}) where N = N
 
-function gemm_config(::Type{T}=BFloat16; block=(64,64,32),warps=(2,2),swizzled=true,stages=2) where T
+function gemm_config(::Type{T}=BFloat16; block=(64,64,32),warps=(2,2),swizzled=true,stages=2,bounds=false) where T
     bm,bn,bk = block
     stages in (1,2) || throw(ArgumentError("one or two copy stages required"))
     bm % (16warps[1]) == bn % (8warps[2]) == 0 || throw(ArgumentError("warp tiles must divide block"))
@@ -18,7 +18,7 @@ function gemm_config(::Type{T}=BFloat16; block=(64,64,32),warps=(2,2),swizzled=t
     bc = CopyPlan{(bk,bn),Tylo.threads(plan),1}()
     validate_copy(ac,T,sa,a)
     validate_copy(bc,T,sb,b)
-    (;plan,ac,bc,sa,sb,a_span=Val(Int(cosize(sa))),b_span=Val(Int(cosize(sb))),stages=Val(stages))
+    (;plan,ac,bc,sa,sb,a_span=Val(Int(cosize(sa))),b_span=Val(Int(cosize(sb))),stages=Val(stages),bounds=Val(bounds))
 end
 shared_bytes(config,::Type{T}) where T = value(config.stages)*(value(config.a_span)+value(config.b_span))*sizeof(T)
 
@@ -28,12 +28,29 @@ shared_bytes(config,::Type{T}) where T = value(config.stages)*(value(config.a_sp
     (SharedTile(base,config.sa),SharedTile(base+a_span*sizeof(eltype(ptr)),config.sb))
 end
 
+# This example knows A/B have contiguous K. Uniform full-tile checks let
+# interior stages use the original copy loop, even in a ragged launch.
+@inline function full_vectors(t,origin,shape,axis)
+    0 <= origin[1] && 0 <= origin[2] &&
+    origin[1]+shape[1] <= size(t)[1] && origin[2]+shape[2] <= size(t)[2] &&
+    t.layout.strides[3-axis]%8 == 0 &&
+    reinterpret(UInt64,pointer(t,origin))%UInt64(16) == UInt64(0)
+end
+
 @inline function prefetch_stage!(ptr,config,a,b,m,n,k,stage,tid)
     bm,bn,bk = size(config.plan)
     sa,sb = shared_stage(ptr,config,stage)
     @inbounds begin
-        copy_async!(config.ac,sa,window(a,(m,k),Val((bm,bk))),tid)
-        copy_async!(config.bc,sb,window(b,(k,n),Val((bk,bn))),tid)
+        if !value(config.bounds) || full_vectors(a,(m,k),(bm,bk),2)
+            copy_async!(config.ac,sa,window(a,(m,k),Val((bm,bk))),tid)
+        else
+            copy_async!(config.ac,sa,a,(m,k),tid)
+        end
+        if !value(config.bounds) || full_vectors(b,(k,n),(bk,bn),1)
+            copy_async!(config.bc,sb,window(b,(k,n),Val((bk,bn))),tid)
+        else
+            copy_async!(config.bc,sb,b,(k,n),tid)
+        end
     end
     commit_copies()
     nothing
@@ -54,7 +71,7 @@ function tiled_gemm_kernel!(out,a_data,b_data,m::Int32,n::Int32,k::Int32,
     tid = Int32(threadIdx().x)-Int32(1)
     row = (Int32(blockIdx().x)-Int32(1))*Int32(bm)
     col = (Int32(blockIdx().y)-Int32(1))*Int32(bn)
-    iterations = k ÷ Int32(bk)
+    iterations = value(config.bounds) ? cld(k,Int32(bk)) : k ÷ Int32(bk)
     for stage in Int32(0):min(Int32(stages),iterations)-Int32(1)
         prefetch_stage!(ptr,config,a,b,row,col,stage*Int32(bk),stage,tid)
     end
@@ -75,6 +92,10 @@ function tiled_gemm_kernel!(out,a_data,b_data,m::Int32,n::Int32,k::Int32,
         end
     end
     result = map(x -> Relu ? max(alpha*x,0f0) : alpha*x,acc)
-    @inbounds store!(config.plan,window(d,(row,col),Val((bm,bn))),result,tid)
+    @inbounds if !value(config.bounds) || (eltype(out)===Float32 && row+bm<=m && col+bn<=n)
+        store!(config.plan,window(d,(row,col),Val((bm,bn))),result,tid)
+    else
+        store!(config.plan,d,result,(row,col),tid)
+    end
     nothing
 end

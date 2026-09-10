@@ -14,12 +14,12 @@ function demo(;m=512,n=512,k=512)
     # owners, and all inputs/outputs stay live through capture and replay.
     GC.@preserve da db cases begin
         for swizzled in (false,true),stages in (1,2)
-            cfg = gemm_config(BFloat16;swizzled,stages)
+            bounds = m%64 != 0 || n%64 != 0 || k%32 != 0
+            cfg = gemm_config(BFloat16;swizzled,stages,bounds)
             bm,bn,bk = size(cfg.plan)
-            m % bm == n % bn == k % bk == 0 || error("full tiles required")
             out = CuArray(fill(NaN32,m,n))
             function launch()
-                @cuda threads=Tylo.threads(cfg.plan) blocks=(m÷bm,n÷bn) shmem=shared_bytes(cfg,BFloat16) tiled_gemm_kernel!(
+                @cuda threads=Tylo.threads(cfg.plan) blocks=(cld(m,bm),cld(n,bn)) shmem=shared_bytes(cfg,BFloat16) tiled_gemm_kernel!(
                     out,da,db,Int32(m),Int32(n),Int32(k),Int32(k),Int32(k),Int32(m),cfg,1f0,Val(false))
             end
             launch()
@@ -50,4 +50,11 @@ function demo(;m=512,n=512,k=512)
 
 end
 
-demo()
+if isempty(ARGS)
+    demo()
+else
+    length(ARGS)==3 || error("usage: run.jl [M N K]")
+    m,n,k=parse.(Int,ARGS)
+    min(m,n,k)>0 || error("positive dimensions required")
+    demo(;m,n,k)
+end

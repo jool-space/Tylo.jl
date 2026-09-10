@@ -8,3 +8,9 @@ include("wgmma.jl")
 if "--attention" in ARGS
     include("../../examples/flash_attention/comparison.jl")
 end
+
+include("rows.jl")
+
+include("softmax.jl")
+
+include("boundaries.jl")

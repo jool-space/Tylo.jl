@@ -1,5 +1,68 @@
 # Validation
 
+## 2026-09-10: rows, boundaries, and two Megakernels consumers
+
+The GB10 batch adds FP32 row sums/maxima and broadcasts for lane-local,
+warp-striped, and tiled MMA ownership; masked standalone softmax and a softmax
+epilogue over actual MMA output; bounded copies/stores and ragged BF16/FP16 GEMM.
+Megakernels now uses the same primitives for normalization and `AsyncProjection`.
+Its former private tile module has been removed.
+
+The toolchain remains Julia 1.12.7, CUDACore 6.3.1, CUDA compiler 13.3.73,
+and PTX revision `32e36c122bc1c7af5f171cf478324b628b06af3a` in an isolated
+checkout. The active PTX development tree was not used.
+
+| Check | Result |
+|:--|:--|
+| Host contracts, coordinates and arithmetic | 1,699 passed on Julia 1.11.9 and 1.12.7 |
+| Host loading without CUDA and method ambiguities | Passed |
+| Complete offline GPU suite, including attention | 612 passed |
+| Complete supported GB10 runtime suite | 544 passed |
+| Megakernels complete suite | 238,348 passed; one expected Hopper runtime skip |
+| Both packages: memcheck / racecheck / synccheck | All six passed, zero errors; no racecheck warnings |
+
+The runtime coverage includes independent row-coordinate references, cancellation,
+masks and fully masked rows, irregular widths, negative copy origins, nonzero
+swizzle windows, both copy axes, strided sources, output guards, K tails, and
+stage reuse. The normalization integration preserves the distinct residual
+rounding contracts and covers changed-input replay under four execution modes.
+The smaller Megakernels assertion count follows removal of redundant private
+layout checks; Tylo owns those primitive contracts now.
+
+Six row probes, two softmax probes and the two checked ragged GEMM variants
+have no stack/spill storage. The 16 aligned GEMM variants retain 80 registers
+and zero stack/spill bytes. Their executable bytes differ from the saved
+pre-batch binaries (register allocation changed), so no whole-batch binary
+identity claim is made for GEMM. All six datacenter Blackwell attention
+comparisons remain byte-identical to their paired reference.
+
+The warmed standalone softmax measurements use a simple scalar warp baseline,
+identical FP32 storage and masks, and 1,024 rows. Tylo's warp version measured
+3.80 / 6.55 / 12.27 µs at widths 31 / 97 / 257, versus 5.03 / 8.98 / 18.12 µs
+for that baseline. These are not cuDNN or FlashAttention comparisons. The
+lane-local version was much slower with this storage; at width 257 it used
+255 registers and 456 local bytes. Ownership remains a performance decision.
+
+Megakernels normalization stayed effectively unchanged in the paired timings.
+The migrated persistent projections measured 11–18% lower latency in the
+three medium/larger cases, with about 1% lower latency in the smallest case.
+The two-copy-warp configuration introduces spills (144 store / 324 load bytes
+reported by ptxas) despite its lower measured latency; this is a concrete
+follow-up tuning target, not a universally free abstraction.
+
+The dated local receipt is `reports/rows-boundaries-2026-09-10/`. It contains
+source hashes and snapshots, dependency lockfiles, complete logs, generated
+code/resources, paired benchmark samples and the precise baseline definitions.
+Boundary timing and alignment costs are reported separately there. Kernel
+measurements exclude compilation, allocation, packing/padding and transfers;
+clocks were not locked. Use paired results within a run.
+
+Hopper WGMMA and datacenter Blackwell TMEM/attention execution remain pending
+H100/H200 and B200/B300, respectively. Current Megakernels warp projections
+also need H100 runtime revalidation. GB10 execution does not validate them.
+
+## 2026-09-09 checkpoint (historical)
+
 Validation checkpoint: 2026-09-09. The package remains experimental.
 
 Environment: Julia 1.12.7, CUDACore 6.3.1, CUDA compiler 13.3.73,
@@ -10,7 +73,7 @@ CI but was not executed locally. There are no detected method ambiguities.
 The final GPU run used an isolated PTX checkout at
 `32e36c122bc1c7af5f171cf478324b628b06af3a`, matching the assembly CI pin.
 
-## Executed checks
+### Executed checks
 
 | Check | Result |
 |---|---|
@@ -28,7 +91,7 @@ The final GPU run used an isolated PTX checkout at
 | GEMM/TMA Compute Sanitizer synccheck | 0 errors |
 | Documentation and doctests | Passed |
 
-## Complete GEMM
+### Complete GEMM
 
 The GEMM suite executes BF16 and FP16 inputs, plain/swizzled shared layouts,
 K tiles of 16/32/64, one/two copy stages, different warp arrangements,
@@ -51,7 +114,7 @@ The runnable demo reports CUDA-graph median timings for 512×512×512 GEMM.
 It excludes compilation, allocation and host input preparation. The example
 is not benchmarked against cuBLAS and makes no peak-throughput claim.
 
-## Attention regression
+### Attention regression
 
 The full attention comparison covers SM100a, SM103a, and SM100f with both
 half- and quarter-granular probability publication. **All six Tylo kernels
@@ -70,7 +133,7 @@ this compiler; Tylo preserves those resource counts exactly:
 | SM103a | Half | 128 | 128 | 424 / 444 |
 | SM103a | Quarter | 128 | 136 | 116 / 140 |
 
-## Hopper path and Megakernels integration
+### Hopper path and Megakernels integration
 
 The 48 standalone Hopper kernels cover BF16/FP16, N=8/16/24/64/128/256,
 one/two stages, independent K partials, K=16/32/64 descriptor extents,
@@ -92,14 +155,14 @@ Hopper runtime suite additionally checks changed-input graph replay, K tails,
 GC retention and exact arithmetic from nonzero shared descriptor origins.
 **WGMMA execution and performance remain unvalidated on H100/H200.**
 
-## Hardware work remaining
+### Hardware work remaining
 
 TMEM round-trip and full attention execution are explicitly skipped on
 GB10, which does not execute these datacenter Blackwell instructions.
 B200/B300 correctness, sanitizer and paired timing runs remain prepared.
 No datacenter Blackwell attention runtime or timing claim is made.
 
-## Reproduce
+### Reproduce
 
 From the repository root with a sibling PTX checkout:
 

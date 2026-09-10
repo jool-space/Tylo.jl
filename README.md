@@ -12,10 +12,13 @@ instructions. The kernel controls its work assignment and synchronization.
 This is an experimental implementation with these worked consumers:
 
 - A complete BF16/FP16 tiled GEMM: shared-memory layouts, asynchronous copies,
-  register fragments, warp MMA and composed epilogues, executable on CC 8.0+.
+  register fragments, warp MMA, bounded copies/stores and composed epilogues,
+  executable on CC 8.0+.
 - TMA plus Hopper WGMMA: a complete producer/consumer GEMM and
   Megakernels.jl’s GEMM/gate-up projection. TMA runs on GB10; WGMMA has
   SM90a assembly coverage and prepared H100/H200 runtime tests.
+- Row reductions and broadcasts with lane-local, warp-striped, and MMA ownership;
+  masked softmax examples and Megakernels normalization consumers.
 - Correction and epilogue replacements in PTX.jl's datacenter Blackwell
   attention kernel, with typed TMEM views and explicit completion.
 
@@ -47,7 +50,7 @@ supports one explicit 128-byte-swizzled K=64 storage format. See
 [the TMA/WGMMA contracts](docs/src/hopper.md).
 
 The library is not yet a general CuTe or ThunderKittens equivalent.
-Tcgen05 MMA, general masked copies, arbitrary redistribution, allocation
+Tcgen05 MMA, arbitrary redistribution, allocation
 management and automatic pipelines remain future work.
 
 `Tylo.Layouts` contains the pure coordinate mathematics. A separate Laythe

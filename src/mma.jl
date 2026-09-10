@@ -52,8 +52,8 @@ end
 Layouts.layout(::MMAFragment{T,Role}) where {T,Role} =
     operand_layout(MMA16x8x16(T === Float32 ? BFloat16 : T),Role())
 zero_accumulator(::MMA16x8x16) = MMAFragment(Float32,Accumulator(),(0f0,0f0,0f0,0f0))
-@inline Base.map(f,a::MMAFragment{Float32,Accumulator}) =
-    MMAFragment(Float32,Accumulator(),map(f,a.data))
+@inline Base.map(f::F,a::MMAFragment{Float32,Accumulator}) where F =
+    MMAFragment(Float32,Accumulator(),(f(a.data[1]),f(a.data[2]),f(a.data[3]),f(a.data[4])))
 @inline scale(a::MMAFragment{Float32,Accumulator},x) = map(Base.Fix2(*,x),a)
 
 "Load a 16×16 A operand from shared memory; K contiguous in 16-byte groups."
@@ -92,8 +92,33 @@ struct MMAAccumulator{P,N}
 end
 _acc_count(::TiledMMA{A,W,R}) where {A,W,R} = prod(R)
 @inline zero_accumulator(p::TiledMMA) = MMAAccumulator(p,ntuple(_ -> zero_accumulator(p.atom),Val(_acc_count(p))))
-@inline Base.map(f,a::MMAAccumulator{P,N}) where {P,N} =
-    MMAAccumulator(_plan(P),map(x -> map(f,x),a.data))
+# Static scalar calls avoid outlining nested tuple-map callbacks into device
+# functions, which would materialize the accumulator in local memory.
+@generated function Base.map(f::F,a::MMAAccumulator{P,N}) where {F,P,N}
+    fragments=[:(MMAFragment(Float32,Accumulator(),
+        ($( [:(f(a.data[$i].data[$j])) for j in 1:4]... ),))) for i in 1:N]
+    quote
+        Base.@inline
+        MMAAccumulator(_plan($P),($(fragments...),))
+    end
+end
 @inline scale(a::MMAAccumulator,x) = map(Base.Fix2(*,x),a)
 _plan(::Type{TiledMMA{MMA16x8x16{T},W,R,K}}) where {T,W,R,K} =
     TiledMMA(MMA16x8x16(T),Val(W),Val(R),Val(K))
+
+# The tiled accumulator's flattened thread/value mapping. It is useful for
+# masks and epilogues as well as stores; physical memory layouts are separate.
+struct TiledMMAOwnership{P} end
+operand_layout(p::TiledMMA,::Accumulator) = TiledMMAOwnership{typeof(p)}()
+Layouts.layout(::MMAAccumulator{P}) where P = TiledMMAOwnership{P}()
+Base.size(::TiledMMAOwnership{P}) where P = size(_plan(P))[1:2]
+@inline function Layouts.coordinate(::TiledMMAOwnership{TiledMMA{A,W,R,K}},
+                                    tid::Integer,::Val{E}) where {A,W,R,K,E}
+    0 <= E < 4prod(R) || throw(BoundsError())
+    atom,word=E÷4,E%4
+    rm,rn=atom%R[1],atom÷R[1]
+    warp,lane=tid÷oftype(tid,32),tid%oftype(tid,32)
+    wm,wn=warp%oftype(tid,W[1]),warp÷oftype(tid,W[1])
+    r,c=Layouts.coordinate(operand_layout(_plan(TiledMMA{A,W,R,K}).atom,Accumulator()),lane,Val(word))
+    (r+wm*oftype(tid,16R[1])+oftype(tid,16rm),c+wn*oftype(tid,8R[2])+oftype(tid,8rn))
+end

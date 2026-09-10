@@ -60,3 +60,30 @@ function copy_async! end
 function commit_copies end
 "Wait until at most N committed cp.async groups remain for this thread; no CTA barrier."
 function wait_copies end
+
+"""
+    copy_async!(plan, destination, source, origin::Tuple, thread)
+
+Copy a fixed-capacity tile from logical `origin` in a bounded global source.
+Valid aligned contiguous 16-byte vectors use cp.async. Boundary or unaligned
+vectors use scalar loads/stores, zero-filling every invalid element. Source
+coordinates are checked before a pointer is formed. Destination shape and
+vector alignment must satisfy the same contract as the unmasked form.
+
+Both paths require explicit commit/wait and consumer synchronization. A copy
+wait alone does not publish scalar shared stores to other threads. This form
+uses scalar zero-fill because the pinned PTX wrapper exposes full-vector copies.
+"""
+copy_async!
+
+@inline _valid_coordinate(t::MemoryTile,c::Tuple) =
+    0 <= c[1] < size(t)[1] && 0 <= c[2] < size(t)[2]
+@generated function _contiguous_vector(l,c,::Val{Axis},::Val{V}) where {Axis,V}
+    conditions=[:(l((c[1]+$(Axis==1 ? j : 0),c[2]+$(Axis==2 ? j : 0))) == offset+$j) for j in 1:V-1]
+    condition=isempty(conditions) ? true : foldl((a,b)->:($a && $b),conditions)
+    quote
+        Base.@inline
+        offset=l(c)
+        $condition
+    end
+end

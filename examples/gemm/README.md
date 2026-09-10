@@ -38,8 +38,8 @@ compute-sanitizer --tool racecheck --error-exitcode 86 \
 ```
 
 Use a Compute Sanitizer version compatible with the CUDA compiler/runtime
-selected by CUDACore. `sanitize.jl` exercises only the executable GEMM/load
-tests and requires a GPU; it cannot pass by skipping runtime execution.
+selected by CUDACore. `sanitize.jl` exercises executable tile kernels, including GEMM, TMA and
+row operations, and requires a GPU; it cannot pass by skipping runtime execution.
 
 ## Scope and evidence
 
@@ -50,9 +50,17 @@ strides, rectangular grids, K tiles of 16/32/64, different warp arrangements,
 one- and two-stage pipelines, one iteration through repeated buffer reuse,
 and a fused scaling/ReLU epilogue. Output padding is checked for corruption.
 
-Dimensions must contain full tiles. The example currently performs no
-masked edge handling, split-K or scheduling autotuning. It is a composability
-and correctness milestone, not a claim of matching cuBLAS throughput.
+The aligned path requires full tiles; the bounded path below handles arbitrary
+positive dimensions. Split-K and scheduling autotuning remain outside the
+example. The measurements do not claim parity with cuBLAS throughput.
 Timing output excludes compilation and allocation and reports the median
 CUDA-graph replay time. All configurations compile before measurement;
 measurement order alternates after six warmup rounds. Compare configurations only on the same GPU/session.
+
+## Boundary tiles
+
+Run `julia --project=test/gpu examples/gemm/run.jl 65 97 73` for a ragged case.
+The demo selects bounded copies and stores automatically. Direct kernel callers
+use `gemm_config(...; bounds=true)` and ceiling-divided launch dimensions.
+See [the bounds contract](../../docs/src/boundaries.md) for partial vectors,
+zero-fill, shared-memory synchronization, and compact/padded timing comparisons.

@@ -93,3 +93,28 @@ end
         nothing
     end
 end
+
+# Bounds-aware epilogue: use precisely the ownership map of the accumulator.
+# A full destination view supplies the logical bounds; origin may select an
+# edge tile. No invalid global pointer is formed, even for a completely masked
+# thread. Conversion to the destination element type occurs at the final store.
+@generated function Tylo.store!(p::TiledMMA{A,W,R,K},dst::GlobalTile{T},
+        acc::Tylo.MMAAccumulator{TiledMMA{A,W,R,K}},origin::Tuple,tid::Integer) where {A,W,R,K,T}
+    stores=Expr[]
+    for e in 0:4prod(R)-1
+        push!(stores,quote
+            c=Tylo.Layouts.coordinate(Tylo.Layouts.layout(acc),tid,Val($e))
+            q=(Int(origin[1])+Int(c[1]),Int(origin[2])+Int(c[2]))
+            if Tylo._valid_coordinate(dst,q)
+                unsafe_store!(pointer(dst,q),T(acc.data[$(e÷4+1)].data[$(e%4+1)]))
+            end
+        end)
+    end
+    quote
+        Base.@inline
+        length(origin)==2 || throw(ArgumentError("store origin must have two coordinates"))
+        @boundscheck 0 <= tid < $(32prod(W)) || throw(BoundsError())
+        $(stores...)
+        nothing
+    end
+end

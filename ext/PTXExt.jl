@@ -75,6 +75,7 @@ end
 
 include("copy.jl")
 include("mma.jl")
+include("rows.jl")
 include("tma.jl")
 include("wgmma.jl")
 
