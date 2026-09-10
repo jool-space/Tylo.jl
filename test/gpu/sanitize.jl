@@ -13,4 +13,10 @@ include("softmax.jl")
 
 include("boundaries.jl")
 
+include("online.jl")
+
+include("operand_a.jl")
+
+include("streaming_attention.jl")
+
 println("Tylo tile sanitizer workload completed")

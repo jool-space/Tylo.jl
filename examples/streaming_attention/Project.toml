@@ -1,0 +1,15 @@
+[deps]
+BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
+CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
+PTX = "7a3554bf-f3bf-40cd-9a57-3cf23ff3bbf8"
+Tylo = "845906dd-ae2b-43fc-b595-f8c9a7396ab9"
+cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
+
+[sources]
+Tylo = {path = "../.."}
+PTX = {path = "../../../PTX"}
+
+[compat]
+CUDACore = "6.2"
+cuBLAS = "6.2"
+julia = "1.12"

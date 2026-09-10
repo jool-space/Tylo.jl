@@ -7,7 +7,7 @@ DocTestSetup = :(using Tylo)
 
 Composable tile programming for NVIDIA GPUs in Julia. The implementation includes
 shared/global layouts, asynchronous copies, warp MMA, TMA, Hopper WGMMA,
-and complete GEMM pipelines,
+and complete GEMM and streaming-attention pipelines,
 alongside row-distributed register fragments and explicit TMEM views/completion.
 See [Representation and completion](@ref) for the boundary and current limits.
 

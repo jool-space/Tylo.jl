@@ -19,7 +19,13 @@ Layouts.layout(::WarpRowFragment{N}) where N = WarpRowLayout{N}()
     0 <= E < N || throw(BoundsError())
     (zero(lane),lane+oftype(lane,32E))
 end
-@inline Base.map(f,a::WarpRowFragment) = WarpRowFragment(map(f,a.data))
+@generated function Base.map(f::F,a::WarpRowFragment{N}) where {F,N}
+    values=[:(f(a.data[$i])) for i in 1:N]
+    quote
+        Base.@inline
+        WarpRowFragment(($(values...),))
+    end
+end
 
 abstract type RowOwnership end
 "One row per lane; no result replication between lanes."

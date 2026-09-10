@@ -18,6 +18,7 @@ makedocs(;
         "Layouts and GEMM" => "layouts.md",
         "TMA and WGMMA" => "hopper.md",
         "Row operations" => "rows.md",
+        "Streaming attention" => "streaming.md",
         "Boundary tiles" => "boundaries.md",
         "Validation" => "validation.md",
     ],

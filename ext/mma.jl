@@ -118,3 +118,15 @@ end
         nothing
     end
 end
+
+@inline _pack_mma_pair(::Type{BFloat16},lo,hi) = PTX.bf16x2_pack(lo,hi)
+@inline _pack_mma_pair(::Type{Float16},lo,hi) = ptx"cvt.rn.f16x2.f32"(hi,lo)
+@inline function Tylo.pack_operand_a(::MMA16x8x16{T},
+        left::Tylo.MMAFragment{Float32,Accumulator},
+        right::Tylo.MMAFragment{Float32,Accumulator}) where T
+    Tylo.MMAFragment(T,OperandA(),(
+        _pack_mma_pair(T,left.data[1],left.data[2]),
+        _pack_mma_pair(T,left.data[3],left.data[4]),
+        _pack_mma_pair(T,right.data[1],right.data[2]),
+        _pack_mma_pair(T,right.data[3],right.data[4])))
+end

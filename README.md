@@ -19,6 +19,9 @@ This is an experimental implementation with these worked consumers:
   SM90a assembly coverage and prepared H100/H200 runtime tests.
 - Row reductions and broadcasts with lane-local, warp-striped, and MMA ownership;
   masked softmax examples and Megakernels normalization consumers.
+- Streaming BF16 forward attention on GB10: online row statistics, same-lane
+  accumulator-to-A conversion, runtime sequence lengths, masks and causal tails.
+  See [the complete dataflow](examples/streaming_attention/README.md).
 - Correction and epilogue replacements in PTX.jl's datacenter Blackwell
   attention kernel, with typed TMEM views and explicit completion.
 

@@ -99,3 +99,7 @@ include("layouts.jl")
 include("hopper.jl")
 
 include("rows.jl")
+
+include("online.jl")
+
+include("operand_a.jl")

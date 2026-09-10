@@ -22,3 +22,18 @@ to make K contiguous. Masks have the same shape as each output. Valid logits
 must be finite; masked entries and fully masked rows produce zero.
 
 See [the row API](../../docs/src/rows.md) for ownership and participation rules.
+
+## Rows wider than a fixed register tile
+
+`streaming.jl` keeps four values per lane regardless of runtime width. Its first
+pass updates `SoftmaxState`; its second pass rereads inputs and emits normalized
+probabilities. It supports the same masks and FP32/BF16/FP16 storage conversion.
+
+```sh
+julia --project=test/gpu examples/softmax/compare_streaming.jl /tmp/tylo-streaming-softmax-results
+```
+
+This interleaves the full-row register kernel, fixed-capacity streaming kernel,
+and scalar three-pass baseline on the same inputs. Small rows can favor the
+full-row kernel; wide rows expose its growing register use and eventual spills.
+The streaming kernel's extra reads and per-chunk reductions remain visible costs.

@@ -122,3 +122,26 @@ Base.size(::TiledMMAOwnership{P}) where P = size(_plan(P))[1:2]
     r,c=Layouts.coordinate(operand_layout(_plan(TiledMMA{A,W,R,K}).atom,Accumulator()),lane,Val(word))
     (r+wm*oftype(tid,16R[1])+oftype(tid,16rm),c+wn*oftype(tid,8R[2])+oftype(tid,8rn))
 end
+
+"""
+    pack_operand_a(atom, left, right)
+    pack_operand_a(atom, accumulator, Val(m), Val(k))
+
+GPU conversion from two horizontally adjacent FP32 16×8 C atoms to one 16×16
+A operand, without lane communication. Round to the atom's BF16/FP16 type,
+nearest even, and pack low element first. Signed zero and infinities survive;
+NaNs remain NaNs but their payload/sign are unspecified. No finite saturation
+or flush-to-zero modifier is applied. Finite overflow follows the destination
+format. This is numerical conversion, not an FP32 bit reinterpretation.
+
+The tiled overload selects zero-based M repetition `m` and 16-column pair `k`.
+It requires one N warp and complete pairs of N atoms. Row ownership must match
+that of the consuming MMA; the surrounding kernel owns this correspondence.
+"""
+function pack_operand_a end
+@inline function pack_operand_a(atom::MMA16x8x16,
+        a::MMAAccumulator{TiledMMA{A,W,R,K}},::Val{M},::Val{J}) where {A,W,R,K,M,J}
+    W[2] == 1 && iseven(R[2]) || throw(ArgumentError("conversion requires one N warp and paired N atoms"))
+    0 <= M < R[1] && 0 <= J < R[2]÷2 || throw(BoundsError())
+    pack_operand_a(atom,a.data[M+1+2J*R[1]],a.data[M+1+(2J+1)*R[1]])
+end

@@ -2,6 +2,8 @@ module Tylo
 
 using BFloat16s: BFloat16
 
+export SoftmaxState, softmax_update, softmax_merge, softmax_normalize, softmax_logsumexp
+
 export WarpRowFragment, RowValues, row_ownership, row_coordinate, row_sum, row_max, row_map
 
 export TMALoad, prepare_tma, shared_layout, shared_tile, transfer_bytes, tma_load!,
@@ -9,7 +11,7 @@ export TMALoad, prepare_tma, shared_layout, shared_tile, transfer_bytes, tma_loa
 
 export GlobalTile, SharedTile, window, CopyPlan, validate_copy, copy_async!,
        commit_copies, wait_copies, MMA16x8x16, TiledMMA, zero_accumulator,
-       load_a, load_b, mma, store!, operand_layout, OperandA, OperandB, Accumulator,
+       load_a, load_b, pack_operand_a, mma, store!, operand_layout, OperandA, OperandB, Accumulator,
        RowFragment, PackedBF16, columns, scale, pack_bf16,
        TmemTile, TmemRows, warp_rows, reinterpret_tile,
        load_async, wait_load, store_async!, wait_stores, store_row!,
@@ -22,6 +24,7 @@ include("memory.jl")
 include("copy.jl")
 include("mma.jl")
 include("rows.jl")
+include("online.jl")
 include("tma.jl")
 include("wgmma.jl")
 
