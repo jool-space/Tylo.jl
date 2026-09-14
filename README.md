@@ -92,10 +92,8 @@ Tests run in parallel with `ParallelTestRunner`. `host/` needs no GPU.
 `gpu/` files need the CUDA compiler; their assembly checks always run and
 their runtime sections run when the device satisfies the file's
 `# TEST_TARGET: cc>=8.0`-style banner (`test/targets.jl`). Set
-`TYLO_REQUIRE_GPU_RUNTIME=true` to fail instead of skipping without a GPU,
-`TYLO_SNAPSHOT=test/snapshots/<manifest>.toml` to compare every compiled
-kernel's machine code against a recorded baseline, and `TYLO_EVIDENCE=<dir>`
-to save PTX and cubins. The datacenter attention comparison
+`TYLO_REQUIRE_GPU_RUNTIME=true` to fail instead of skipping without a GPU
+and `TYLO_EVIDENCE=<dir>` to save PTX and cubins. The datacenter attention comparison
 (`gpu/flash_attention`) needs the pinned PTX reference file; see
 [validation and reproduction](docs/src/validation.md).
 

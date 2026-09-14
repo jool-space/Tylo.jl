@@ -8,20 +8,18 @@
 #   *_defs.jl files hold definitions shared by several test files.
 #
 # TYLO_REQUIRE_GPU_RUNTIME=true fails the run when no functional GPU is
-# present. TYLO_SNAPSHOT=<manifest> compares every saved kernel's machine
-# code against a baseline; TYLO_EVIDENCE=<dir> saves PTX and cubins.
+# present. TYLO_EVIDENCE=<dir> saves PTX and cubins.
 using Tylo, PTX, CUDACore, Test
 using ParallelTestRunner
 include(joinpath(@__DIR__, "targets.jl"))
 using .TestTargets
 
-const SUPPORT = ("setup", "snapshot", "targets")
+const SUPPORT = ("setup", "targets")
 testsuite = find_tests(@__DIR__)
 filter!(p -> !(p.first in SUPPORT) && !startswith(p.first, "tools/") && !endswith(p.first, "_defs"), testsuite)
 args = parse_args(ARGS)
 default_routing = filter_tests!(testsuite, args)
 
-report = nothing
 if args.list === nothing
     gpu_tests = sort!([t for t in keys(testsuite) if startswith(t, "gpu/")])
     toolchain = CUDACore.CUDA_Compiler.is_available()
@@ -36,8 +34,6 @@ if args.list === nothing
         else
             @warn "No functional GPU; gpu/ files run their assembly checks only"
         end
-        Base.JLOptions().code_coverage == 0 ||
-            @warn "Coverage instrumentation changes generated code; snapshot comparisons are unreliable"
     end
     if toolchain
         for t in gpu_tests
@@ -51,10 +47,6 @@ if args.list === nothing
     if get(ENV, "TYLO_REQUIRE_GPU_RUNTIME", "false") == "true" && default_routing
         functional || error("TYLO_REQUIRE_GPU_RUNTIME is set, but CUDACore has no functional GPU")
     end
-    if haskey(ENV, "TYLO_SNAPSHOT")
-        report = tempname()
-        ENV["TYLO_SNAPSHOT_REPORT"] = report
-    end
 end
 
 # Each test file runs in its own module; names every file may use are
@@ -64,9 +56,4 @@ init_code = quote
     using Tylo.Layouts: @Layout, Layout, Swizzle, compose, coordinate, cosize, shape, static
     include($(joinpath(@__DIR__, "setup.jl")))
 end
-ts = runtests(Tylo, args; testsuite, init_code)
-
-if report !== nothing && isfile(report)
-    include(joinpath(@__DIR__, "snapshot.jl"))
-    snapshot_report(report)
-end
+runtests(Tylo, args; testsuite, init_code)

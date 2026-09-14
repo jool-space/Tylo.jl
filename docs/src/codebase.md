@@ -35,8 +35,7 @@ table use the PTX implementation.
 Tests live in `test/host/` (no GPU), `test/gpu/` (CUDA compiler required;
 runtime sections gated by each file's `# TEST_TARGET:` banner) and
 `test/tools/` (sanitizer and evidence scripts). `test/setup.jl` is loaded into
-every parallel worker with the fixtures, kernel compilation helpers and the
-machine-code snapshot checks of `test/snapshot.jl`.
+every parallel worker with the fixtures and kernel compilation helpers.
 
 ## Follow a broadcast into registers
 
