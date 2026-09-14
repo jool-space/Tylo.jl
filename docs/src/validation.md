@@ -117,42 +117,37 @@ on GB10.
 
 ## Reproduce checks
 
-Host tests run without PTX or a CUDA device:
+The test project is a workspace member. One instantiate covers the package,
+its tests and the manual; `Pkg.test()` and the runner are equivalent:
 
 ```sh
-julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+julia --project=. -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+julia --project=test test/runtests.jl --jobs=4
+julia --project=test test/runtests.jl host        # no CUDA compiler or device needed
 ```
 
-With Julia 1.10+ and a sibling PTX checkout, instantiate and run the GPU suite:
-
-```sh
-julia --project=test/gpu -e 'using Pkg; Pkg.develop([PackageSpec(path="."), PackageSpec(path="../PTX")]); Pkg.instantiate()'
-julia --project=test/gpu test/gpu/runtests.jl
-```
-
-The default suite includes complete GEMM and streaming-attention checks. It
-also assembles architecture-specific kernels that cannot run on the local
-GPU; those execution paths are explicitly skipped. CI tests Julia `1.10` and
-`1` (latest stable) on the GB10 `blackwell` runner and hosted x86_64 machines,
-using the pinned PTX revision. The GB10 job sets `TYLO_REQUIRE_GPU_RUNTIME=true`
-so a missing GPU fails the job. A CI configuration is not a receipt that a
-working tree has run remotely.
+`host/` tests run everywhere. `gpu/` files need the CUDA compiler; their
+assembly checks always run, and each file's `# TEST_TARGET:` banner states
+which devices execute its runtime sections, so architecture-specific kernels
+that the local GPU cannot run are assembled and then skipped. CI tests Julia
+`1.10` and `1` (latest stable) on the GB10 runner with
+`TYLO_REQUIRE_GPU_RUNTIME=true`, so a missing GPU fails that job, and on
+hosted x86_64 machines without a device. A CI configuration is not a receipt
+that a working tree has run remotely.
 
 On a machine without a CUDA driver, explicitly select compiler artifacts before
 starting the tests. Without a driver or a version preference, the CUDA compiler
 JLL may have no selected artifact, leaving `ptxas` unavailable:
 
 ```sh
-julia --project=test/gpu -e 'using CUDACore; CUDACore.set_runtime_version!(v"13.3"; local_toolkit=false)'
-julia --project=test/gpu --check-bounds=auto test/gpu/runtests.jl --attention
+julia --project=test -e 'using CUDACore; CUDACore.set_runtime_version!(v"13.3"; local_toolkit=false)'
+julia --project=test --check-bounds=auto test/runtests.jl gpu/flash_attention
 ```
 
 The preference applies to this test environment. The second command starts a
 fresh Julia process, which loads the selected toolkit. Both CI jobs use normal
 bounds semantics and disable GPU coverage instrumentation for the exact code
-comparison; host contracts supply coverage separately. Explicit
-`Pkg.develop` in the setup command also supports Julia 1.10, which does not
-resolve the sibling paths from `[sources]`.
+comparison; host contracts supply coverage separately.
 
 The optional datacenter attention comparison requires the exact reference file
 whose SHA256 is recorded in `examples/flash_attention/README.md`. Set
@@ -163,8 +158,8 @@ moved on; there is no need to reset a working PTX checkout.
 # Optional: set this when the active PTX checkout lacks the pinned reference.
 export TYLO_PTX_ROOT=/path/to/pinned-PTX
 TYLO_EVIDENCE=/tmp/tylo-evidence \
-  julia --project=test/gpu test/gpu/runtests.jl --attention
-julia --project=test/gpu test/gpu/resources.jl /tmp/tylo-evidence
+  TYLO_PTX_ROOT=/path/to/pinned-PTX julia --project=test test/runtests.jl gpu/flash_attention
+julia --project=test test/tools/resources.jl /tmp/tylo-evidence
 ```
 
 `resources.jl` records assembler registers/stack/spills and disassembles the
@@ -239,3 +234,35 @@ Gate results, same toolchain as the previous checkpoint:
 
 The snapshot normalizer now ignores symbol names, so type renames do not
 register as changes. No sanitizer run is claimed for this batch.
+
+### More warp MMA atoms and the parallel test layout (2026-09-14)
+
+Twenty-four warp atoms now have instruction bindings, each one table entry
+in `src/ptx/mma.jl`: 16-bit m16n8k8 and m16n8k16 with FP32 or FP16
+accumulation, TF32 m16n8k4 and m16n8k8, FP8 E4M3/E5M2 in every A/B pairing
+at k16 and k32, and INT8 signed/unsigned pairings with Int32 accumulation.
+`Float8E4M3` and `Float8E5M2` are Microfloats twins with the
+`cvt.rn.satfinite` policy, checked exhaustively on the host; packing covers
+8-bit words. The atom oracle in `test/gpu/atoms.jl` runs every atom on GB10
+with inputs whose products and sums are exact in the atom's arithmetic, and
+checks `ldmatrix` loads word for word against the generic loads.
+
+The repository changed shape in the same batch: PTX is a direct dependency
+with its bindings in `src/ptx/`, the test project is a workspace member, and
+the suite runs in parallel from `test/host/` and `test/gpu/` with per-file
+`# TEST_TARGET:` capability banners. Device-only implementations of
+host-callable generics are `@device_override` methods in `ext/CUDACoreExt.jl`.
+
+Gate results, Julia 1.13.0, CUDACore 6.4.0, CUDA compiler 13.4.59, PTX from
+`main` as pinned by the workspace manifest, four parallel workers:
+
+- Tylo: 83,276 checks pass in 3m18s with three expected hardware skips
+  (Hopper, TMEM, datacenter attention). Against the 2026-09-14 snapshot, 100
+  kernels are byte-identical, the streaming attention kernels are identical up
+  to the renamed entry symbol, the 83 epilogue-store kernels recorded in the
+  previous checkpoint remain the only allowed changes, and the 48 oracle
+  kernels are new.
+- Megakernels: 238,340 checks pass with one expected Hopper skip after
+  re-resolving its workspace for Tylo's new dependency; the eight projection
+  kernels keep their instruction multiset and bitwise outputs against
+  `7770d93`, and the Hopper kernels are identical and multiset-equal.

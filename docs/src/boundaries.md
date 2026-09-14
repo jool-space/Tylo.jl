@@ -68,8 +68,8 @@ original aligned full-tile path and requires valid full tiles and aligned source
 strides. The demo chooses between them from its dimensions:
 
 ```sh
-julia --project=test/gpu examples/gemm/run.jl 65 97 73
-julia --project=test/gpu examples/gemm/compare.jl /tmp/tylo-gemm-comparison
+julia --project=test examples/gemm/run.jl 65 97 73
+julia --project=test examples/gemm/compare.jl /tmp/tylo-gemm-comparison
 ```
 
 The comparison includes the original aligned kernel at a pinned Tylo revision,

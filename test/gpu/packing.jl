@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 # Both the conversion path and the bit-preserving path run on ordinary NVIDIA
 # GPUs. Typed destinations deliberately retain BF16/FP16 as their element type.
 function packing_kernel!(out,back,input,::Type{T},::Val{W}) where {T,W}
@@ -23,7 +24,7 @@ function packed_bits_kernel!(out,input,::Type{T}) where T
 end
 @testset "BF16 and FP16 register packing" begin
     for T in (BFloat16,Float16), w in (1,2,3,4,16)
-        if !("--runtime-only" in ARGS)
+        begin # assembly checks
             code = compile_kernel(packing_kernel!,Tuple{CuDeviceVector{T,1},CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},Type{T},Val{w}};
                                   arch=CUDACore.SMVersion(12,1,:arch),threads=32)
             save_code("packing-$(T)-w$w",code)
@@ -32,7 +33,7 @@ end
             @test !occursin(".local .",body)
             @test !occursin(r"\bcall",body)
         end
-        if CUDACore.functional()
+        if runtime_supported(@__FILE__)
             values = randn(MersenneTwister(47),Float32,32*2w)
             values[1:8] .= Float32[0,-0.0,Inf,-Inf,1.00390625,1.01171875,1.00048828125,1f-40]
             input = CuArray(values)
@@ -47,7 +48,7 @@ end
             @test isequal(Array(back),Float32.(expected))
         end
     end
-    if CUDACore.functional()
+    if runtime_supported(@__FILE__)
         for T in (BFloat16,Float16)
             bits = UInt16[0,0x8000,0x7fff,0xffff,0x7f81,0x7c01,1,0x3c00]
             values = repeat(reinterpret.(T,bits),32)
@@ -95,7 +96,7 @@ function typed_tmem_kernel!(out,input,::Val{W},::Val{A}) where {W,A}
 end
 @testset "Typed TMEM transfers, x1 through x128" begin
     for T in (Float32,BFloat16,Float16), w in (1,2,4,8,16,32,64,128), axis in (1,2)
-        if !("--runtime-only" in ARGS)
+        begin # assembly checks
             code = compile_kernel(typed_tmem_kernel!,Tuple{CuDeviceVector{T,1},CuDeviceVector{T,1},Val{w},Val{axis}})
             save_code("typed-tmem-$(T)-w$w-a$axis",code)
             body = entry_body(code.ptx)
@@ -105,7 +106,7 @@ end
             @test !occursin(r"\bcall",body)
             @test !occursin(".local .",body)
         end
-        if CUDACore.functional() && capability(device()) in (v"10.0",v"10.3")
+        if capability_major(10)
             values = T.(randn(MersenneTwister(623),Float32,128*w*(4÷sizeof(T))))
             input = CuArray(values); out = similar(input)
             @cuda threads=128 typed_tmem_kernel!(out,input,Val(w),Val(axis))

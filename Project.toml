@@ -1,31 +1,32 @@
 name = "Tylo"
 uuid = "845906dd-ae2b-43fc-b595-f8c9a7396ab9"
-authors = ["AntonOresten <antonoresten@proton.me> and contributors"]
 version = "0.1.0-DEV"
+authors = ["AntonOresten <antonoresten@proton.me> and contributors"]
+
+[workspace]
+projects = ["test", "docs"]
 
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
-Static = "aedffcd0-7271-4cad-89d0-dc628f76c6d3"
 BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
+Microfloats = "31c70f10-a750-4521-b13c-797315ae2933"
+PTX = "7a3554bf-f3bf-40cd-9a57-3cf23ff3bbf8"
+Static = "aedffcd0-7271-4cad-89d0-dc628f76c6d3"
 
 [weakdeps]
 CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
-PTX = "7a3554bf-f3bf-40cd-9a57-3cf23ff3bbf8"
+
+[sources]
+PTX = {rev = "main", url = "https://github.com/jool-space/PTX.jl"}
 
 [extensions]
-CUDACoreExt = ["CUDACore", "PTX"]
-PTXExt = "PTX"
+CUDACoreExt = "CUDACore"
 
 [compat]
 Adapt = "4"
-CUDACore = "6.2"
-Static = "1"
 BFloat16s = "0.6"
+CUDACore = "6.2"
+Microfloats = "0.2"
 PTX = "0.1"
+Static = "1"
 julia = "1.10"
-
-[extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-
-[targets]
-test = ["Test"]

@@ -91,7 +91,7 @@ end
     @test_throws DimensionMismatch Fragment((0f0,0f0),operand_layout(atom,Accumulator()))
     @test_throws ArgumentError MMAAtom((16,8,32),BFloat16)
     @test_throws ArgumentError MMAAtom((16,8,16),Float32)
-    @test_throws ArgumentError MMAAtom((16,8,16),Float16,Float16)
+    @test_throws ArgumentError MMAAtom((16,8,16),BFloat16,Float16)
     @test MMAAtom((16,8,8),Float32) isa MMAAtom
     p = TiledMMA(atom,Val((2,2)),Val((2,4)),Val(32))
     @test size(p) == (64,64,32)

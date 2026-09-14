@@ -7,15 +7,19 @@ export SoftmaxState, softmax_update, softmax_merge, softmax_normalize, softmax_l
 export TMALoad, prepare_tma, shared_layout, shared_tile, transfer_bytes, tma_load!,
        WGMMA64, validate_wgmma, wgmma_operand, mma_async, wait_mma, finish_mma
 
+export Float8E4M3, Float8E5M2
+
 export GlobalTile, SharedTile, window, CopyPlan, validate_copy, copy_async!,
        commit_copies, wait_copies, MMAAtom, TiledMMA, zero_accumulator,
        load_a, load_b, load_fragment, pack_operand_a, mma, store!, operand_layout, OperandA, OperandB, Accumulator,
+       instruction_atoms,
        Fragment, PackedFragment, scale, pack, unpack,
        TmemTile, TmemTransfer, partition, reinterpret_tile,
        load_async, wait_load, store_async!, wait_stores,
        fence_after_thread_sync, fence_before_thread_sync
 
 include("tuples.jl")
+include("elements.jl")
 include("layouts/layouts.jl")
 include("fragments.jl")
 include("tmem.jl")
@@ -66,5 +70,7 @@ function fence_after_thread_sync end
 
 "Order preceding TMEM operations before a following thread synchronization."
 function fence_before_thread_sync end
+
+include("ptx/ptx.jl")
 
 end

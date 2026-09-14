@@ -48,21 +48,21 @@ From the Tylo checkout, after instantiating `test/gpu`:
 
 ```sh
 TYLO_EVIDENCE=/tmp/tylo-evidence \
-  julia --project=test/gpu test/gpu/runtests.jl --attention
+  TYLO_PTX_ROOT=/path/to/pinned-PTX julia --project=test test/runtests.jl gpu/flash_attention
 
 # B200/B300 only:
 TYLO_EVIDENCE=/tmp/tylo-blackwell \
-  julia --project=test/gpu test/gpu/runtests.jl --attention --bench
+  TYLO_PTX_ROOT=/path/to/pinned-PTX julia --project=test test/runtests.jl gpu/flash_attention --bench
 ```
 
 Evidence output contains PTX and cubins for inspection. The resource script
 below also assembles the PTX verbosely and records machine-code statistics:
 
 ```sh
-julia --project=test/gpu test/gpu/resources.jl /tmp/tylo-evidence
+julia --project=test test/tools/resources.jl /tmp/tylo-evidence
 ```
 
 For cloud testing, wrap each invocation with a process timeout; a broken
 asynchronous kernel can otherwise wait indefinitely. A matching Compute
-Sanitizer can run `test/gpu/runtests.jl --attention` on B200/B300; the local
+Sanitizer can run `test/runtests.jl gpu/flash_attention` on B200/B300; the local
 GB10 sanitizer run covers register arithmetic and global stores only.

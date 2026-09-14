@@ -1,3 +1,4 @@
+# TEST_TARGET: cc==9.0
 include("../../examples/hopper/kernel.jl")
 function hopper_signature(T,n,partials,stages)
     ap = TMALoad(T,Val((64,64)),Val(2))
@@ -6,7 +7,7 @@ function hopper_signature(T,n,partials,stages)
     Tuple{CuDeviceMatrix{Float32,1},Tylo.DeviceTMA{typeof(ap),PTX.TMADescriptorPtr},
         Tylo.DeviceTMA{typeof(bp),PTX.TMADescriptorPtr},typeof(p),Int32,Val{stages}}
 end
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "TMA to Hopper WGMMA complete pipeline assembly" begin
     for T in (BFloat16,Float16), (n,partials) in ((8,1),(8,4),(16,1),(24,1),(64,1),(128,1),(256,1)), stages in (1,2)
         code = compile_kernel(hopper_gemm_kernel!,hopper_signature(T,n,partials,stages);
@@ -25,7 +26,7 @@ if !("--runtime-only" in ARGS)
 end
 end
 
-if CUDACore.functional() && capability(device()) == v"9.0"
+if capability_is(v"9.0")
 @testset "Hopper WGMMA runtime and producer/consumer reuse" begin
     rng = MersenneTwister(1049)
     for T in (BFloat16,Float16), (n,partials) in ((8,1),(8,4),(16,1),(24,1),(64,1),(128,1),(256,1)), stages in (1,2), k in (64,128,320,328)
@@ -56,36 +57,8 @@ else
     end
 end
 
-# An independent descriptor test uses ordinary generic-proxy shared stores,
-# then explicitly publishes them. Distinct coordinate values expose incorrect
-# descriptor origins that a constant-filled matrix would hide.
-@inline function wgmma_operand_probe!(out,p::WGMMA64{T,N,K},k0::Int32,::Val{Normalize}=Val(false)) where {T,N,K,Normalize}
-    workspace = @inbounds CuDynamicSharedArray(UInt8,32768+1024)
-    root = pointer(workspace)
-    root += (UInt32(0)-PTX.smem_addr_u32(root)) & UInt32(1023)
-    a = shared_tile(TMALoad(T,Val((128,64)),Val(2)),root)
-    b = shared_tile(TMALoad(T,Val((64,128)),Val(1)),root+16384)
-    tid = Int32(threadIdx().x)-Int32(1)
-    for i in tid:Int32(128):Int32(8191)
-        r,k = i÷Int32(64),i%Int32(64)
-        unsafe_store!(pointer(a,(r,k)),T(Float32((r+Int32(3)*k)%Int32(19)-Int32(9))))
-        unsafe_store!(pointer(b,(k,r)),T(Float32((Int32(2)*r+k)%Int32(17)-Int32(8))))
-    end
-    ptx"fence.proxy.async.shared::cta"()
-    sync_threads()
-    @inbounds ad = wgmma_operand(p,OperandA(),a,(Int32(64),k0))
-    @inbounds bd = wgmma_operand(p,OperandB(),b,(k0,Int32(8)))
-    c = finish_mma(wait_mma(mma_async(p,ad,bd,zero_accumulator(p))))
-    if Normalize
-        scores = c .* (1f0/128f0)
-        weights = exp.(scores .- maximum(scores;dims=2))
-        c = weights ./ sum(weights;dims=2)
-    end
-    dst = GlobalTile(pointer(out),@Layout((64, N), (1, 64)))
-    store!(dst,c,tid)
-    nothing
-end
-if !("--runtime-only" in ARGS)
+include("wgmma_defs.jl")
+begin # assembly checks
 @testset "WGMMA K extents and nonzero descriptor origins assemble" begin
     for T in (BFloat16,Float16), k in (16,32,64), n in (8,24), partials in unique((1,k÷16))
         p = WGMMA64(T,Val(n),Val(k),Val(partials))
@@ -97,7 +70,7 @@ if !("--runtime-only" in ARGS)
     end
 end
 end
-if CUDACore.functional() && capability(device()) == v"9.0"
+if capability_is(v"9.0")
 @testset "WGMMA shared stores and descriptor origins" begin
     for T in (BFloat16,Float16), k in (16,32,64), n in (8,24), partials in unique((1,k÷16)), k0 in unique((0,64-k))
         p = WGMMA64(T,Val(n),Val(k),Val(partials))

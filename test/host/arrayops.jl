@@ -49,8 +49,8 @@ end
     for dims in (:,0,3,(),(1,2),(2,2),2.0,(2.0,))
         @test_throws ArgumentError sum(f;dims)
     end
-    # Reducing the lane axis is a warp collective, unavailable without the PTX extension.
-    @test_throws ArgumentError sum(f;dims=1)
+    # Reducing the lane axis is a warp collective; its plan exists, and GPU tests run it.
+    @test Tylo.reduction_plan(Tylo.Layouts.layout(f),1).bits == [0,1,2,3,4]
     @test_throws ArgumentError sum(f)
     @test_throws ArgumentError sum(Float64.(f);dims=2)
     @test isequal(only(maximum(local_fragment((1f0,NaN32));dims=2)),NaN32)
@@ -123,7 +123,7 @@ end
     @test (@inferred map(exp,g)) === permutedims(map(exp,f))
     @test (@inferred arrayop_select(g)) === permutedims(arrayop_select(f))
     @test (@inferred broadcast(exp,g .- r)) === permutedims(exp.(f .- maximum(f;dims=2)))
-    @test_throws ArgumentError sum(g;dims=2) # a warp collective; unavailable on the host
+    @test Tylo.reduction_plan(Tylo.Layouts.layout(g),2).bits == [0,1,2,3,4]
     @test_throws ArgumentError sum(g)
     @test_throws DimensionMismatch f .+ g
     @test_throws DimensionMismatch g .+ maximum(f;dims=2)
@@ -175,7 +175,6 @@ end
     @test Tylo.reduction_plan(o,2).bits == [3,4]
     @test Tylo.reduction_plan(o,2).groups == [[1,3],[2,4]]
     @test Tylo.reduction_plan(Tylo.PermutedOwnership(o),1).bits == [3,4]
-    @test_throws ArgumentError sum(f;dims=2) # shuffles need the PTX extension
     @test_throws DimensionMismatch Fragment((1f0,),o)
     @test local_fragment((1f0,2f0)) === Fragment((1f0,2f0),Tylo.Layouts.LocalOwnership{2,2}())
     @test striped_fragment((1f0,2f0)) isa Fragment

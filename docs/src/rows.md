@@ -240,10 +240,13 @@ tile, not groups spanning independently scheduled tiles.
 ## Logical types and register packing
 
 `BFloat16.(f)` and `Float16.(f)` perform ordinary numerical conversion and return
-fragments of those element types. Some instructions consume two 16-bit values
-in each 32-bit register operand. `pack(T, f)` performs conversion and constructs
-that packed representation; `pack(f)` preserves every bit of already typed
-16-bit values. `unpack` returns an ordinary `Fragment{T}` without conversion.
+fragments of those element types. Instructions consume two 16-bit or four
+8-bit values in each 32-bit register operand. `pack(T, f)` performs conversion
+and constructs that packed representation; `pack(f)` preserves every bit of
+already typed 8- or 16-bit values. `unpack` returns an ordinary `Fragment{T}`
+without conversion. The 8-bit element types are `Int8`, `UInt8` and Tylo's
+`Float8E4M3` and `Float8E5M2`, whose FP32 conversions round to nearest even
+and saturate to the largest finite value, as `cvt.rn.satfinite` does.
 
 ```jldoctest
 julia> f = Fragment((1f0, -2f0), Tylo.Layouts.LocalOwnership{2,2}());
@@ -261,7 +264,8 @@ julia> Float32.(unpack(p)).data
 ```
 
 Ownership still counts logical elements, and adjacent *local slots* form each
-pair. Packing does not imply adjacent memory addresses or redistribute values.
+word, lowest element first. Packing does not imply adjacent memory addresses
+or redistribute values.
 A `PackedFragment(T, words, ownership)` constructor interprets supplied bits;
 it does not convert a different numeric format to `T`. NaN payload preservation
 is guaranteed for packing/unpacking already typed bits, not for numerical conversion.

@@ -12,13 +12,13 @@
     end
 end
 
-Base.@propagate_inbounds function Tylo.wgmma_operand(p::Tylo.WGMMA64{T,N,K},role::Role,
-        t::SharedTile{T,Tylo.TMASharedLayout{S,A}},origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {T,N,K,Role<:Union{OperandA,OperandB},S,A}
+Base.@propagate_inbounds function wgmma_operand(p::WGMMA64{T,N,K},role::Role,
+        t::SharedTile{T,TMASharedLayout{S,A}},origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {T,N,K,Role<:Union{OperandA,OperandB},S,A}
     # A/B compatibility is structural, even when bounds checks are elided.
     A == (Role === OperandA ? 2 : 1) || throw(ArgumentError("operand K axis does not match role"))
     @boundscheck begin
         PTX.smem_addr_u32(t.ptr) % UInt32(1024) == 0 || throw(ArgumentError("WGMMA storage alignment"))
-        Tylo.validate_wgmma(p,role,t.layout,origin)
+        validate_wgmma(p,role,t.layout,origin)
     end
     k,r = origin[A],origin[3-A]
     # Non-K origin is aligned to a full eight-row swizzle cycle. Start address
@@ -26,14 +26,14 @@ Base.@propagate_inbounds function Tylo.wgmma_operand(p::Tylo.WGMMA64{T,N,K},role
     start = PTX.smem_addr_u32(t.ptr) + (r*Int32(128)+k*Int32(2)) % UInt32
     desc = PTX.wgmma_descriptor(start;leading_byte_offset=16,stride_byte_offset=1024,
         swizzle=PTX.WgmmaSwizzle.B128)
-    Tylo.WGMMAOperand{typeof(p),Role}(desc)
+    WGMMAOperand{typeof(p),Role}(desc)
 end
 
-@generated function Tylo.mma_async(p::Tylo.WGMMA64{T,N,K,P},
-        a::Tylo.WGMMAOperand{Tylo.WGMMA64{T,N,K,P},OperandA},
-        b::Tylo.WGMMAOperand{Tylo.WGMMA64{T,N,K,P},OperandB},
-        c::Tylo.WGMMAAccumulator{Tylo.WGMMA64{T,N,K,P},R}) where {T,N,K,P,R}
-    dtype = T === Tylo.BFloat16 ? "bf16" : "f16"
+@generated function mma_async(p::WGMMA64{T,N,K,P},
+        a::WGMMAOperand{WGMMA64{T,N,K,P},OperandA},
+        b::WGMMAOperand{WGMMA64{T,N,K,P},OperandB},
+        c::WGMMAAccumulator{WGMMA64{T,N,K,P},R}) where {T,N,K,P,R}
+    dtype = T === BFloat16 ? "bf16" : "f16"
     instruction = ptx"wgmma.mma_async.sync.aligned.m64n$(N)k16.f32.$dtype.$dtype"
     init = [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
     ops = [begin
@@ -47,11 +47,11 @@ end
         $(init...)
         $(ops...)
         ptx"wgmma.commit_group.sync.aligned"()
-        Tylo.PendingWGMMA{typeof(p),$R}(($(vals...),))
+        PendingWGMMA{typeof(p),$R}(($(vals...),))
     end
 end
-@inline function Tylo.wait_mma(c::Tylo.PendingWGMMA{P}) where P
-    Tylo.WGMMAAccumulator(Tylo._plan(P),_wgmma_register_barrier(Val(:wait),c.data))
+@inline function wait_mma(c::PendingWGMMA{P}) where P
+    WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val(:wait),c.data))
 end
 # Reconstitute an isbits static plan, including validated constructor semantics.
-Tylo._plan(::Type{Tylo.WGMMA64{T,N,K,P}}) where {T,N,K,P} = Tylo.WGMMA64(T,Val(N),Val(K),Val(P))
+_plan(::Type{WGMMA64{T,N,K,P}}) where {T,N,K,P} = WGMMA64(T,Val(N),Val(K),Val(P))

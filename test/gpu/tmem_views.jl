@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 # Exercise TMEM address calculations and transfer-owned register arithmetic
 # on any supported GPU, without executing a TMEM instruction.
 using Tylo.Layouts: @Layout, coordinate
@@ -44,7 +45,7 @@ end
         @test !occursin("tcgen05.",code.ptx)
         @test occursin("cvt.rn.bf16x2.f32",code.ptx)
     end
-    if CUDACore.functional()
+    if runtime_supported(@__FILE__)
         values=randn(MersenneTwister(194),Float32,64,128)
         input=CuArray(vec(values))
         addresses=CuArray{UInt32}(undef,128*128)

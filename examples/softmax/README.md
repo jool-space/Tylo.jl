@@ -3,7 +3,7 @@
 Run from the Tylo root with the GPU development environment:
 
 ```sh
-julia --project=test/gpu examples/softmax/run.jl /tmp/tylo-softmax-results
+julia --project=test examples/softmax/run.jl /tmp/tylo-softmax-results
 ```
 
 The output directory must be new. The benchmark reports warm CUDA-event timings,
@@ -30,7 +30,7 @@ pass updates `SoftmaxState`; its second pass rereads inputs and emits normalized
 probabilities. It supports the same masks and FP32/BF16/FP16 storage conversion.
 
 ```sh
-julia --project=test/gpu examples/softmax/compare_streaming.jl /tmp/tylo-streaming-softmax-results
+julia --project=test examples/softmax/compare_streaming.jl /tmp/tylo-streaming-softmax-results
 ```
 
 This interleaves the full-row register kernel, fixed-capacity streaming kernel,

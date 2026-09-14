@@ -1,6 +1,7 @@
+# TEST_TARGET: cc>=8.0
 include("../../examples/streaming_attention/kernel.jl")
 include("../../examples/streaming_attention/reference.jl")
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Streaming attention assembly" begin
     cfg=StreamingAttention.configuration()
     for causal in (false,true)
@@ -16,7 +17,7 @@ if !("--runtime-only" in ARGS)
 
 end
 end
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Streaming attention masks, tails, empty keys and replay" begin
     for (m,n) in ((1,1),(3,0),(17,29),(64,64),(65,97),(129,257)),causal in (false,true)
         rng=MersenneTwister(m+n)

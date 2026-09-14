@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=9.0
 function tma_roundtrip!(out,binding,origin,iterations::Int32)
     bytes = transfer_bytes(binding)
     smem = @inbounds CuDynamicSharedArray(UInt8,bytes+1056)
@@ -29,7 +30,7 @@ function tma_roundtrip!(out,binding,origin,iterations::Int32)
     nothing
 end
 
-if CUDACore.functional() && capability(device()) >= v"9.0"
+if runtime_supported(@__FILE__)
 @testset "TMA roundtrip, logical axes, OOB and phase reuse" begin
     for T in (BFloat16,Float16), axis in (1,2), rows in (8,16,64,128)
         shape = axis == 2 ? (rows,64) : (64,rows)

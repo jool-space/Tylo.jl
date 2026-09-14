@@ -1,4 +1,4 @@
-# Run via test/gpu/runtests.jl --attention. Read the existing PTX kernel into
+# Run via test/gpu/flash_attention.jl. Read the existing PTX kernel into
 # two isolated modules; replace ONLY correction and epilogue in the second.
 # The digest makes a reference update an explicit review, never a silent change.
 using SHA
@@ -72,7 +72,7 @@ end
 end
 
 println("FlashAttention reference SHA256: ",FA_REFERENCE_SHA256)
-if CUDACore.functional() && CUDACore.capability(CUDACore.device()) in (v"10.0",v"10.3")
+if capability_major(10)
     run_attention_cases()
 else
     @testset "FlashAttention execution requires B200/B300" begin

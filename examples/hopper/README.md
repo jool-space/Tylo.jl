@@ -9,8 +9,8 @@ From the Tylo checkout, with a sibling PTX checkout at
 `32e36c122bc1c7af5f171cf478324b628b06af3a` or a compatible later revision:
 
 ```sh
-julia --project=test/gpu -e 'using Pkg; Pkg.instantiate()'
-julia --project=test/gpu test/gpu/runtests.jl
+julia --project=. -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+julia --project=test test/runtests.jl
 ```
 
 The suite always assembles the Hopper kernels. On H100/H200 it also checks
@@ -20,7 +20,7 @@ explicitly skip other architectures. TMA alone also runs on GB10.
 
 ```sh
 compute-sanitizer --tool memcheck --error-exitcode 1 --num-cuda-barriers 16 \
-  julia --project=test/gpu test/gpu/sanitize.jl
+  julia --project=test test/tools/sanitize.jl
 ```
 
 Repeat with `racecheck` and `synccheck` using a sanitizer compatible with the

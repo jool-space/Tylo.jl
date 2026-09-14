@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 using Tylo.Layouts: @Layout
 # This path runs on GB10 too: no TMEM instructions, but the SAME fragment
 # scale/slice/BF16/vector-store implementation used by the attention epilogue.
@@ -62,7 +63,7 @@ end
     @test occursin("st.global.v4.b32",code.ptx)
 end
 
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
     @testset "GPU fragment arithmetic and packed stores" begin
         rng = MersenneTwister(47)
         values = randn(rng,Float32,32*64)

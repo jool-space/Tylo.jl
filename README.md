@@ -76,25 +76,28 @@ approach. The [design](docs/src/design.md) explains those boundaries.
 
 ## Development
 
-Host tests need no GPU (declared compatibility: Julia 1.10+):
+The test project is a workspace member, so one instantiate covers the
+package, its tests and its docs (Julia 1.10+; CUDACore and PTX are pulled in
+by the test project):
 
 ```sh
-julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+julia --project=. -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+julia --project=test test/runtests.jl --jobs=4        # host and GPU tiers
+julia --project=test test/runtests.jl host            # host only
+julia --project=test test/runtests.jl gpu/gemm gpu/atoms
+julia --project=test examples/gemm/run.jl 65 97 73
 ```
 
-The GPU development environment supports Julia 1.10+ and requires a sibling
-PTX checkout.
-Recent local runs use Julia 1.13:
-
-```sh
-julia --project=test/gpu -e 'using Pkg; Pkg.develop([PackageSpec(path="."), PackageSpec(path="../PTX")]); Pkg.instantiate()'
-julia --project=test/gpu test/gpu/runtests.jl
-julia --project=test/gpu examples/gemm/run.jl 65 97 73
-```
-
-`using Tylo, PTX, CUDACore` activates the GPU implementations. The optional
-`--attention` comparison requires an exact reference file; see [validation and
-reproduction](docs/src/validation.md) before running it with a newer PTX checkout.
+Tests run in parallel with `ParallelTestRunner`. `host/` needs no GPU.
+`gpu/` files need the CUDA compiler; their assembly checks always run and
+their runtime sections run when the device satisfies the file's
+`# TEST_TARGET: cc>=8.0`-style banner (`test/targets.jl`). Set
+`TYLO_REQUIRE_GPU_RUNTIME=true` to fail instead of skipping without a GPU,
+`TYLO_SNAPSHOT=test/snapshots/<manifest>.toml` to compare every compiled
+kernel's machine code against a recorded baseline, and `TYLO_EVIDENCE=<dir>`
+to save PTX and cubins. The datacenter attention comparison
+(`gpu/flash_attention`) needs the pinned PTX reference file; see
+[validation and reproduction](docs/src/validation.md).
 
 Build the manual locally, including its host doctests:
 

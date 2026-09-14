@@ -31,10 +31,10 @@ The actual loop drains the last copy group with `wait_copies(Val(0))`.
 From the repository root, with the GPU test environment instantiated:
 
 ```sh
-julia --project=test/gpu examples/gemm/run.jl
-julia --project=test/gpu test/gpu/runtests.jl
+julia --project=test examples/gemm/run.jl
+julia --project=test test/runtests.jl
 compute-sanitizer --tool racecheck --error-exitcode 86 \
-  julia --project=test/gpu test/gpu/sanitize.jl
+  julia --project=test test/tools/sanitize.jl
 ```
 
 Use a Compute Sanitizer version compatible with the CUDA compiler/runtime
@@ -59,7 +59,7 @@ measurement order alternates after six warmup rounds. Compare configurations onl
 
 ## Boundary tiles
 
-Run `julia --project=test/gpu examples/gemm/run.jl 65 97 73` for a ragged case.
+Run `julia --project=test examples/gemm/run.jl 65 97 73` for a ragged case.
 The demo selects bounded copies and stores automatically. Direct kernel callers
 use `gemm_config(...; bounds=true)` and ceiling-divided launch dimensions.
 See [the bounds contract](../../docs/src/boundaries.md) for partial vectors,

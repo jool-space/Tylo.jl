@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 using Tylo.Layouts: @Layout
 
 function conversion_probe!(out,input,atom)
@@ -48,7 +49,7 @@ function chained_mma_kernel!(out,a_data,b_data,v_data,atom::MMAAtom{(16,8,16),T}
     end
     nothing
 end
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Same-lane operand conversion assembly" begin
     for T in (BFloat16,Float16),arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
         atom=MMAAtom((16,8,16),T)
@@ -60,7 +61,7 @@ if !("--runtime-only" in ARGS)
     end
 end
 end
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Accumulator conversion bits and shared-load oracle" begin
     for T in (BFloat16,Float16)
         atom=MMAAtom((16,8,16),T)

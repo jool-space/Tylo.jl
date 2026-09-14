@@ -93,7 +93,7 @@ Fingerprint every `.cubin` in `directory` and write a manifest with the
 toolchain and source revisions that produced them.
 """
 function snapshot_manifest(directory; output=joinpath(directory,"manifest.toml"))
-    tylo = normpath(joinpath(@__DIR__,"..",".."))
+    tylo = normpath(joinpath(@__DIR__,".."))
     ptx = normpath(joinpath(tylo,"..","PTX"))
     kernels = Dict{String,Any}()
     for file in sort(readdir(directory))
@@ -139,16 +139,35 @@ function snapshot_check(name, image::Vector{UInt8})
         any(pattern -> occursin(Regex(pattern),name),allowed) && (status = :allowed)
     end
     push!(get!(_SNAPSHOT_STATUSES,status,String[]),name)
+    # Test workers run in parallel; the runner aggregates their statuses.
+    if haskey(ENV,"TYLO_SNAPSHOT_REPORT") && status !== :disabled
+        open(ENV["TYLO_SNAPSHOT_REPORT"],"a") do io
+            println(io,status," ",name)
+        end
+    end
     status in (:disabled,:absent,:identical,:equivalent,:reordered,:allowed) && return status
     @test status in (:identical,:equivalent,:reordered)
     status
 end
 
-"Print how every saved kernel compared against the selected manifest."
-function snapshot_report()
+"""
+    snapshot_report([file])
+
+Print how every saved kernel compared against the selected manifest, from
+this process or from the statuses workers appended to `file`.
+"""
+function snapshot_report(file=nothing)
+    statuses = _SNAPSHOT_STATUSES
+    if file !== nothing
+        statuses = Dict{Symbol,Vector{String}}()
+        for line in eachline(file)
+            status,name = split(line," ";limit=2)
+            push!(get!(statuses,Symbol(status),String[]),name)
+        end
+    end
     isempty(get(ENV,"TYLO_SNAPSHOT","")) && return
     for status in (:identical,:equivalent,:reordered,:allowed,:absent,:changed)
-        names = get(_SNAPSHOT_STATUSES,status,String[])
+        names = get(statuses,status,String[])
         isempty(names) && continue
         println("snapshot ",status,": ",length(names),
                 status in (:identical,) ? "" : " ("*join(sort(names),", ")*")")
@@ -174,7 +193,7 @@ function check_snapshot(name, image::Vector{UInt8})
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    length(ARGS) == 1 || error("usage: snapshot.jl EVIDENCE_DIRECTORY")
+    length(ARGS) == 1 || error("usage: julia --project=test test/snapshot.jl EVIDENCE_DIRECTORY")
     path = snapshot_manifest(abspath(only(ARGS)))
     manifest = TOML.parsefile(path)
     println(path,": ",manifest["toolchain"]["kernel_count"]," kernels")

@@ -1,17 +1,8 @@
+# TEST_TARGET: cc>=8.0
 include("../../examples/softmax/kernel.jl")
 using .SoftmaxExample: lane_softmax_kernel!, warp_softmax_kernel!, mma_softmax_kernel!
 
-function softmax_reference(input,mask)
-    out=zeros(Float64,size(input))
-    for row in axes(input,2)
-        valid=findall(mask[:,row])
-        isempty(valid) && continue
-        x=Float64.(input[valid,row]); weights=exp.(x .- maximum(x))
-        out[valid,row]=weights ./ sum(weights)
-    end
-    out
-end
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Softmax and MMA epilogue assembly" begin
     config=SoftmaxExample.gemm_config(BFloat16;block=(32,24,16),warps=(1,1),stages=1)
     for (name,f,tt,threads) in (
@@ -28,7 +19,7 @@ if !("--runtime-only" in ARGS)
     end
 end
 end
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Masked row softmax" begin
     for T in (Float32,BFloat16,Float16),width in (1,3,17,33,97,129)
         rows=19; rng=MersenneTwister(width)

@@ -86,9 +86,9 @@ julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 The GPU environment expects a sibling `../PTX` checkout and Julia 1.10 or later:
 
 ```sh
-julia --project=test/gpu -e 'using Pkg; Pkg.develop([PackageSpec(path="."), PackageSpec(path="../PTX")]); Pkg.instantiate()'
-julia --project=test/gpu test/gpu/runtests.jl
-julia --project=test/gpu examples/gemm/run.jl 65 97 73
+julia --project=. -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+julia --project=test test/runtests.jl --jobs=4
+julia --project=test examples/gemm/run.jl 65 97 73
 ```
 
 Current local checks use Julia 1.13. Host compatibility is declared from Julia

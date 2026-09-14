@@ -15,10 +15,12 @@
     end
 end
 
-"Butterfly reduction over lane offsets W/2 down to 1; implemented by the PTX extension."
-_warp_reduce(op,x,width) = throw(ArgumentError("warp shuffles require the PTX extension"))
-"One xor-shuffle exchange at a lane offset; implemented by the PTX extension."
-_shuffle_xor(op,x,offset) = throw(ArgumentError("warp shuffles require the PTX extension"))
+# Warp communication exists only on the device: CUDACoreExt overrides these
+# in the device method table, so host calls raise instead of miscompiling.
+"Butterfly reduction over lane offsets W/2 down to 1."
+_warp_reduce(op,x,width) = throw(ArgumentError("warp shuffles run on the device"))
+"One xor-shuffle exchange at a lane offset."
+_shuffle_xor(op,x,offset) = throw(ArgumentError("warp shuffles run on the device"))
 
 """
     _reduce_values(op, data, ownership, Val(axis))

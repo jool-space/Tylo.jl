@@ -66,7 +66,7 @@ julia --project=examples/streaming_attention examples/streaming_attention/run.jl
 
 Use a fresh output directory. The dated validation report records the exact
 PTX revision used for the GB10 results. The GPU test suite includes this kernel;
-`test/gpu/sanitize.jl` includes its copy/compute/reuse and replay workload.
+`test/tools/sanitize.jl` includes its copy/compute/reuse and replay workload.
 
 The benchmark compares against materialized cuBLAS QK and PV with a scalar warp
 softmax between them. It fixes `CUBLAS_COMPUTE_32F` and `DEFAULT_MATH`, BF16 inputs,

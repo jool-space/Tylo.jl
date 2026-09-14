@@ -215,9 +215,11 @@ end
     plan = window_plan(o,O,S)
     plan === nothing && return :(throw(ArgumentError("register window must retain the participating threads")))
     slots = plan.slots
-    iseven(length(slots)) && all(isodd(slots[2k-1]) && slots[2k] == slots[2k-1]+1 for k in 1:length(slots)÷2) ||
-        return :(throw(ArgumentError("packed windows require complete element pairs")))
-    words = [(slots[2k-1]+1)÷2 for k in 1:length(slots)÷2]
+    per = _per_word(T)
+    length(slots) % per == 0 && all((slots[per*(k-1)+1]-1) % per == 0 &&
+        slots[per*(k-1)+1:per*k] == collect(slots[per*(k-1)+1]:slots[per*(k-1)+1]+per-1) for k in 1:length(slots)÷per) ||
+        return :(throw(ArgumentError("packed windows require complete register words")))
+    words = [(slots[per*(k-1)+1]-1)÷per+1 for k in 1:length(slots)÷per]
     ownership = simplify_ownership(plan.ownership)
     quote
         Base.@inline

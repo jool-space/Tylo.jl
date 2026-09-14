@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 if !isdefined(@__MODULE__,:tiled_gemm_kernel!)
     include("../../examples/gemm/kernel.jl")
 end
@@ -67,7 +68,7 @@ function check_ragged_gemm(T,cfg,m,n,k;pad=0,outputtype=Float32)
     @test all(==(sentinel),actual[m+1:end,:]) && all(==(sentinel),actual[:,n+1:end])
 end
 
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Bounded copy and GEMM assembly" begin
     cfg=gemm_config(BFloat16;bounds=true)
     tt=Tuple{CuDeviceVector{Float32,1},CuDeviceVector{BFloat16,1},CuDeviceVector{BFloat16,1},
@@ -82,7 +83,7 @@ if !("--runtime-only" in ARGS)
     end
 end
 end
-if CUDACore.functional() && CUDACore.capability(device()) >= v"8.0"
+if runtime_supported(@__FILE__)
 @testset "Predication and nonzero swizzle origins" begin
     for T in (BFloat16,Float16,Float32),axis in (1,2),step in (1,2),origin in ((0,0),(-3,5),(7,-1),(5,13),(40,40))
         check_boundary_copy(T,axis,step,origin)

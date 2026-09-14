@@ -1,3 +1,5 @@
+# TEST_TARGET: cc>=8.0
+include("wgmma_defs.jl")
 # Exercise Hopper's register ownership on GB10 without issuing Hopper MMA.
 # The matrix input/output is ordinary column-major Julia storage.
 function wgmma_fragment_kernel!(out,input,::Val{N},::Val{A}) where {N,A}
@@ -17,7 +19,7 @@ function wgmma_fragment_kernel!(out,input,::Val{N},::Val{A}) where {N,A}
 end
 @testset "WGMMA values use ordinary fragment operations" begin
     for n in (8,24,64,256), axis in (1,2)
-        if !("--runtime-only" in ARGS)
+        begin # assembly checks
             code = compile_kernel(wgmma_fragment_kernel!,Tuple{CuDeviceMatrix{Float32,1},CuDeviceMatrix{Float32,1},Val{n},Val{axis}};
                                   arch=CUDACore.SMVersion(12,1,:arch))
             save_code("wgmma-fragments-n$n-a$axis",code)
@@ -26,7 +28,7 @@ end
             @test !occursin(r"\bcall",body)
             @test occursin("shfl.sync.bfly",body)
         end
-        if CUDACore.functional()
+        if runtime_supported(@__FILE__)
             input = randn(MersenneTwister(1053),Float32,64,n)
             input[1,:] .= -17f0
             output = CuArray{Float32}(undef,64,n)
@@ -41,7 +43,7 @@ end
 @testset "Completed WGMMA and fused softmax epilogue" begin
     for T in (BFloat16,Float16), n in (8,24), k in (16,64)
         p = WGMMA64(T,Val(n),Val(k))
-        if !("--runtime-only" in ARGS)
+        begin # assembly checks
             code = compile_kernel(wgmma_operand_probe!,Tuple{CuDeviceMatrix{Float32,1},typeof(p),Int32,Val{true}};
                                   arch=CUDACore.SMVersion(9,0,:arch))
             save_code("hopper-softmax-$(T)-n$n-k$k",code)
@@ -52,7 +54,7 @@ end
             @test !occursin(r"\bcall",body)
             @test !occursin(".local .",body)
         end
-        if CUDACore.functional() && capability(device()) == v"9.0"
+        if capability_is(v"9.0")
             out = CuArray{Float32}(undef,64,n)
             @cuda threads=128 shmem=33792 arch=CUDACore.SMVersion(9,0,:arch) wgmma_operand_probe!(out,p,Int32(0),Val(true))
             a = Float64[(r+3kk)%19-9 for r in 64:127, kk in 0:k-1]

@@ -10,24 +10,33 @@ bindings.
 | Source | Responsibility | Read with |
 |:--|:--|:--|
 | `src/Tylo.jl` | Public bindings, file ordering and device-operation declarations | `Project.toml` for extension triggers |
-| `src/tuples.jl` | Internal range-to-tuple expansion with inlined scalar calls | `test/tuples.jl`, `test/gpu/tuples.jl` |
-| `src/layouts/layouts.jl`, `src/layouts/` | Affine coordinate maps, static notation, composition, swizzles and windows | `test/layouts.jl`, `test/layout_macro.jl` |
-| `src/memory.jl` | Typed global/shared pointers plus storage layout; address-unit conversion | `ext/copy.jl`, `test/gpu/gemm.jl` |
-| `src/fragments.jl`, `src/arrayops.jl` | Local values plus ownership, generic scalar broadcast, axis views and supported reductions/windows | `test/arrayops.jl`, `test/gpu/arrayops.jl` |
-| `src/enumerate.jl` | Host enumeration of ownership tables: reduction plans, broadcast slot maps, affine fits, windows and in-lane relayouts | `test/enumerate.jl` |
-| `src/rows.jl`, `ext/rows.jl` | Generated reductions from derived plans; warp shuffle bindings | `test/rows.jl`, `test/gpu/rows.jl` |
-| `src/copy.jl`, `ext/copy.jl` | Vector copy assignment, structural validation, full and bounded copies | `test/gpu/boundaries.jl` |
-| `src/mma.jl`, `ext/mma.jl` | `MMAAtom` operand ownerships, tiling, instruction bindings, generic loads/stores and same-lane conversion | `test/gpu/atoms.jl`, `test/gpu/gemm.jl`, `test/gpu/operand_a.jl` |
-| `src/tma.jl`, `ext/tma.jl`, `ext/CUDACoreExt.jl` | Canonical TMA storage, descriptor preparation and launch/lifetime binding | `test/hopper.jl`, `test/gpu/tma.jl` |
-| `src/wgmma.jl`, `ext/wgmma.jl` | Warpgroup plan, shared descriptors, partial accumulators and register-dependent completion | `test/gpu/wgmma.jl` |
-| `src/tmem.jl`, `ext/PTXExt.jl` | TMEM address mapping, transfer partitions, pending loads and packed stores | `test/tmem.jl`, `test/gpu/tmem_views.jl`, `test/gpu/tmem.jl` |
-| `src/online.jl` | Current online softmax state, update, merge and normalization | `test/online.jl`, `test/gpu/online.jl` |
+| `src/tuples.jl` | Internal range-to-tuple expansion with inlined scalar calls | `test/host/tuples.jl`, `test/gpu/tuples.jl` |
+| `src/elements.jl` | Element widths and the FP8 element types (Microfloats twins with `cvt.rn.satfinite` semantics) | `test/host/elements.jl` |
+| `src/layouts/layouts.jl`, `src/layouts/` | Affine coordinate maps, static notation, composition, swizzles and windows | `test/host/layouts.jl`, `test/host/layout_macro.jl` |
+| `src/memory.jl` | Typed global/shared pointers plus storage layout; address-unit conversion | `src/ptx/copy.jl`, `test/gpu/gemm.jl` |
+| `src/fragments.jl`, `src/arrayops.jl` | Local values plus ownership, generic scalar broadcast, axis views and supported reductions/windows | `test/host/arrayops.jl`, `test/gpu/arrayops.jl` |
+| `src/enumerate.jl` | Host enumeration of ownership tables: reduction plans, broadcast slot maps, affine fits, windows and in-lane relayouts | `test/host/enumerate.jl` |
+| `src/rows.jl`, `src/ptx/rows.jl` | Generated reductions from derived plans; warp shuffle bindings | `test/host/rows.jl`, `test/gpu/rows.jl` |
+| `src/copy.jl`, `src/ptx/copy.jl` | Vector copy assignment, structural validation, full and bounded copies | `test/gpu/boundaries.jl` |
+| `src/mma.jl`, `src/ptx/mma.jl` | `MMAAtom` operand ownerships, tiling, instruction bindings, generic loads/stores and same-lane conversion | `test/gpu/atoms.jl`, `test/gpu/gemm.jl`, `test/gpu/operand_a.jl` |
+| `src/tma.jl`, `src/ptx/tma.jl`, `ext/CUDACoreExt.jl` | Canonical TMA storage, descriptor preparation and launch/lifetime binding | `test/host/hopper.jl`, `test/gpu/tma.jl` |
+| `src/wgmma.jl`, `src/ptx/wgmma.jl` | Warpgroup plan, shared descriptors, partial accumulators and register-dependent completion | `test/gpu/wgmma.jl` |
+| `src/tmem.jl`, `src/ptx/ptx.jl` | TMEM address mapping, transfer partitions, pending loads and packed stores | `test/host/tmem.jl`, `test/gpu/tmem_views.jl`, `test/gpu/tmem.jl` |
+| `src/online.jl` | Current online softmax state, update, merge and normalization | `test/host/online.jl`, `test/gpu/online.jl` |
 
-`using Tylo` loads the pure descriptions and host operations. Loading PTX
-activates `PTXExt`, which supplies device methods. Loading CUDACore as well
-activates `CUDACoreExt` for descriptor preparation and adaptation of owned
-resources into device bindings. The `ext/` directory is therefore part of the
-implementation, not optional example code.
+`using Tylo` loads the descriptions, host operations and, from `src/ptx/`,
+the PTX instruction bindings; PTX.jl is an ordinary dependency. Loading
+CUDACore activates `CUDACoreExt` for descriptor preparation, adaptation of
+owned resources into device bindings, and the device overrides of
+host-callable generics such as `pack` and the warp shuffles: the host keeps a
+generic or raising method, and kernels compiled through CUDACore's method
+table use the PTX implementation.
+
+Tests live in `test/host/` (no GPU), `test/gpu/` (CUDA compiler required;
+runtime sections gated by each file's `# TEST_TARGET:` banner) and
+`test/tools/` (sanitizer and evidence scripts). `test/setup.jl` is loaded into
+every parallel worker with the fixtures, kernel compilation helpers and the
+machine-code snapshot checks of `test/snapshot.jl`.
 
 ## Follow a broadcast into registers
 

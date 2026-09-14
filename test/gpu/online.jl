@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 include("../../examples/softmax/streaming.jl")
 
 function online_probe!(maxima,sums,numerator,input,values,kind,::Val{N}) where N
@@ -21,7 +22,7 @@ function online_probe!(maxima,sums,numerator,input,values,kind,::Val{N}) where N
     end
     nothing
 end
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Fixed-capacity streaming softmax assembly" begin
     tt=Tuple{CuDeviceMatrix{Float32,1},CuDeviceMatrix{Float32,1},CuDeviceMatrix{Bool,1},Val{4}}
     for arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
@@ -32,7 +33,7 @@ if !("--runtime-only" in ARGS)
     end
 end
 end
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Online state distributed rows" begin
     for kind in (Val(:local),Val(:warp),MMAAtom((16,8,16),BFloat16),
                  TiledMMA(MMAAtom((16,8,16),BFloat16),Val((2,1)),Val((2,3)),Val(16)))

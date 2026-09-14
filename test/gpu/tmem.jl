@@ -1,3 +1,4 @@
+# TEST_TARGET: cc==10|cc==11
 using Tylo.Layouts: @Layout
 # A real allocation and round trip on datacenter Blackwell. Raw PTX readback
 # checks Tylo's packed TMEM store independently of its typed load path.
@@ -50,7 +51,7 @@ end
     end
 end
 
-if CUDACore.functional() && CUDACore.capability(CUDACore.device()) in (v"10.0",v"10.3")
+if runtime_supported(@__FILE__)
     @testset "TMEM round-trip execution" begin
         values = randn(MersenneTwister(93),Float32,128*128)
         input = CuArray(values)

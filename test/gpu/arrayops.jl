@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 using Tylo.Layouts: @Layout
 row_fragment(o::Tylo.Layouts.Ownership,data) = Fragment(data,o)
 function array_pointwise!(output,input,kind,::Val{N},::Val{Permute}) where {N,Permute}
@@ -30,7 +31,7 @@ function array_softmax!(output,minima,input,kind,::Val{N},::Val{Permute}) where 
     nothing
 end
 
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Fragment broadcast and permutation assembly" begin
     patch=Tylo.Layouts.Ownership(Val((16,8)),@Layout(((8,4),(2,2)),((2,32),(1,16))))
     for permute in (false,true)
@@ -60,7 +61,7 @@ if !("--runtime-only" in ARGS)
 end
 end
 
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Fragment arithmetic and reductions on either logical axis" begin
     atom=MMAAtom((16,8,16),BFloat16)
     cases=Any[(Val(:local),3,32),(Val(:warp),3,64),(atom,4,32)]

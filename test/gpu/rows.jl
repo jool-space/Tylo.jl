@@ -1,8 +1,4 @@
-row_fragment(::Val{:local},data) = local_fragment(data)
-row_fragment(::Val{:warp},data) = striped_fragment(data)
-row_fragment(a::MMAAtom,data) = Fragment(data,operand_layout(a,Accumulator()))
-@inline row_fragment(p::TiledMMA,data) = Fragment(data,operand_layout(p,Accumulator()))
-row_words(f) = f.data
+# TEST_TARGET: cc>=8.0
 function row_probe!(sums,maxima,shifted,input,kind,::Val{N}) where N
     t=Int32(threadIdx().x)-Int32(1)
     f=row_fragment(kind,ntuple(i -> @inbounds(input[N*t+i]),Val(N)))
@@ -18,16 +14,8 @@ function row_probe!(sums,maxima,shifted,input,kind,::Val{N}) where N
     nothing
 end
 
-# Independent reference coordinates; do not use the ownership being tested.
-function reference_row(kind,n,t,e)
-    kind isa Val{:local} && return t
-    kind isa Val{:warp} && return t÷32
-    rm = kind isa MMAAtom ? 1 : typeof(kind).parameters[3][1]
-    atom,word=e÷4,e%4
-    16rm*(t÷32)+(t%32)÷4+8*(word÷2)+16*(atom%rm)
-end
 
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Row collective assembly" begin
     for (kind,n,nshfl) in ((Val(:local),17,0),(Val(:warp),3,10),(MMAAtom((16,8,16),BFloat16),4,8)),
         arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
@@ -41,7 +29,7 @@ if !("--runtime-only" in ARGS)
     end
 end
 end
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Row reductions, result replication and broadcasts" begin
     cases=Any[(Val(:local),n,32) for n in (1,3,17)]
     append!(cases,[(Val(:warp),n,64) for n in (1,3,17)])

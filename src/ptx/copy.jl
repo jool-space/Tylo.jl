@@ -8,15 +8,15 @@
     nothing
 end
 
-@generated function Tylo.copy_async!(p::CopyPlan{S,Threads,Axis},
+@generated function copy_async!(p::CopyPlan{S,Threads,Axis},
         dst::SharedTile{T},src::GlobalTile{T},tid::Integer) where {S,Threads,Axis,T}
-    v,n = Tylo._copy_vectors(CopyPlan{S,Threads,Axis}(),T)
+    v,n = _copy_vectors(CopyPlan{S,Threads,Axis}(),T)
     copies = Expr[]
     for pass in 0:cld(n,Threads)-1
         push!(copies,quote
             index = tid + oftype(tid,$(pass*Threads))
             if index < oftype(tid,$n)
-                c = Tylo._copy_coordinate(p,index,Val($v))
+                c = _copy_coordinate(p,index,Val($v))
                 @boundscheck begin
                     _check_vector(dst.layout,c,$Axis,Val($v),T)
                     _check_vector(src.layout,c,$Axis,Val($v),T)
@@ -33,8 +33,8 @@ end
         nothing
     end
 end
-@inline Tylo.commit_copies() = ptx"cp.async.commit_group"()
-@inline Tylo.wait_copies(::Val{N}) where N = ptx"cp.async.wait_group"(Val(N))
+@inline commit_copies() = ptx"cp.async.commit_group"()
+@inline wait_copies(::Val{N}) where N = ptx"cp.async.wait_group"(Val(N))
 
 @generated function _scalar_copy_vector!(dst::SharedTile{T},src::GlobalTile{T},c,q,
                                          ::Val{Axis},::Val{V}) where {T,Axis,V}
@@ -43,7 +43,7 @@ end
         push!(stores,quote
             d=(c[1]+oftype(c[1],$(Axis==1 ? j : 0)),c[2]+oftype(c[2],$(Axis==2 ? j : 0)))
             s=(q[1]+$(Axis==1 ? j : 0),q[2]+$(Axis==2 ? j : 0))
-            x=Tylo._valid_coordinate(src,s) ? unsafe_load(pointer(src,s)) : zero(T)
+            x=_valid_coordinate(src,s) ? unsafe_load(pointer(src,s)) : zero(T)
             unsafe_store!(pointer(dst,d),x)
         end)
     end
@@ -53,21 +53,21 @@ end
         nothing
     end
 end
-@generated function Tylo.copy_async!(p::CopyPlan{S,Threads,Axis},dst::SharedTile{T},
+@generated function copy_async!(p::CopyPlan{S,Threads,Axis},dst::SharedTile{T},
         src::GlobalTile{T},origin::Tuple,tid::Integer) where {S,Threads,Axis,T}
-    v,n=Tylo._copy_vectors(CopyPlan{S,Threads,Axis}(),T)
+    v,n=_copy_vectors(CopyPlan{S,Threads,Axis}(),T)
     copies=Expr[]
     for pass in 0:cld(n,Threads)-1
         push!(copies,quote
             index=tid+oftype(tid,$(pass*Threads))
             if index < oftype(tid,$n)
-                c=Tylo._copy_coordinate(p,index,Val($v))
+                c=_copy_coordinate(p,index,Val($v))
                 @boundscheck _check_vector(dst.layout,c,$Axis,Val($v),T)
                 # Widen before adding an origin or multiplying global strides.
                 q=(Int(origin[1])+Int(c[1]),Int(origin[2])+Int(c[2]))
-                full=Tylo._valid_coordinate(src,q) && q[$Axis] <= size(src)[$Axis]-$v
+                full=_valid_coordinate(src,q) && q[$Axis] <= size(src)[$Axis]-$v
                 copied=false
-                if full && Tylo._contiguous_vector(src.layout,q,Val($Axis),Val($v))
+                if full && _contiguous_vector(src.layout,q,Val($Axis),Val($v))
                     source=pointer(src,q)
                     if reinterpret(UInt64,source)%UInt64(16)==UInt64(0)
                         ptx"cp.async.cg.shared.global"(pointer(dst,c),source,Val(16))

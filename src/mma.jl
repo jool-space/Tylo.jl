@@ -21,28 +21,37 @@ struct MMAAtom{S,TA,TB,TC}
         new{S,TA,TB,TC}()
     end
 end
-Base.@constprop :aggressive @inline MMAAtom(shape::NTuple{3,Int},::Type{TA},::Type{TC}=Float32) where {TA,TC} =
+Base.@constprop :aggressive @inline MMAAtom(shape::NTuple{3,Int},::Type{TA},::Type{TC}=_default_accumulator(TA)) where {TA,TC} =
     MMAAtom{shape,TA,TA,TC}()
+Base.@constprop :aggressive @inline MMAAtom(shape::NTuple{3,Int},::Type{TA},::Type{TB},::Type{TC}) where {TA,TB,TC} =
+    MMAAtom{shape,TA,TB,TC}()
+_default_accumulator(::Type{T}) where T = T <: Integer ? Int32 : Float32
 Base.size(::MMAAtom{S}) where S = S
 threads(::MMAAtom) = 32
 Base.eltype(::MMAAtom{S,TA,TB,TC},::OperandA) where {S,TA,TB,TC} = TA
 Base.eltype(::MMAAtom{S,TA,TB,TC},::OperandB) where {S,TA,TB,TC} = TB
 Base.eltype(::MMAAtom{S,TA,TB,TC},::Accumulator) where {S,TA,TB,TC} = TC
 
-_element_bits(::Type{BFloat16}) = 16
-_element_bits(::Type{Float16}) = 16
-_element_bits(::Type{Float32}) = 32
-_element_bits(::Type) = 0
+_warp_shapes(::Val{8}) = ((16,8,16),(16,8,32))
 _warp_shapes(::Val{16}) = ((16,8,8),(16,8,16))
 _warp_shapes(::Val{32}) = ((16,8,4),(16,8,8))
 _warp_shapes(::Val) = ()
+_input_family(::Type{T}) where T<:Union{Float8E4M3,Float8E5M2} = :fp8
+_input_family(::Type{T}) where T<:Union{Int8,UInt8} = :int8
+_input_family(::Type{T}) where T<:Union{BFloat16,Float16} = :fp16
+_input_family(::Type{Float32}) = :tf32
+_input_family(::Type) = :none
 # Pure and inlinable: the constructor may run inside a kernel.
 @inline function _check_atom(S,TA,TB,TC)
     S isa NTuple{3,Int} || throw(ArgumentError("MMA shape must be an (m,n,k) tuple"))
-    TA === TB || throw(ArgumentError("A and B must share an element type"))
+    family = _input_family(TA)
+    family !== :none && family === _input_family(TB) ||
+        throw(ArgumentError("A and B must share an input family"))
+    family === :fp16 && TA !== TB && throw(ArgumentError("16-bit A and B must share a type"))
     S in _warp_shapes(Val(_element_bits(TA))) ||
         throw(ArgumentError("unsupported warp MMA shape for these inputs"))
-    TC === Float32 || throw(ArgumentError("accumulators are FP32"))
+    TC === (family === :int8 ? Int32 : Float32) || (TC === Float16 && TA === Float16) ||
+        throw(ArgumentError("unsupported accumulator type for these inputs"))
     nothing
 end
 
@@ -93,6 +102,9 @@ function load_a end
 function load_b end
 "Collectively multiply operands and return the updated immutable accumulator."
 function mma end
+"Atoms with an instruction binding."
+instruction_atoms() = copy(_INSTRUCTION_ATOMS)
+const _INSTRUCTION_ATOMS = MMAAtom[]
 """
     load_fragment(ownership, tile, thread)
 
@@ -117,8 +129,10 @@ destination region for each thread.
 """
 function store! end
 
-@inline zero_accumulator(a::MMAAtom{S,TA,TB,TC}) where {S,TA,TB,TC} =
-    Fragment(ntuple(_ -> zero(TC),Val(4)),operand_layout(a,Accumulator()))
+@inline function zero_accumulator(a::MMAAtom{S,TA,TB,TC}) where {S,TA,TB,TC}
+    values = Fragment(ntuple(_ -> zero(TC),Val(4)),operand_layout(a,Accumulator()))
+    _element_bits(TC) == 32 ? values : pack(values)
+end
 
 """
     TiledMMA(atom, Val((warps_m,warps_n)), Val((repeat_m,repeat_n)), Val(k))
@@ -188,7 +202,7 @@ that of the consuming MMA; the surrounding kernel owns this correspondence.
 """
 @inline function pack_operand_a(atom::MMAAtom{S,TA},left::Fragment{Float32,4},
         right::Fragment{Float32,4}) where {S,TA}
-    S == (16,8,16) || throw(ArgumentError("operand conversion targets the m16n8k16 A operand"))
+    S == (16,8,16) && _element_bits(TA) == 16 || throw(ArgumentError("operand conversion targets the 16-bit m16n8k16 A operand"))
     pair = TiledMMAOwnership{TiledMMA{typeof(atom),(1,1),(1,2),16}}()
     pack(TA,relayout(operand_layout(atom,OperandA()),Fragment((left.data...,right.data...),pair)))
 end

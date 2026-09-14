@@ -1,7 +1,3 @@
-module PTXExt
-
-using Tylo
-using Tylo: BFloat16, PendingLoad, @rtuple
 using PTX: @ptx_str
 import PTX
 
@@ -34,12 +30,12 @@ end
     end
 end
 
-@inline function Tylo.wait_load(p::PendingLoad{Float32,N}) where N
+@inline function wait_load(p::PendingLoad{Float32,N}) where N
     words = _wait_words(p.words)
     Fragment(@rtuple(i -> reinterpret(Float32,words[i]), 1:N),p.ownership)
 end
 
-@inline function Tylo.wait_load(p::PendingLoad{T,N}) where {T<:Union{BFloat16,Float16},N}
+@inline function wait_load(p::PendingLoad{T,N}) where {T<:Union{BFloat16,Float16},N}
     PackedFragment(T, _wait_words(p.words), p.ownership)
 end
 
@@ -47,29 +43,24 @@ for N in (1,2,4,8,16,32,64,128)
     ld = ptx"tcgen05.ld.sync.aligned.32x32b.x$N.b32"
     st = ptx"tcgen05.st.sync.aligned.32x32b.x$N.b32"
     @eval begin
-        @inline Tylo.load_async(t::Tylo.TmemPartition{Float32,$N}) = PendingLoad(Float32, _load_tuple($ld(t.address)),Tylo.Layouts.layout(t))
-        @inline Tylo.load_async(t::Tylo.TmemPartition{T,$N}) where {T<:Union{BFloat16,Float16}} =
-            PendingLoad(T,_load_tuple($ld(t.address)),Tylo.Layouts.layout(t))
-        @inline function Tylo.store_async!(t::Tylo.TmemPartition{Float32,$N}, f::Fragment{Float32,$N})
-            Tylo._check_tmem_store(t,f)
+        @inline load_async(t::TmemPartition{Float32,$N}) = PendingLoad(Float32, _load_tuple($ld(t.address)),Layouts.layout(t))
+        @inline load_async(t::TmemPartition{T,$N}) where {T<:Union{BFloat16,Float16}} =
+            PendingLoad(T,_load_tuple($ld(t.address)),Layouts.layout(t))
+        @inline function store_async!(t::TmemPartition{Float32,$N}, f::Fragment{Float32,$N})
+            _check_tmem_store(t,f)
             $st(t.address,@rtuple(i -> reinterpret(UInt32,f.data[i]), 1:$N))
             nothing
         end
-        @inline function Tylo.store_async!(t::Tylo.TmemPartition{T,$N}, f::PackedFragment{T,$N}) where {T<:Union{BFloat16,Float16}}
-            Tylo._check_tmem_store(t,f)
+        @inline function store_async!(t::TmemPartition{T,$N}, f::PackedFragment{T,$N}) where {T<:Union{BFloat16,Float16}}
+            _check_tmem_store(t,f)
             $st(t.address,f.data)
             nothing
         end
     end
 end
 
-@inline function Tylo.pack(::Type{T}, f::Fragment{Float32,N}) where {T<:Union{BFloat16,Float16},N}
-    iseven(N) || throw(ArgumentError("packing requires complete pairs"))
-    words = @rtuple(i -> _pack_mma_pair(T,f.data[2i-1],f.data[2i]), 1:N÷2)
-    PackedFragment(T,words,Tylo.Layouts.layout(f))
-end
 
-@generated function Tylo.store!(ptr::Core.LLVMPtr{U,PTX.AS.Global},
+@generated function store!(ptr::Core.LLVMPtr{U,PTX.AS.Global},
                                     f::PackedFragment{T,W}) where {U,T,W}
     U in (T,UInt16) || return :(throw(ArgumentError("packed store element type differs from pointer")))
     stores = [:(ptx"st.global.v4.b32"(ptr + $(16i),
@@ -89,14 +80,12 @@ end
     end
 end
 
-@inline Tylo.wait_stores() = ptx"tcgen05.wait::st.sync.aligned"()
-@inline Tylo.fence_after_thread_sync() = ptx"tcgen05.fence::after_thread_sync"()
-@inline Tylo.fence_before_thread_sync() = ptx"tcgen05.fence::before_thread_sync"()
+@inline wait_stores() = ptx"tcgen05.wait::st.sync.aligned"()
+@inline fence_after_thread_sync() = ptx"tcgen05.fence::after_thread_sync"()
+@inline fence_before_thread_sync() = ptx"tcgen05.fence::before_thread_sync"()
 
 include("copy.jl")
 include("mma.jl")
 include("rows.jl")
 include("tma.jl")
 include("wgmma.jl")
-
-end

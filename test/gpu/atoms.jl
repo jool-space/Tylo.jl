@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 using Tylo.Layouts: @Layout
 
 # The generic oracle: load A and B through scalar loads at the ownership
@@ -44,39 +45,55 @@ function atom_shared_loads_kernel!(words_a,words_b,a_data,b_data,atom)
     nothing
 end
 
-oracle_atoms() = [MMAAtom((16,8,16),T) for T in (BFloat16,Float16)]
+# Host inputs whose products and sums are exact in the atom's arithmetic,
+# so the comparison exposes ownership mistakes rather than rounding.
+oracle_inputs(rng,::Type{T},dims) where T<:Union{BFloat16,Float16} = T.(rand(rng,-4:4,dims...) ./ 4)
+oracle_inputs(rng,::Type{Float32},dims) = Float32.(rand(rng,-8:8,dims...) ./ 8)  # exact in TF32
+oracle_inputs(rng,::Type{T},dims) where T<:Union{Float8E4M3,Float8E5M2} = T.(rand(rng,-4:4,dims...) ./ 2)
+oracle_inputs(rng,::Type{Int8},dims) = rand(rng,Int8(-8):Int8(7),dims...)
+oracle_inputs(rng,::Type{UInt8},dims) = rand(rng,UInt8(0):UInt8(15),dims...)
+oracle_expected(a,b,::Type{TC}) where TC = TC.(Float64.(a)*Float64.(b))
+oracle_expected(a,b,::Type{Int32}) = Int32.(Int64.(a)*Int64.(b))
+oracle_archs(atom) = eltype(atom,OperandA()) in (Float8E4M3,Float8E5M2) ?
+    (CUDACore.SMVersion(8,9),CUDACore.SMVersion(12,1,:arch)) :
+    (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
+oracle_name(atom) = join((string(eltype(atom,OperandA())),string(eltype(atom,OperandB())),
+                          string(eltype(atom,Accumulator())),join(size(atom),'x')),'-')
 
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Atom oracle assembly" begin
-    for atom in oracle_atoms(), arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
-        T=eltype(atom,OperandA())
-        tt=Tuple{CuDeviceMatrix{Float32,1},CuDeviceMatrix{T,1},CuDeviceMatrix{T,1},typeof(atom)}
+    @test length(instruction_atoms()) == 24
+    for atom in instruction_atoms(), arch in oracle_archs(atom)
+        TA,TB,TC=eltype(atom,OperandA()),eltype(atom,OperandB()),eltype(atom,Accumulator())
+        tt=Tuple{CuDeviceMatrix{TC,1},CuDeviceMatrix{TA,1},CuDeviceMatrix{TB,1},typeof(atom)}
         code=compile_kernel(atom_oracle_kernel!,tt;arch,threads=32)
-        save_code("atom-oracle-$(T)-$(join(size(atom),'x'))-$arch",code)
+        save_code("atom-oracle-$(oracle_name(atom))-$arch",code)
         body=entry_body(code.ptx)
         @test !occursin(".local .",body)
         @test !occursin(r"\bcall",body)
-        @test occursin("mma.sync.aligned.m16n8k16",body)
+        @test occursin("mma.sync.aligned.m16n8k$(size(atom)[3])",body)
     end
 end
 end
 
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Atom oracle: generic loads, MMA and stores match a host matmul" begin
-    for atom in oracle_atoms()
-        T=eltype(atom,OperandA())
+    for atom in instruction_atoms()
+        TA,TB,TC=eltype(atom,OperandA()),eltype(atom,OperandB()),eltype(atom,Accumulator())
         m,n,k=size(atom)
-        rng=MersenneTwister(m+n+k+sizeof(T))
-        a=T.(randn(rng,Float32,m,k)); b=T.(randn(rng,Float32,k,n))
-        expected=Float32.(a)*Float32.(b)
-        out=CuArray(fill(NaN32,m,n))
+        rng=MersenneTwister(hash((m,n,k,TA,TB,TC)) % 100000)
+        a=oracle_inputs(rng,TA,(m,k)); b=oracle_inputs(rng,TB,(k,n))
+        expected=oracle_expected(a,b,TC)
+        out=CuArray(fill(TC(0),m,n))
         @cuda threads=32 atom_oracle_kernel!(out,CuArray(a),CuArray(b),atom)
-        @test isapprox(Array(out),expected;atol=1e-3,rtol=1e-3)
-        words_a=CUDACore.zeros(UInt32,8,32); words_b=CUDACore.zeros(UInt32,4,32)
-        @cuda threads=32 shmem=(m*k+k*n)*sizeof(T) atom_shared_loads_kernel!(words_a,words_b,CuArray(a),CuArray(b),atom)
-        wa,wb=Array(words_a),Array(words_b)
-        @test wa[1:4,:] == wa[5:8,:]
-        @test wb[1:2,:] == wb[3:4,:]
+        @test Array(out) == expected
+        if size(atom) == (16,8,16) && Tylo._element_bits(TA) == 16
+            words_a=CUDACore.zeros(UInt32,8,32); words_b=CUDACore.zeros(UInt32,4,32)
+            @cuda threads=32 shmem=(m*k+k*n)*sizeof(TA) atom_shared_loads_kernel!(words_a,words_b,CuArray(a),CuArray(b),atom)
+            wa,wb=Array(words_a),Array(words_b)
+            @test wa[1:4,:] == wa[5:8,:]
+            @test wb[1:2,:] == wb[3:4,:]
+        end
     end
 end
 end

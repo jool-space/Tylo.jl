@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 include("../../examples/gemm/kernel.jl")
 
 function gemm_signature(config,T,relu=false)
@@ -5,7 +6,7 @@ function gemm_signature(config,T,relu=false)
           Int32,Int32,Int32,Int32,Int32,Int32,typeof(config),Float32,Val{relu}}
 end
 
-if !("--runtime-only" in ARGS)
+begin # assembly checks
 @testset "Complete GEMM assembly" begin
     for T in (BFloat16,Float16),swizzled in (false,true)
         cfg = gemm_config(T;swizzled)
@@ -109,7 +110,7 @@ function check_gemm(T,config,m,n,k;pad=0,relu=false)
     @test all(==(-12345f0),actual[m+1:end,:])
 end
 
-if CUDACore.functional() && CUDACore.capability(device()) >= v"8.0"
+if runtime_supported(@__FILE__)
     @testset "Shared matrix loads preserve coordinates" begin
         for T in (BFloat16,Float16),swizzled in (false,true)
             check_operand_load(T,swizzled)

@@ -1,6 +1,6 @@
 # Offline resource evidence for saved PTX/cubins. Does not load a kernel.
 using CUDACore, TOML
-length(ARGS) == 1 || error("usage: resources.jl EVIDENCE_DIRECTORY")
+length(ARGS) == 1 || error("usage: julia --project=test test/tools/resources.jl EVIDENCE_DIRECTORY")
 root = abspath(only(ARGS))
 records = Dict{String,Any}[]
 for file in sort(readdir(root;join=true))

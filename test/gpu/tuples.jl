@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 using Tylo: @rtuple
 using Tylo.Layouts: coordinate
 
@@ -43,7 +44,7 @@ end
     end
 end
 
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Static range tuple coordinates on device" begin
     for (ownership,n) in ((operand_layout(MMAAtom((16,8,16),BFloat16),Accumulator()),4),
                            (Tylo.TmemTransfer{(32,64),2}(),64))

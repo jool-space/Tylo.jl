@@ -23,8 +23,8 @@ Layouts.layout(f::Fragment) = f.ownership
 """
     PackedFragment(T, words::NTuple{W,UInt32}, ownership)
 
-Register representation of logical elements of type `T`, currently `BFloat16`
-or `Float16`. Each word holds two elements, low element first. Ownership counts
+Register representation of logical 8- or 16-bit elements of type `T`. Each
+word holds `32 ÷ bits` elements, lowest element first. Ownership counts
 logical elements, not words. This constructor interprets bits; `pack(T, f)`
 numerically converts values and `unpack(p)` exposes ordinary typed values.
 """
@@ -32,13 +32,14 @@ struct PackedFragment{T,W,L}
     data::NTuple{W,UInt32}
     ownership::L
     function PackedFragment(::Type{T}, data::NTuple{W,UInt32}, ownership::L) where {T,W,L}
-        (T === BFloat16 || T === Float16) || throw(ArgumentError("packing supports BFloat16 and Float16"))
+        _element_bits(T) in (8,16) || throw(ArgumentError("packing supports 8- and 16-bit element types"))
         W > 0 || throw(ArgumentError("a packed fragment must contain values"))
-        isbitstype(L) && _register_count(ownership) == 2W ||
+        isbitstype(L) && _register_count(ownership) == W * (32 ÷ _element_bits(T)) ||
             throw(DimensionMismatch("packed payload differs from ownership"))
         new{T,W,L}(data, ownership)
     end
 end
+_per_word(::Type{T}) where T = 32 ÷ _element_bits(T)
 Layouts.layout(f::PackedFragment) = f.ownership
 Base.eltype(::Type{<:PackedFragment{T}}) where T = T
 Base.eltype(f::PackedFragment) = eltype(typeof(f))
@@ -49,27 +50,35 @@ Base.eltype(f::PackedFragment) = eltype(typeof(f))
 
 Convert logical values to `T` and pack adjacent local slots into register words.
 The one-argument form preserves the element type and all bits. Neither form
-moves data between threads or changes logical ownership. Supported types are
-`BFloat16` and `Float16`. A fragment must hold complete pairs.
+moves data between threads or changes logical ownership. Supported element
+types are 8- and 16-bit: `BFloat16`, `Float16`, `Float8E4M3`, `Float8E5M2`,
+`Int8` and `UInt8`. A fragment must hold complete words.
 """
 @inline function pack(::Type{T}, f::Fragment) where T
     pack(map(T, f))
 end
-@inline function pack(f::Fragment{T,N}) where {T,N}
-    (T === BFloat16 || T === Float16) || throw(ArgumentError("packing supports BFloat16 and Float16"))
-    iseven(N) || throw(ArgumentError("packing requires complete pairs"))
-    words = @rtuple(1:N÷2) do i
-        UInt32(reinterpret(UInt16, f.data[2i-1])) | (UInt32(reinterpret(UInt16, f.data[2i])) << 16)
+@generated function pack(f::Fragment{T,N}) where {T,N}
+    _element_bits(T) in (8,16) || return :(throw(ArgumentError("packing supports 8- and 16-bit element types")))
+    per = 32 ÷ _element_bits(T)
+    N % per == 0 || return :(throw(ArgumentError("packing requires complete words")))
+    U = _carrier(T)
+    words = [foldl((acc,j) -> :($acc | (UInt32(reinterpret($U, f.data[$(per*(i-1)+j)])) << $(_element_bits(T)*(j-1)))),
+                   2:per; init=:(UInt32(reinterpret($U, f.data[$(per*(i-1)+1)])))) for i in 1:N÷per]
+    quote
+        Base.@inline
+        PackedFragment(T, ($(words...),), Layouts.layout(f))
     end
-    PackedFragment(T, words, Layouts.layout(f))
 end
 
 "Expose the logical typed values of a packed fragment without numerical conversion."
-@inline function unpack(f::PackedFragment{T,W}) where {T,W}
-    values = @rtuple(0:2W-1) do i
-        reinterpret(T, (f.data[i÷2+1] >> (16*(i%2))) % UInt16)
+@generated function unpack(f::PackedFragment{T,W}) where {T,W}
+    per = 32 ÷ _element_bits(T)
+    U = _carrier(T)
+    values = [:(reinterpret(T, (f.data[$(i÷per+1)] >> $(_element_bits(T)*(i%per))) % $U)) for i in 0:per*W-1]
+    quote
+        Base.@inline
+        Fragment(($(values...),), Layouts.layout(f))
     end
-    Fragment(values, Layouts.layout(f))
 end
 
 @inline function Base.map(op::F, f::Fragment{T,N}) where {F,T,N}

@@ -1,3 +1,4 @@
+# TEST_TARGET: cc>=8.0
 using Tylo.Layouts: @Layout
 
 # Construct layouts inside the kernel: runtime sizes/strides must not create
@@ -11,7 +12,7 @@ function layout_notation_kernel!(out,n,ld,::Val{K}) where K
     nothing
 end
 
-if CUDACore.functional()
+if runtime_supported(@__FILE__)
 @testset "Layout notation in device code" begin
     out = CuArray{Int32}(undef,64)
     for (n,ld) in ((Int32(5),Int32(128)),(Int32(7),Int32(256)))
