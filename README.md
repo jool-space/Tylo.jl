@@ -63,11 +63,12 @@ broadcast. See [the fragment support table](docs/src/rows.md).
 - [Datacenter FlashAttention experiment](examples/flash_attention/README.md):
   TMEM correction and epilogue replacements in a raw PTX kernel.
 
-Warp GEMM, TMA and register operations have GB10 runtime coverage. WGMMA and
-actual TMEM transfers have assembly coverage and prepared hardware tests;
-H100/H200 and B200/B300 execution respectively remain unvalidated for those
-paths. The library does not yet have general CuTe/ThunderKittens coverage,
-including tcgen05 MMA, arbitrary redistribution or allocation management.
+Warp GEMM, TMA and register operations have GB10 runtime coverage. TMEM
+transfers and the datacenter attention comparison have run on a B200. WGMMA
+has assembly coverage and prepared hardware tests; H100/H200 execution remains
+unvalidated. The library does not yet have general CuTe/ThunderKittens
+coverage, including tcgen05 MMA, arbitrary redistribution or allocation
+management.
 
 `Tylo.Layouts` contains the pure coordinate mathematics. Megakernels consumes
 Tylo operations while owning task scheduling and buffer reuse. Standalone

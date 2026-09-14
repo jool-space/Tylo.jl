@@ -15,15 +15,34 @@ results do not automatically validate later changes.
 | Warp-MMA GEMM | BF16/FP16 `m16n8k16`, repeated atoms, full/bounded copies and stores, one/two copy stages | SM80/90a/100a/121a assembly; GB10 runtime | No claim of a tuned GEMM library; no split-K/autotuning |
 | TMA | 2D loads with one canonical B128-swizzled, K=64 BF16/FP16 storage format | GB10 runtime, bounds/reuse/lifetime tests | No arbitrary layouts, stores, multicast or clusters |
 | Hopper WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, selected partial accumulators | SM90a assembly; H100/H200 tests prepared | Runtime and performance on Hopper remain unvalidated |
-| TMEM | FP32 and packed BF16/FP16 `.32x32b` loads/stores, x1–x128, logical windows and transfer partitions | SM100a assembly; address/register work runs on GB10 | Actual transfers need B200/B300; no tcgen05 MMA in Tylo |
+| TMEM | FP32 and packed BF16/FP16 `.32x32b` loads/stores, x1–x128, logical windows and transfer partitions | SM100a assembly; B200 round trips; address/register work on GB10 | No tcgen05 MMA in Tylo |
 | Streaming attention | Complete single-head BF16 forward kernel, D=64, online statistics, masks and causal tails | GB10 correctness and dated paired measurements | Fixed schedule/geometry; small cases can be slower than the baseline |
-| Datacenter attention experiment | Correction and epilogue replacements in a raw PTX kernel | Six complete kernel-code comparisons | Remaining kernel is the reference; B200/B300 runtime pending |
+| Datacenter attention experiment | TMA loads, correction and epilogue replacements in a raw PTX kernel | Six complete kernel-code comparisons; paired B200 execution and timings | Remaining kernel is the reference; softmax stream and tcgen05 MMA still raw PTX |
 
 For precise fragment-method coverage, see [Register fragments](rows.md). The
 online `SoftmaxState(f; dims)` uses reduced fragments on either implemented
 logical axis. It does not synthesize collectives for arbitrary ownership.
 
 ## Most recent checks
+
+### B200 execution (2026-09-14)
+
+The full suite on a rented NVIDIA B200 (capability 10.0, Julia 1.13) passed
+**83,368 checks** with one expected skip (Hopper WGMMA). This is the first
+hardware execution of the TMEM round trips and of the datacenter attention
+comparison, whose reference kernel is now vendored in
+`examples/flash_attention/reference.jl` and whose Tylo variant issues its TMA
+loads, correction and epilogue through Tylo:
+
+- All eight paired execution cases (both publication granularities, including
+  the rescale-heavy input and the single-CTA repeated-work-item grid) produce
+  bit-identical outputs from the reference and Tylo kernels and agree with the
+  CPU reference within 5e-2.
+- Paired CUDA-graph timings are equal within noise (ratios 0.991–1.000 across
+  the eight cases), as expected for byte-identical machine code.
+
+These are modest correctness shapes, not a saturated throughput measurement.
+The B300 (capability 10.3) has not been exercised.
 
 ### Typed packing and completed MMA values (2026-09-13)
 
