@@ -71,7 +71,7 @@ end
 end
 
 @testset "ISA ownership and typed MMA registers" begin
-    atom = MMA16x8x16(BFloat16)
+    atom = MMAAtom((16,8,16),BFloat16)
     for role in (OperandA(),OperandB(),Accumulator())
         o = operand_layout(atom,role)
         count = role isa OperandA ? 8 : 4
@@ -87,15 +87,17 @@ end
     a = zero_accumulator(atom)
     @test scale(a,2f0).data == (0f0,0f0,0f0,0f0)
     @test map(x -> x+1f0,a).data == (1f0,1f0,1f0,1f0)
-    @test_throws ArgumentError Tylo.MMAFragment(BFloat16,OperandA(),(UInt32(0),UInt32(0)))
-    @test_throws ArgumentError Tylo.MMAFragment(Float32,OperandA(),ntuple(_ -> UInt32(0),4))
-    @test_throws ArgumentError Tylo.MMAFragment(BFloat16,Accumulator(),(0f0,0f0,0f0,0f0))
-    @test_throws ArgumentError MMA16x8x16(Float32)
+    @test Tylo._words(atom,OperandA()) == 4 && Tylo._words(atom,OperandB()) == 2
+    @test_throws DimensionMismatch Fragment((0f0,0f0),operand_layout(atom,Accumulator()))
+    @test_throws ArgumentError MMAAtom((16,8,32),BFloat16)
+    @test_throws ArgumentError MMAAtom((16,8,16),Float32)
+    @test_throws ArgumentError MMAAtom((16,8,16),Float16,Float16)
+    @test MMAAtom((16,8,8),Float32) isa MMAAtom
     p = TiledMMA(atom,Val((2,2)),Val((2,4)),Val(32))
     @test size(p) == (64,64,32)
     @test Tylo.threads(p) == 128
-    @test length(zero_accumulator(p).data) == 8
-    @test all(f -> f.data == (1f0,1f0,1f0,1f0),map(x -> x+1f0,zero_accumulator(p)).data)
+    @test length(zero_accumulator(p).data) == 32
+    @test all(==(1f0),map(x -> x+1f0,zero_accumulator(p)).data)
     @test_throws ArgumentError TiledMMA(atom,Val((2,2)),Val((2,4)),Val(24))
 end
 

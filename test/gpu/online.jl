@@ -34,15 +34,15 @@ end
 end
 if CUDACore.functional()
 @testset "Online state distributed rows" begin
-    for kind in (Val(:local),Val(:warp),MMA16x8x16(BFloat16),
-                 TiledMMA(MMA16x8x16(BFloat16),Val((2,1)),Val((2,3)),Val(16)))
-        n=kind isa Val ? 3 : kind isa MMA16x8x16 ? 4 : 24
+    for kind in (Val(:local),Val(:warp),MMAAtom((16,8,16),BFloat16),
+                 TiledMMA(MMAAtom((16,8,16),BFloat16),Val((2,1)),Val((2,3)),Val(16)))
+        n=kind isa Val ? 3 : kind isa MMAAtom ? 4 : 24
         nt=kind isa TiledMMA ? 64 : 32; chunks=7
         rng=MersenneTwister(n+nt); x=randn(rng,Float32,n,nt,chunks)
         v=randn(rng,Float32,n,nt,chunks) .* 10f0
         x[:,:,1].=-Inf32; x[:,:,4].=-Inf32; x[:,:,7].=-Inf32
         x[:,:,3].+=10f0; x[:,:,5].+=13f0
-        nr=Tylo._row_count(row_ownership(row_fragment(kind,ntuple(_ -> 0f0,n))))
+        nr=Tylo._register_count(Tylo._reduced_ownership(Tylo.Layouts.layout(row_fragment(kind,ntuple(_ -> 0f0,n))),Val(2)))
         # One entire logical row stays empty across all chunks.
         for t in 0:nt-1,e in 0:n-1
             reference_row(kind,n,t,e)==0 && (x[e+1,t+1,:].=-Inf32)

@@ -47,7 +47,7 @@ function operand_load_kernel!(outa,outb,ina,inb,config)
     commit_copies()
     wait_copies(Val(0))
     sync_threads()
-    atom = MMA16x8x16(T)
+    atom = MMAAtom((16,8,16),T)
     av = @inbounds load_a(atom,window(sa,(Int32(3),Int32(8)),Val((16,16))),tid)
     bv = @inbounds load_b(atom,window(sb,(Int32(8),Int32(3)),Val((16,8))),tid)
     PTX.Utils.@unroll for j in 1:4

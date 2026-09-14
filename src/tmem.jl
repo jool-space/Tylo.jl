@@ -4,7 +4,7 @@
 Borrow TMEM with a logical-to-storage layout. Layout offsets count typed
 slots in a virtual column-major grid with 128 hardware lanes: offset `i`
 selects lane `i % 128` and typed position `i ÷ 128` along its storage.
-FP32 has one position per hardware word; BF16 has two. Logical axes may be
+FP32 has one position per hardware word; BF16/FP16 have two. Logical axes may be
 permuted or partitioned independently of this hardware addressing convention.
 
 The caller owns the allocation, lifetime and synchronization. Construction
@@ -14,7 +14,7 @@ struct TmemTile{T,L<:Layouts.AbstractLayout}
     address::UInt32
     layout::L
     function TmemTile(::Type{T},address::UInt32,l::L) where {T,L<:Layouts.AbstractLayout}
-        (T === Float32 || T === BFloat16) || throw(ArgumentError("TMEM views currently support FP32 and BF16"))
+        (T === Float32 || T === BFloat16 || T === Float16) || throw(ArgumentError("TMEM views currently support FP32, BF16 and FP16"))
         length(size(l)) == 2 || throw(ArgumentError("TMEM views require two logical modes"))
         isbitstype(L) || throw(ArgumentError("TMEM layouts must be isbits"))
         new{T,L}(address,l)
@@ -26,6 +26,7 @@ Base.eltype(::Type{<:TmemTile{T}}) where T = T
 Base.eltype(t::TmemTile) = eltype(typeof(t))
 _tmem_packing(::Type{Float32}) = 1
 _tmem_packing(::Type{BFloat16}) = 2
+_tmem_packing(::Type{Float16}) = 2
 Base.@propagate_inbounds window(t::TmemTile,o::Tuple,s::Val) =
     TmemTile(eltype(t),t.address,Layouts.window(t.layout,o,s))
 @inline Base.permutedims(t::TmemTile,perm=(2,1)) =
@@ -85,7 +86,8 @@ logical `Axis`; the other axis has extent 32. This plan also describes the
 resulting register ownership. `permutedims(plan)` exchanges its logical axes.
 
 Bind it to a storage view with `partition(plan, tile)`. Supported payloads
-are 16, 32 or 64 words per thread: FP32 loads/stores, and packed BF16 stores.
+are powers of two from 1 through 128 words per thread: FP32 and packed
+BF16/FP16 loads and stores.
 Instruction shape, ownership and storage compatibility are checked explicitly.
 """
 struct TmemTransfer{S,Axis}
@@ -138,12 +140,12 @@ Base.@propagate_inbounds function partition(p::TmemTransfer{S,A},t::TmemTile{T})
     packing = _tmem_packing(T)
     S[A] % packing == 0 || throw(ArgumentError("transfer requires complete TMEM words"))
     words = S[A] ÷ packing
-    words in (16,32,64) || throw(ArgumentError("TMEM transfer supports 16, 32 or 64 words per thread"))
+    words in (1,2,4,8,16,32,64,128) || throw(ArgumentError("TMEM transfer supports 1, 2, 4, 8, 16, 32, 64 or 128 words per thread"))
     _,ds = _tmem_affine(t.layout)
     ds[A] == 128 && ds[3-A] == 1 ||
         throw(ArgumentError("storage layout does not match TMEM transfer ownership"))
     loc = tmem_location(t,(UInt32(0),UInt32(0)))
-    loc.bit_offset == UInt32(0) || throw(ArgumentError("TMEM transfer starts inside a packed word"))
+    @boundscheck loc.bit_offset == UInt32(0) || throw(ArgumentError("TMEM transfer starts inside a packed word"))
     @boundscheck begin
         lane,column = loc.address >> UInt32(16),loc.address & UInt32(0xffff)
         lane % UInt32(32) == UInt32(0) && lane <= UInt32(96) ||
@@ -156,23 +158,24 @@ end
 """
     reinterpret_tile(T, tile::TmemTile; dims)
 
-View the same storage as FP32 or BF16, explicitly choosing the logical axis
+View the same storage as FP32, BF16 or FP16, explicitly choosing the logical axis
 whose extent changes. This changes representation, not values or readiness.
 Currently requires a flat rectangular affine view with that axis traversing
-consecutive storage positions. BF16-to-FP32 views require complete aligned pairs.
+consecutive storage positions. 16-bit-to-FP32 views require complete aligned pairs.
 """
 Base.@constprop :aggressive Base.@propagate_inbounds function reinterpret_tile(::Type{T},t::TmemTile{U};dims) where {T,U}
     dims isa Integer && dims in (1,2) || throw(ArgumentError("choose logical axis 1 or 2"))
-    (T === Float32 || T === BFloat16) || throw(ArgumentError("TMEM views support FP32 and BF16"))
+    (T === Float32 || T === BFloat16 || T === Float16) || throw(ArgumentError("TMEM views support FP32, BF16 and FP16"))
     T === U && return t
+    _tmem_packing(T) == _tmem_packing(U) && return TmemTile(T,t.address,t.layout)
     all(n -> n isa Layouts.IntLike,Layouts.shape(t.layout)) ||
         throw(ArgumentError("reinterpretation requires flat logical modes"))
     origin,ds = _tmem_affine(t.layout)
     ds[dims] == 128 && ds[3-dims] == 1 ||
         throw(ArgumentError("reinterpretation axis must follow consecutive storage positions"))
     n = size(t)[dims]
-    U === BFloat16 && (isodd(n) || isodd(origin ÷ 128)) &&
-        throw(ArgumentError("FP32 reinterpretation requires complete aligned BF16 pairs"))
+    _tmem_packing(U) > _tmem_packing(T) && (isodd(n) || isodd(origin ÷ 128)) &&
+        throw(ArgumentError("FP32 reinterpretation requires complete aligned element pairs"))
     loc = tmem_location(t,(UInt32(0),UInt32(0)))
     loc.bit_offset == 0 || throw(ArgumentError("reinterpretation starts inside a packed word"))
     # Rebase an affine view at its first word; this preserves the original
@@ -184,13 +187,14 @@ Base.@constprop :aggressive Base.@propagate_inbounds function reinterpret_tile(:
 end
 
 # Pending registers carry the transfer ownership through the explicit wait.
-struct PendingLoad{N,L}
+struct PendingLoad{T,N,L}
     words::NTuple{N,UInt32}
     ownership::L
 end
+PendingLoad(::Type{T}, words::NTuple{N,UInt32}, ownership::L) where {T,N,L} = PendingLoad{T,N,L}(words,ownership)
 
 @inline function _check_tmem_store(p::TmemPartition,f)
-    isequal(_canonical_ownership(Layouts.layout(p)),_canonical_ownership(Layouts.layout(f))) ||
+    _same_distribution(Layouts.layout(p),Layouts.layout(f)) ||
         throw(DimensionMismatch("TMEM store ownership differs from transfer"))
     nothing
 end

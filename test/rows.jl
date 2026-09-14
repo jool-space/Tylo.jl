@@ -1,50 +1,51 @@
 @testset "Row ownership and local arithmetic" begin
     for n in (1,3,17,64)
         data = ntuple(i -> Float32(i-9),n)
-        f = RowFragment(data)
-        @test only(row_sum(f)) == sum(data)
-        @test only(row_max(f)) == maximum(data)
-        @test row_map(-,f,row_max(f)).data == data .- maximum(data)
+        f = local_fragment(data)
+        @test only(sum(f; dims=2)) == sum(data)
+        @test only(maximum(f; dims=2)) == maximum(data)
+        @test broadcast(-,f,maximum(f; dims=2)).data == data .- maximum(data)
         for t in 0:31
-            @test row_coordinate(row_sum(f),t,Val(0)) == t
+            @test Tylo.Layouts.coordinate(Tylo.Layouts.layout(sum(f; dims=2)),t,Val(0))[1] == t
         end
-        w = WarpRowFragment(data)
+        w = striped_fragment(data)
         @test size(Tylo.Layouts.layout(w)) == (1,32n)
         @test [Tylo.Layouts.coordinate(Tylo.Layouts.layout(w),t,Val(e))
                for t in 0:31,e in 0:n-1] == [(0,t+32e) for t in 0:31,e in 0:n-1]
-        r = RowValues(row_ownership(w),(3f0,))
-        @test row_map(*,w,r).data == data .* 3f0
-        @test row_coordinate(r,Int32(67),Val(0)) === Int32(2)
-        @test_throws MethodError row_map(+,f,r)
+        r = Fragment((3f0,),Tylo._reduced_ownership(Tylo.Layouts.layout(w),Val(2)))
+        @test broadcast(*,w,r).data == data .* 3f0
+        @test Tylo.Layouts.coordinate(Tylo.Layouts.layout(r),Int32(3),Val(0))[1] === Int32(0)
+        # A warp-replicated scalar broadcasts into any ownership of the same warp.
+        @test broadcast(+,f,r).data == data .+ 3f0
     end
-    atom = MMA16x8x16(BFloat16)
+    atom = MMAAtom((16,8,16),BFloat16)
     for wm in (1,2),rm in (1,2),rn in (1,3)
         plan = TiledMMA(atom,Val((wm,1)),Val((rm,rn)),Val(16))
         f = zero_accumulator(plan)
-        r = RowValues(row_ownership(f),ntuple(i -> Float32(i),2rm))
-        actual = row_map(+,f,r)
+        r = Fragment(ntuple(i -> Float32(i),2rm),Tylo._reduced_ownership(Tylo.Layouts.layout(f),Val(2)))
+        actual = broadcast(+,f,r)
         # Each atom has two rows/lane and two values/row. Column repeats
         # reuse a row result, and M repeats select distinct results.
-        @test all(actual.data[i+(j-1)*rm].data == (Float32(2i-1),Float32(2i-1),Float32(2i),Float32(2i))
+        @test all(actual.data[4(i+(j-1)*rm)-3:4(i+(j-1)*rm)] == (Float32(2i-1),Float32(2i-1),Float32(2i),Float32(2i))
                   for i in 1:rm,j in 1:rn)
-        @test [row_coordinate(r,t,Val(e)) for t in 0:32wm-1,e in 0:2rm-1] ==
+        @test [Tylo.Layouts.coordinate(Tylo.Layouts.layout(r),t,Val(e))[1] for t in 0:32wm-1,e in 0:2rm-1] ==
               [16rm*(t÷32)+(t%32)÷4+8*(e%2)+16*(e÷2) for t in 0:32wm-1,e in 0:2rm-1]
         counts = Dict{Int,Int}()
         for t in 0:32wm-1,e in 0:2rm-1
-            row = row_coordinate(r,t,Val(e)); counts[row] = get(counts,row,0)+1
+            row = Tylo.Layouts.coordinate(Tylo.Layouts.layout(r),t,Val(e))[1]; counts[row] = get(counts,row,0)+1
         end
         @test sort!(collect(keys(counts))) == collect(0:16wm*rm-1)
         @test all(==(4),values(counts))
     end
-    @test_throws ArgumentError row_ownership(TiledMMA(atom,Val((1,2)),Val((1,1)),Val(16)))
-    @test_throws DimensionMismatch RowValues(Tylo.LaneRowOwnership(),(1f0,2f0))
-    @test_throws ArgumentError WarpRowFragment(())
-    @test_throws BoundsError row_coordinate(row_sum(RowFragment((1f0,))),0,Val(1))
+    @test_throws ArgumentError Tylo._reduced_ownership(Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val((1,2)),Val((1,1)),Val(16)))),Val(2))
+    @test_throws DimensionMismatch Fragment((1f0,2f0),Tylo._reduced_ownership(Tylo.Layouts.LocalOwnership{3,2}(),Val(2)))
+    @test_throws ArgumentError striped_fragment(())
+    @test_throws BoundsError Tylo.Layouts.coordinate(Tylo.Layouts.layout(sum(local_fragment((1f0,)); dims=2)),0,Val(1))[1]
 end
 
 @testset "Tiled accumulator coordinates" begin
     for wm in (1,2),wn in (1,2),rm in (1,2),rn in (1,3)
-        p=TiledMMA(MMA16x8x16(BFloat16),Val((wm,wn)),Val((rm,rn)),Val(16))
+        p=TiledMMA(MMAAtom((16,8,16),BFloat16),Val((wm,wn)),Val((rm,rn)),Val(16))
         layout=Tylo.Layouts.layout(zero_accumulator(p))
         m,n=16wm*rm,8wn*rn
         coords=[Tylo.Layouts.coordinate(layout,Int32(t),Val(e)) for t in 0:32wm*wn-1,e in 0:4rm*rn-1]

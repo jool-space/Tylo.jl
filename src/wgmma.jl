@@ -30,23 +30,12 @@ end
 struct PendingWGMMA{P,R}
     data::NTuple{R,Float32}
 end
-struct WGMMAFragment{N,R}
-    data::NTuple{R,Float32}
-    function WGMMAFragment(::Val{N},data::NTuple{R,Float32}) where {N,R}
-        N isa Int && 8 <= N <= 256 && N % 8 == 0 && R == N÷2 ||
-            throw(ArgumentError("wrong WGMMA fragment size"))
-        new{N,R}(data)
-    end
-end
 @inline zero_accumulator(p::WGMMA64) =
     WGMMAAccumulator(p,ntuple(_ -> 0f0,Val(_wg_registers(p))))
-@inline Base.map(f,c::WGMMAFragment{N}) where N = WGMMAFragment(Val(N),map(f,c.data))
-@inline scale(c::WGMMAFragment,x) = map(Base.Fix2(*,x),c)
 
 struct WGMMAOwnership{N} end
 Base.size(::WGMMAOwnership{N}) where N = (64,N)
 operand_layout(::WGMMA64{T,N},::Accumulator) where {T,N} = WGMMAOwnership{N}()
-Layouts.layout(::WGMMAFragment{N}) where N = WGMMAOwnership{N}()
 @inline function Layouts.coordinate(::WGMMAOwnership{N},t::Integer,::Val{E}) where {N,E}
     E isa Int && 0 <= E < N÷2 || throw(BoundsError())
     lane = t % oftype(t,32)
@@ -87,7 +76,7 @@ function wait_mma end
     values = [foldl((a,b) -> :($a + $b), [:(c.data[$(i+j*(N÷2))]) for j in 0:P-1]) for i in 1:N÷2]
     quote
         Base.@inline
-        WGMMAFragment(Val($N),($(values...),))
+        Fragment(($(values...),),WGMMAOwnership{$N}())
     end
 end
 
@@ -100,3 +89,5 @@ function validate_wgmma(p::WGMMA64{T,N,K},role::Role,l::TMASharedLayout{S,A},ori
         throw(ArgumentError("WGMMA origin or extent is not descriptor-compatible"))
     nothing
 end
+
+_register_count(::WGMMAOwnership{N}) where N = N÷2

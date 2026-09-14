@@ -1,6 +1,6 @@
 # Current status and validation
 
-This page describes the current working tree as of 2026-09-11. The detailed
+This page describes the current working tree as of 2026-09-13. The detailed
 [validation history](validation-history.md) records older revisions, compiler
 versions, numerical contracts and measurements. Historical sanitizer or timing
 results do not automatically validate later changes.
@@ -10,20 +10,55 @@ results do not automatically validate later changes.
 | Area | Implemented scope | Evidence available | Main limit |
 |:--|:--|:--|:--|
 | Layout mathematics | Hierarchical affine shapes/strides, static/runtime leaves, composition, XOR swizzles, factorization, windows, two-axis permutation | Host tests; selected device arithmetic on GB10 | No general inverse/complement solver or symbolic simplifier |
-| Register arithmetic | Generic `Fragment` values, scalar broadcast, conversions and axis permutation; ready warp-MMA accumulators | Host and GB10 tests | Not a full array interface; WGMMA remains separate |
-| Reductions/windows | Selected lane-local, warp-striped, warp-MMA and TMEM ownership recipes | Independent coordinate/numerical references, assembly, GB10 | Arbitrary ownership does not imply a supported collective or slice |
+| Register arithmetic | Generic `Fragment` values, scalar broadcast, conversions and axis permutation; ready warp-MMA and completed WGMMA values | Host and GB10 tests | Not a full array interface; packed and pending representations have explicit boundaries |
+| Reductions/windows | Selected lane-local, warp-striped, warp-MMA, WGMMA and TMEM ownership recipes | Independent coordinate/numerical references, assembly, GB10 | Arbitrary ownership does not imply a supported collective or slice |
 | Warp-MMA GEMM | BF16/FP16 `m16n8k16`, repeated atoms, full/bounded copies and stores, one/two copy stages | SM80/90a/100a/121a assembly; GB10 runtime | No claim of a tuned GEMM library; no split-K/autotuning |
 | TMA | 2D loads with one canonical B128-swizzled, K=64 BF16/FP16 storage format | GB10 runtime, bounds/reuse/lifetime tests | No arbitrary layouts, stores, multicast or clusters |
 | Hopper WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, selected partial accumulators | SM90a assembly; H100/H200 tests prepared | Runtime and performance on Hopper remain unvalidated |
-| TMEM | FP32 `.32x32b` loads/stores, packed BF16 stores, logical windows and transfer partitions | SM100a assembly; address/register work runs on GB10 | Actual transfers need B200/B300; no tcgen05 MMA in Tylo |
+| TMEM | FP32 and packed BF16/FP16 `.32x32b` loads/stores, x1–x128, logical windows and transfer partitions | SM100a assembly; address/register work runs on GB10 | Actual transfers need B200/B300; no tcgen05 MMA in Tylo |
 | Streaming attention | Complete single-head BF16 forward kernel, D=64, online statistics, masks and causal tails | GB10 correctness and dated paired measurements | Fixed schedule/geometry; small cases can be slower than the baseline |
 | Datacenter attention experiment | Correction and epilogue replacements in a pinned raw PTX kernel | Six complete kernel-code comparisons | Remaining kernel is the reference; B200/B300 runtime pending |
 
 For precise fragment-method coverage, see [Register fragments](rows.md). The
-online `SoftmaxState` API still uses its original dimension-2 row distributions;
-it has not been generalized to every fragment or logical orientation.
+online `SoftmaxState(f; dims)` uses reduced fragments on either implemented
+logical axis. It does not synthesize collectives for arbitrary ownership.
 
 ## Most recent checks
+
+### Typed packing and completed MMA values (2026-09-13)
+
+Julia 1.10.12 and 1.13.0 each pass **78,062 host checks** and **3,562
+GPU/assembly checks**, with three expected hardware skips on the GB10. The
+suite uses CUDACore 6.3.1, CUDA compiler 13.3.73 and PTX revision
+`32e36c122bc1c7af5f171cf478324b628b06af3a`.
+
+This batch removes the row-specific compatibility APIs. `Fragment` carries
+explicit ownership; `PackedFragment{T}` separates logical BF16/FP16 elements
+from register words. It adds bit-preserving packing/unpacking, typed packed
+global stores, all `.32x32b.x1` through `.x128` TMEM widths for FP32/BF16/FP16,
+and ordinary fragment arithmetic on completed WGMMA values. Streaming softmax
+retains an explicit logical reduction axis.
+
+- Host tests exhaust all 65,536 16-bit payloads for both packed element types
+  and both logical orientations, including NaN payloads and signed zero.
+- GB10 tests run conversion, packed stores, bit round-trips and WGMMA ownership
+  arithmetic. The latter uses ordinary register/shuffle instructions, not WGMMA.
+- 48 typed TMEM round-trip variants assemble for SM100a. Eight complete
+  WGMMA-to-softmax variants assemble for SM90a. Their numerical execution tests
+  are gated to server Blackwell and Hopper respectively.
+- All six complete FlashAttention machine-code comparisons still pass. Of the
+  111 preceding Julia 1.13 saved kernels, 109 retain identical executable
+  sections. The two TMEM round-trip probes retain the same SASS instruction
+  multiset; independent global-load ordering changed. This is not a measured
+  performance claim. There are 74 additional saved kernels in this batch.
+- Both Megakernels examples pass, and its 26 TMA/WGMMA projection assembly
+  checks pass with the new result type.
+
+The manual builds with doctests. No new sanitizer or rented-hardware execution
+is claimed. Local receipts are in the ignored
+`reports/expressiveness-2026-09-13/` directory.
+
+### Previous CI compatibility checks
 
 The CI compatibility work was checked locally on GB10 with Julia 1.10.12 and
 1.13.0, using fresh test environments, CUDACore 6.3.1, CUDA compiler 13.3.73
@@ -150,3 +185,26 @@ Open `docs/build/index.html`. For sanitizer and hardware-specific commands, use
 `examples/flash_attention/README.md` with a sanitizer compatible with the selected
 CUDA toolchain. The [implementation guide](codebase.md) maps individual tests to
 contracts.
+
+### Layout-driven collectives (2026-09-14)
+
+Reductions, broadcast slot maps, register windows and the same-lane C-to-A
+conversion are now derived from enumerated ownership tables at generation
+time (`src/enumerate.jl`), replacing the per-ownership recipe methods. The
+gate for this change is the kernel snapshot in `test/gpu/snapshots/`, taken
+on the dirty working tree of 2026-09-14 with Julia 1.13.0, CUDACore 6.4.0,
+CUDA compiler 13.4.59 and PTX `ae2362f`.
+
+- Tylo: 3,565 GPU/assembly checks pass with the snapshot active; all 185
+  saved kernels are byte-identical or identical up to ptxas register
+  numbering. Host checks pass, including 143 new enumeration checks against
+  independent ISA figures.
+- Megakernels: 238,340 checks pass with one expected Hopper skip; the eight
+  projection kernels from `benchmark/tiles.jl` are byte-identical and their
+  outputs remain bitwise equal to `7770d93`; the one-stage Hopper kernel is
+  identical and the two-stage one has the same instruction multiset, which is
+  also true of two fresh compiles of unchanged code.
+
+The derivation admits reductions that had no hand-written recipe before:
+lane-axis reductions of lane-local rows, the 2×2-patch ownership and either
+axis of a permuted accumulator. No sanitizer run is claimed for this batch.

@@ -51,7 +51,7 @@ end
         end
         @unroll for quarter in 0:1
             part = Tylo.window(values,Val((0,32quarter)),Val((32,32)))
-            packed = Tylo.pack_bf16(part .* inv_sum)
+            packed = Tylo.pack(Tylo.BFloat16,part .* inv_sum)
             Tylo.store!(dst + 128half + 64quarter,packed)
         end
     end

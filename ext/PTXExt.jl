@@ -1,7 +1,7 @@
 module PTXExt
 
 using Tylo
-using Tylo: BFloat16, PendingLoad
+using Tylo: BFloat16, PendingLoad, @rtuple
 using PTX: @ptx_str
 import PTX
 
@@ -11,6 +11,13 @@ import PTX
 # Pair words as the NVPTX wide-load lowering does. Preserving this packing
 # also preserves backend unrolling/register allocation in the full kernel;
 # the paired attention test compares the resulting machine-code bytes.
+@inline _load_tuple(x::UInt32) = (x,)
+@inline _load_tuple(x::Tuple) = x
+@generated function _wait_words(words::NTuple{1,UInt32})
+    ir = PTX.convergent_asm_ir("tcgen05.wait::ld.sync.aligned;", "=r,0,~{memory}", UInt32, [UInt32])
+    :( (Base.llvmcall(($ir,"entry"), UInt32, Tuple{UInt32}, words[1]),) )
+end
+
 @generated function _wait_words(words::NTuple{N,UInt32}) where N
     iseven(N) && N > 0 || error("a load wait requires complete register pairs")
     P = N÷2
@@ -27,22 +34,28 @@ import PTX
     end
 end
 
-@inline function Tylo.wait_load(p::PendingLoad{N}) where N
+@inline function Tylo.wait_load(p::PendingLoad{Float32,N}) where N
     words = _wait_words(p.words)
-    Fragment(ntuple(i -> reinterpret(Float32,words[i]),Val(N)),p.ownership)
+    Fragment(@rtuple(i -> reinterpret(Float32,words[i]), 1:N),p.ownership)
 end
 
-for N in (16,32,64)
+@inline function Tylo.wait_load(p::PendingLoad{T,N}) where {T<:Union{BFloat16,Float16},N}
+    PackedFragment(T, _wait_words(p.words), p.ownership)
+end
+
+for N in (1,2,4,8,16,32,64,128)
     ld = ptx"tcgen05.ld.sync.aligned.32x32b.x$N.b32"
     st = ptx"tcgen05.st.sync.aligned.32x32b.x$N.b32"
     @eval begin
-        @inline Tylo.load_async(t::Tylo.TmemPartition{Float32,$N}) = PendingLoad($ld(t.address),Tylo.Layouts.layout(t))
+        @inline Tylo.load_async(t::Tylo.TmemPartition{Float32,$N}) = PendingLoad(Float32, _load_tuple($ld(t.address)),Tylo.Layouts.layout(t))
+        @inline Tylo.load_async(t::Tylo.TmemPartition{T,$N}) where {T<:Union{BFloat16,Float16}} =
+            PendingLoad(T,_load_tuple($ld(t.address)),Tylo.Layouts.layout(t))
         @inline function Tylo.store_async!(t::Tylo.TmemPartition{Float32,$N}, f::Fragment{Float32,$N})
             Tylo._check_tmem_store(t,f)
-            $st(t.address,ntuple(i -> reinterpret(UInt32,f.data[i]),Val($N)))
+            $st(t.address,@rtuple(i -> reinterpret(UInt32,f.data[i]), 1:$N))
             nothing
         end
-        @inline function Tylo.store_async!(t::Tylo.TmemPartition{BFloat16,$N}, f::PackedBF16{$N})
+        @inline function Tylo.store_async!(t::Tylo.TmemPartition{T,$N}, f::PackedFragment{T,$N}) where {T<:Union{BFloat16,Float16}}
             Tylo._check_tmem_store(t,f)
             $st(t.address,f.data)
             nothing
@@ -50,20 +63,25 @@ for N in (16,32,64)
     end
 end
 
-@generated function Tylo.pack_bf16(f::Fragment{Float32,N}) where N
-    iseven(N) || error("packing BF16 requires an even number of values")
-    words = [:(PTX.bf16x2_pack(f.data[$(2i-1)],f.data[$(2i)])) for i in 1:N÷2]
-    quote
-        Base.@inline
-        PackedBF16(($(words...),),Tylo.Layouts.layout(f))
-    end
+@inline function Tylo.pack(::Type{T}, f::Fragment{Float32,N}) where {T<:Union{BFloat16,Float16},N}
+    iseven(N) || throw(ArgumentError("packing requires complete pairs"))
+    words = @rtuple(i -> _pack_mma_pair(T,f.data[2i-1],f.data[2i]), 1:N÷2)
+    PackedFragment(T,words,Tylo.Layouts.layout(f))
 end
 
-@generated function Tylo.store!(ptr::Core.LLVMPtr{UInt16,PTX.AS.Global},
-                                    f::PackedBF16{W}) where W
-    W % 4 == 0 || error("vector stores require a multiple of eight BF16 values")
+@generated function Tylo.store!(ptr::Core.LLVMPtr{U,PTX.AS.Global},
+                                    f::PackedFragment{T,W}) where {U,T,W}
+    U in (T,UInt16) || return :(throw(ArgumentError("packed store element type differs from pointer")))
     stores = [:(ptx"st.global.v4.b32"(ptr + $(16i),
                    ($( [:(f.data[$j]) for j in 4i+1:4i+4]... ),))) for i in 0:W÷4-1]
+    offset = 4*(W÷4)
+    if W % 4 >= 2
+        push!(stores,:(ptx"st.global.v2.b32"(ptr+$(4offset),(f.data[$(offset+1)],f.data[$(offset+2)]))))
+        offset += 2
+    end
+    if isodd(W)
+        push!(stores,:(ptx"st.global.b32"(ptr+$(4offset),f.data[$(offset+1)])))
+    end
     quote
         Base.@inline
         $(stores...)

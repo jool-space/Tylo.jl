@@ -1,6 +1,6 @@
 @testset "Adjacent C atoms supply A in the same lanes" begin
     for T in (BFloat16,Float16),wm in (1,2),rm in (1,2),rn in (2,4)
-        atom=MMA16x8x16(T)
+        atom=MMAAtom((16,8,16),T)
         p=TiledMMA(atom,Val((wm,1)),Val((rm,rn)),Val(16))
         c=Tylo.Layouts.layout(zero_accumulator(p))
         a=operand_layout(atom,OperandA())
@@ -14,7 +14,7 @@
             @test (ac[1]+16rm*(tid÷32)+16m,ac[2]+16k) == expected
         end
     end
-    atom=MMA16x8x16(BFloat16)
+    atom=MMAAtom((16,8,16),BFloat16)
     for (w,r) in (((1,2),(1,2)),((1,1),(1,3)))
         a=zero_accumulator(TiledMMA(atom,Val(w),Val(r),Val(16)))
         @test_throws ArgumentError pack_operand_a(atom,a,Val(0),Val(0))

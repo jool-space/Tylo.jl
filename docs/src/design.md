@@ -11,7 +11,7 @@ reuse. Those choices can differ while using the same Tylo primitive.
 |:--|:--|:--|
 | Logical domain and storage | `GlobalTile`, `SharedTile`, `TmemTile`, with a layout | Which thread owns a value, or whether the storage is ready |
 | Register values and ownership | `Fragment(values, ownership)` | A memory address, or a valid MMA operand representation |
-| A supported operation | `CopyPlan`, `TiledMMA`, `TMALoad`, `WGMMA64`, `TmemTransfer` | A complete pipeline or an arbitrary layout conversion |
+| A supported operation | `MMAAtom`, `CopyPlan`, `TiledMMA`, `TMALoad`, `WGMMA64`, `TmemTransfer` | A complete pipeline or an arbitrary layout conversion |
 | Completion | Explicit waits/fences, with pending types for TMEM loads and WGMMA results | Allocation lifetime, converged participation, or exclusive access |
 
 Two maps explain most of the interface:
@@ -62,8 +62,9 @@ checks that its distribution matches the destination fragment.
 
 This is not a complete `AbstractArray` implementation. There is no general
 indexing, iteration, mutable dotted assignment, or automatic redistribution.
-Packed MMA operands and pending values have stricter interfaces. WGMMA's ready
-fragment has not yet joined the generic broadcast/reduction interface either.
+Packed representations require explicit unpacking before scalar arithmetic.
+Completed WGMMA values are ordinary fragments; pending and partial accumulators
+retain their instruction-specific completion interfaces.
 These boundaries are listed in [the fragment support table](rows.md).
 
 ## Why static parameters and generated functions appear
@@ -138,9 +139,11 @@ future extraction of shared mathematics, not a prerequisite for this codebase.
 - **Plan ergonomics.** `CopyPlan{...}()`, `WGMMA64(..., Val(...))` and
   `partition(TmemTransfer{...}(), tile)` expose related choices in different
   ways. Their contracts are useful; a coherent convenience layer is unfinished.
-- **Fragment coverage.** Generic scalar arithmetic is broader than reductions,
-  register windows or stores. WGMMA and `SoftmaxState` retain specialized APIs.
-  A new ownership should acquire operations through concrete mappings and tests.
+- **Atoms as data.** A warp `MMAAtom` contributes only its operand ownerships;
+  fragments, generic loads and stores, reductions, tiling and same-lane
+  conversion derive from them by enumeration. WGMMA and TMEM transfers still
+  carry their own plan types and completion contracts; folding them into the
+  same atom description is planned, not done.
 - **Collective scope.** Tylo has no single counterpart to TK's `group<N>` yet.
   Whether one improves composition should be tested against the existing warp,
   warpgroup and producer/consumer kernels.

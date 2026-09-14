@@ -3,64 +3,89 @@ struct OperandA <: OperandRole end
 struct OperandB <: OperandRole end
 struct Accumulator <: OperandRole end
 
-"A warp-collective 16×8×16 MMA atom with FP16/BF16 inputs and FP32 accumulation."
-struct MMA16x8x16{T}
-    function MMA16x8x16(::Type{T}) where T
-        T === BFloat16 || T === Float16 || throw(ArgumentError("FP16 or BF16 required"))
-        new{T}()
+"""
+    MMAAtom{(m,n,k),TA,TB,TC}()
+    MMAAtom((m,n,k), TA, TC=Float32)
+
+A warp-collective `mma.sync` instruction described by its shape and element
+types. The atom contributes exactly one instruction-specific fact: the
+thread/value ownership of its A, B and accumulator operands, from
+[`operand_layout`](@ref). Fragments, loads, stores, reductions, tiling and
+conversions derive from those ownerships. `Float32` inputs select the TF32
+instruction of that shape. The PTX extension supplies the instruction for
+each atom it implements; an atom without one is still a valid description.
+"""
+struct MMAAtom{S,TA,TB,TC}
+    function MMAAtom{S,TA,TB,TC}() where {S,TA,TB,TC}
+        _check_atom(S,TA,TB,TC)
+        new{S,TA,TB,TC}()
     end
 end
-Base.size(::MMA16x8x16) = (16,8,16)
+Base.@constprop :aggressive @inline MMAAtom(shape::NTuple{3,Int},::Type{TA},::Type{TC}=Float32) where {TA,TC} =
+    MMAAtom{shape,TA,TA,TC}()
+Base.size(::MMAAtom{S}) where S = S
+threads(::MMAAtom) = 32
+Base.eltype(::MMAAtom{S,TA,TB,TC},::OperandA) where {S,TA,TB,TC} = TA
+Base.eltype(::MMAAtom{S,TA,TB,TC},::OperandB) where {S,TA,TB,TC} = TB
+Base.eltype(::MMAAtom{S,TA,TB,TC},::Accumulator) where {S,TA,TB,TC} = TC
 
-# Thread/value distributions are ISA properties, independent of shared
-# storage layout. B uses the mathematical (K,N) convention, not a Bᵀ API.
-function operand_layout(::MMA16x8x16,::OperandA)
-    Layouts.Ownership(Val((16,16)),Layouts.Layout(
-        ((Layouts.static(4),Layouts.static(8)),(Layouts.static(2),Layouts.static(2),Layouts.static(2))),
-        ((Layouts.static(32),Layouts.static(1)),(Layouts.static(16),Layouts.static(8),Layouts.static(128)))))
-end
-function operand_layout(::MMA16x8x16,::OperandB)
-    Layouts.Ownership(Val((16,8)),Layouts.Layout(
-        ((Layouts.static(4),Layouts.static(8)),(Layouts.static(2),Layouts.static(2))),
-        ((Layouts.static(2),Layouts.static(16)),(Layouts.static(1),Layouts.static(8)))))
-end
-function operand_layout(::MMA16x8x16,::Accumulator)
-    Layouts.Ownership(Val((16,8)),Layouts.Layout(
-        ((Layouts.static(4),Layouts.static(8)),(Layouts.static(2),Layouts.static(2))),
-        ((Layouts.static(32),Layouts.static(1)),(Layouts.static(16),Layouts.static(8)))))
+_element_bits(::Type{BFloat16}) = 16
+_element_bits(::Type{Float16}) = 16
+_element_bits(::Type{Float32}) = 32
+_element_bits(::Type) = 0
+_warp_shapes(::Val{16}) = ((16,8,8),(16,8,16))
+_warp_shapes(::Val{32}) = ((16,8,4),(16,8,8))
+_warp_shapes(::Val) = ()
+# Pure and inlinable: the constructor may run inside a kernel.
+@inline function _check_atom(S,TA,TB,TC)
+    S isa NTuple{3,Int} || throw(ArgumentError("MMA shape must be an (m,n,k) tuple"))
+    TA === TB || throw(ArgumentError("A and B must share an element type"))
+    S in _warp_shapes(Val(_element_bits(TA))) ||
+        throw(ArgumentError("unsupported warp MMA shape for these inputs"))
+    TC === Float32 || throw(ArgumentError("accumulators are FP32"))
+    nothing
 end
 
-# Operand packing and local value counts come from the atom role.
-# Elementwise accumulator results may change scalar type (e.g. Bool masks);
-# only the instruction's prescribed FP32 format can be passed back to MMA.
-_word_type(::Type{T},::Union{OperandA,OperandB}) where T = UInt32
-_word_type(::Type{T},::Accumulator) where T = T
-_word_count(::OperandA) = 4
-_word_count(::OperandB) = 2
-_word_count(::Accumulator) = 4
-struct MMAFragment{T,Role<:OperandRole,N,R}
-    data::NTuple{N,R}
-    function MMAFragment(::Type{T},role::Role,data::NTuple{N,R}) where {T,Role<:OperandRole,N,R}
-        if role isa Accumulator
-            isbitstype(T) || throw(ArgumentError("register values must be isbits"))
-        else
-            MMA16x8x16(T)
-        end
-        R === _word_type(T,role) && N == _word_count(role) ||
-            throw(ArgumentError("register payload does not match MMA role"))
-        new{T,Role,N,R}(data)
+# The ownerships follow the PTX ISA figures for mma.sync m16n8kK. Each
+# thread's A word covers `per_word` consecutive K columns; lane group t%4
+# selects the column block and t÷4 the row. Logical indices are column-major
+# within the operand's own shape. Modes of extent one are omitted.
+_modes(pairs) = (Tuple(Layouts.static(n) for (n,_) in pairs if n > 1),
+                 Tuple(Layouts.static(d) for (n,d) in pairs if n > 1))
+function _ownership(shape,lanes,values)
+    ls, ld = _modes(lanes)
+    vs, vd = _modes(values)
+    if isempty(vs)
+        vs, vd = (Layouts.static(1),), (Layouts.static(0),)
     end
+    Layouts.Ownership(Val(shape),Layouts.Layout((ls,vs),(ld,vd)))
 end
-Layouts.layout(::MMAFragment{T,Role}) where {T,Role} =
-    operand_layout(MMA16x8x16(T),Role())
-Layouts.layout(::MMAFragment{T,Accumulator}) where T =
-    operand_layout(MMA16x8x16(BFloat16),Accumulator())
-zero_accumulator(::MMA16x8x16) = MMAFragment(Float32,Accumulator(),(0f0,0f0,0f0,0f0))
-@inline function Base.map(f::F,a::MMAFragment{T,Accumulator}) where {F,T}
-    data = (f(a.data[1]),f(a.data[2]),f(a.data[3]),f(a.data[4]))
-    MMAFragment(eltype(data),Accumulator(),data)
+function _operand_layout(a::MMAAtom{S,TA},::OperandA) where {S,TA}
+    m,n,k = S
+    per_word = 32 ÷ _element_bits(TA)
+    block = 4per_word
+    _ownership((m,k),((4,m*per_word),(8,1)),((per_word,m),(2,8),(k÷block,m*block)))
 end
-@inline scale(a::MMAFragment{Float32,Accumulator},x) = map(Base.Fix2(*,x),a)
+function _operand_layout(a::MMAAtom{S,TA},::OperandB) where {S,TA}
+    m,n,k = S
+    per_word = 32 ÷ _element_bits(TA)
+    block = 4per_word
+    _ownership((k,n),((4,per_word),(8,k)),((per_word,1),(k÷block,block)))
+end
+function _operand_layout(a::MMAAtom{S},::Accumulator) where S
+    m,n,k = S
+    _ownership((m,n),((4,2m),(8,1)),((2,m),(2,8)))
+end
+"""
+    operand_layout(atom, role)
+
+The thread/value ownership of an atom's A, B or accumulator operand: an
+explicit `Layouts.Ownership` following the PTX ISA figures. Evaluated while
+generating, so it is a constant inside kernels.
+"""
+@generated operand_layout(a::A,::R) where {A<:MMAAtom,R<:OperandRole} = :($(_operand_layout(A(),R())))
+_words(atom::MMAAtom,role::OperandRole) =
+    _register_count(operand_layout(atom,role)) * _element_bits(eltype(atom,role)) ÷ 32
 
 "Load a 16×16 A operand from shared memory; K contiguous in 16-byte groups."
 function load_a end
@@ -69,93 +94,107 @@ function load_b end
 "Collectively multiply operands and return the updated immutable accumulator."
 function mma end
 """
-    store!(plan, destination, accumulator, thread)
-    store!(pointer, packed::PackedBF16)
+    load_fragment(ownership, tile, thread)
 
-Store an accumulator to a logical output view using its ownership. The packed
-payload overload writes this thread's local words contiguously to a global
-UInt16 pointer. It requires 16-byte alignment, a multiple of eight BF16 values,
-and a sufficiently large distinct destination region for each thread.
+Load this thread's values of a memory tile through scalar loads at the
+coordinates the ownership assigns to it. Correct for any static ownership;
+instruction-specific loads such as `ldmatrix` are faster when their
+ownership matches. Packed element types return a `PackedFragment`.
+"""
+function load_fragment end
+"""
+    store!(plan, destination, accumulator, thread)
+    store!(destination, fragment, thread)
+    store!(pointer, packed::PackedFragment)
+
+Store an accumulator to a logical output view using its ownership. The
+two-argument tile form stores any fragment through scalar stores at its
+ownership's coordinates. The packed payload overload writes this thread's
+local words contiguously to a global typed BF16/FP16 pointer or a UInt16
+bit pointer. It writes complete words, using 4-, 8- or 16-byte alignment for
+one, two/three or at least four words, and a sufficiently large distinct
+destination region for each thread.
 """
 function store! end
+
+@inline zero_accumulator(a::MMAAtom{S,TA,TB,TC}) where {S,TA,TB,TC} =
+    Fragment(ntuple(_ -> zero(TC),Val(4)),operand_layout(a,Accumulator()))
 
 """
     TiledMMA(atom, Val((warps_m,warps_n)), Val((repeat_m,repeat_n)), Val(k))
 
 A CTA's MMA decomposition. Each warp computes repeat_m×repeat_n atoms; K is
-a positive multiple of 16. Warp numbering is M-fastest. This plan describes
-ownership and instruction repetition, with no allocation or hidden barriers.
+a positive multiple of the atom's K. Warp numbering is M-fastest. This plan
+describes ownership and instruction repetition, with no allocation or hidden
+barriers. Its accumulator is one flat `Fragment` in `TiledMMAOwnership`.
 """
 struct TiledMMA{A,W,R,K}
     atom::A
-    function TiledMMA(a::MMA16x8x16,::Val{W},::Val{R},::Val{K}) where {W,R,K}
+    function TiledMMA(a::MMAAtom,::Val{W},::Val{R},::Val{K}) where {W,R,K}
         W isa Tuple && R isa Tuple && length(W) == length(R) == 2 &&
             all(n -> n isa Int && n > 0,(W...,R...)) && prod(W) <= 32 &&
-            K isa Int && K > 0 && K % 16 == 0 || throw(ArgumentError("invalid MMA tiling"))
+            K isa Int && K > 0 && K % size(a)[3] == 0 || throw(ArgumentError("invalid MMA tiling"))
         new{typeof(a),W,R,K}(a)
     end
 end
-Base.size(::TiledMMA{A,W,R,K}) where {A,W,R,K} = (16W[1]*R[1],8W[2]*R[2],K)
+Base.size(p::TiledMMA{A,W,R,K}) where {A,W,R,K} = (size(p.atom)[1]*W[1]*R[1],size(p.atom)[2]*W[2]*R[2],K)
 threads(::TiledMMA{A,W}) where {A,W} = 32prod(W)
-struct MMAAccumulator{P,N,T}
-    data::NTuple{N,MMAFragment{T,Accumulator,4,T}}
-    function MMAAccumulator(p::P,data::NTuple{N,MMAFragment{T,Accumulator,4,T}}) where {P<:TiledMMA,N,T}
-        N == _acc_count(p) || throw(ArgumentError("accumulator shape does not match plan"))
-        new{P,N,T}(data)
-    end
-end
 _acc_count(::TiledMMA{A,W,R}) where {A,W,R} = prod(R)
-@inline zero_accumulator(p::TiledMMA) = MMAAccumulator(p,ntuple(_ -> zero_accumulator(p.atom),Val(_acc_count(p))))
-# Static scalar calls avoid outlining nested tuple-map callbacks into device
-# functions, which would materialize the accumulator in local memory.
-@generated function Base.map(f::F,a::MMAAccumulator{P,N}) where {F,P,N}
-    fragments=[:(_mapped_mma_fragment(f,a.data[$i])) for i in 1:N]
-    quote
-        Base.@inline
-        MMAAccumulator(_plan($P),($(fragments...),))
-    end
-end
-@inline _mapped_mma_fragment(f::F,a::MMAFragment{T,Accumulator}) where {F,T} = map(f,a)
-@inline scale(a::MMAAccumulator,x) = map(Base.Fix2(*,x),a)
-_plan(::Type{TiledMMA{MMA16x8x16{T},W,R,K}}) where {T,W,R,K} =
-    TiledMMA(MMA16x8x16(T),Val(W),Val(R),Val(K))
+@generated _plan(::Type{TiledMMA{A,W,R,K}}) where {A,W,R,K} = :($(TiledMMA(A(),Val(W),Val(R),Val(K))))
 
 # The tiled accumulator's flattened thread/value mapping. It is useful for
 # masks and epilogues as well as stores; physical memory layouts are separate.
 struct TiledMMAOwnership{P} end
 operand_layout(p::TiledMMA,::Accumulator) = TiledMMAOwnership{typeof(p)}()
-Layouts.layout(::MMAAccumulator{P}) where P = TiledMMAOwnership{P}()
 Base.size(::TiledMMAOwnership{P}) where P = size(_plan(P))[1:2]
 @inline function Layouts.coordinate(::TiledMMAOwnership{TiledMMA{A,W,R,K}},
                                     tid::Integer,::Val{E}) where {A,W,R,K,E}
+    plan = _plan(TiledMMA{A,W,R,K})
+    m,n = size(plan.atom)[1],size(plan.atom)[2]
     0 <= E < 4prod(R) || throw(BoundsError())
     atom,word=E÷4,E%4
     rm,rn=atom%R[1],atom÷R[1]
     warp,lane=tid÷oftype(tid,32),tid%oftype(tid,32)
     wm,wn=warp%oftype(tid,W[1]),warp÷oftype(tid,W[1])
-    r,c=Layouts.coordinate(operand_layout(_plan(TiledMMA{A,W,R,K}).atom,Accumulator()),lane,Val(word))
-    (r+wm*oftype(tid,16R[1])+oftype(tid,16rm),c+wn*oftype(tid,8R[2])+oftype(tid,8rn))
+    r,c=Layouts.coordinate(operand_layout(plan.atom,Accumulator()),lane,Val(word))
+    (r+wm*oftype(tid,m*R[1])+oftype(tid,m*rm),c+wn*oftype(tid,n*R[2])+oftype(tid,n*rn))
+end
+_register_count(::TiledMMAOwnership{TiledMMA{A,W,R,K}}) where {A,W,R,K} = 4prod(R)
+@inline function zero_accumulator(p::TiledMMA{A,W,R,K}) where {A,W,R,K}
+    Fragment(ntuple(_ -> zero(eltype(p.atom,Accumulator())),Val(4prod(R))),TiledMMAOwnership{typeof(p)}())
+end
+const TiledAccumulator{P,T,N} = Fragment{T,N,TiledMMAOwnership{P}}
+
+# One atom's accumulator, as a fragment in the atom's own ownership.
+@inline function _atom_accumulator(acc::TiledAccumulator{P},::Val{I}) where {P,I}
+    Fragment(@rtuple(j -> acc.data[4*(I-1)+j], 1:4),operand_layout(_plan(P).atom,Accumulator()))
 end
 
 """
     pack_operand_a(atom, left, right)
     pack_operand_a(atom, accumulator, Val(m), Val(k))
 
-GPU conversion from two horizontally adjacent FP32 16×8 C atoms to one 16×16
-A operand, without lane communication. Round to the atom's BF16/FP16 type,
-nearest even, and pack low element first. Signed zero and infinities survive;
-NaNs remain NaNs but their payload/sign are unspecified. No finite saturation
-or flush-to-zero modifier is applied. Finite overflow follows the destination
-format. This is numerical conversion, not an FP32 bit reinterpretation.
+Conversion from two horizontally adjacent FP32 16×8 accumulator fragments to
+one 16×16 A operand, without lane communication. Round to the atom's
+BF16/FP16 type, nearest even, and pack low element first. Signed zero and
+infinities survive; NaNs remain NaNs but their payload/sign are unspecified.
+No finite saturation or flush-to-zero modifier is applied. Finite overflow
+follows the destination format. This is numerical conversion, not an FP32
+bit reinterpretation.
 
 The tiled overload selects zero-based M repetition `m` and 16-column pair `k`.
-It requires one N warp and complete pairs of N atoms. Row ownership must match
+It requires one N warp and complete pairs of N atoms. Logical axis-1 ownership must match
 that of the consuming MMA; the surrounding kernel owns this correspondence.
 """
-function pack_operand_a end
-@inline function pack_operand_a(atom::MMA16x8x16,
-        a::MMAAccumulator{TiledMMA{A,W,R,K}},::Val{M},::Val{J}) where {A,W,R,K,M,J}
+@inline function pack_operand_a(atom::MMAAtom{S,TA},left::Fragment{Float32,4},
+        right::Fragment{Float32,4}) where {S,TA}
+    S == (16,8,16) || throw(ArgumentError("operand conversion targets the m16n8k16 A operand"))
+    pair = TiledMMAOwnership{TiledMMA{typeof(atom),(1,1),(1,2),16}}()
+    pack(TA,relayout(operand_layout(atom,OperandA()),Fragment((left.data...,right.data...),pair)))
+end
+@inline function pack_operand_a(atom::MMAAtom,a::TiledAccumulator{TiledMMA{A,W,R,K}},
+        ::Val{M},::Val{J}) where {A,W,R,K,M,J}
     W[2] == 1 && iseven(R[2]) || throw(ArgumentError("conversion requires one N warp and paired N atoms"))
     0 <= M < R[1] && 0 <= J < R[2]÷2 || throw(BoundsError())
-    pack_operand_a(atom,a.data[M+1+2J*R[1]],a.data[M+1+(2J+1)*R[1]])
+    pack_operand_a(atom,_atom_accumulator(a,Val(M+1+2J*R[1])),_atom_accumulator(a,Val(M+1+(2J+1)*R[1])))
 end

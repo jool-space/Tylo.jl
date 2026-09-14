@@ -10,10 +10,12 @@ bindings.
 | Source | Responsibility | Read with |
 |:--|:--|:--|
 | `src/Tylo.jl` | Public bindings, file ordering and device-operation declarations | `Project.toml` for extension triggers |
+| `src/tuples.jl` | Internal range-to-tuple expansion with inlined scalar calls | `test/tuples.jl`, `test/gpu/tuples.jl` |
 | `src/layouts/layouts.jl`, `src/layouts/` | Affine coordinate maps, static notation, composition, swizzles and windows | `test/layouts.jl`, `test/layout_macro.jl` |
 | `src/memory.jl` | Typed global/shared pointers plus storage layout; address-unit conversion | `ext/copy.jl`, `test/gpu/gemm.jl` |
 | `src/fragments.jl`, `src/arrayops.jl` | Local values plus ownership, generic scalar broadcast, axis views and supported reductions/windows | `test/arrayops.jl`, `test/gpu/arrayops.jl` |
-| `src/rows.jl`, `ext/rows.jl` | Particular ownerships and local/warp/MMA reduction recipes; compatibility names | `test/rows.jl`, `test/gpu/rows.jl` |
+| `src/enumerate.jl` | Host enumeration of ownership tables: reduction plans, broadcast slot maps, affine fits, windows and in-lane relayouts | `test/enumerate.jl` |
+| `src/rows.jl`, `ext/rows.jl` | Generated reductions from derived plans; warp shuffle bindings | `test/rows.jl`, `test/gpu/rows.jl` |
 | `src/copy.jl`, `ext/copy.jl` | Vector copy assignment, structural validation, full and bounded copies | `test/gpu/boundaries.jl` |
 | `src/mma.jl`, `ext/mma.jl` | Warp MMA roles, packing, repetitions, shared loads and ownership-based stores | `test/gpu/gemm.jl`, `test/gpu/operand_a.jl` |
 | `src/tma.jl`, `ext/tma.jl`, `ext/CUDACoreExt.jl` | Canonical TMA storage, descriptor preparation and launch/lifetime binding | `test/hopper.jl`, `test/gpu/tma.jl` |
@@ -36,7 +38,7 @@ For `g = scalar_function.(f .- m)`:
 2. `_broadcast_anchor` finds a fragment carrying the full result ownership.
    `_check_broadcast` checks compatible ownership and supported expansion of
    reduced axes. Equal logical shapes alone are insufficient.
-3. `_materialize_fragment` generates an expression for each static local slot.
+3. `_materialize_fragment` uses `@rtuple` to visit each static local slot.
    `_broadcast_value` recursively applies ordinary scalar calls to that slot's
    inputs. A reduced input selects the corresponding replicated result slot.
 4. `_rebuild_fragment` returns values with the result ownership. Julia and the
@@ -46,11 +48,45 @@ Read these functions in `src/arrayops.jl`. The generated code specializes on
 local slot count and representation, rather than building a device loop over a
 heap array. A custom scalar PTX operation uses this same path.
 
-For `sum(f; dims=2)`, first follow `_fragment_reduce`, `_reduced_layout` and
-`_reduce_values`. The last dispatch chooses a known local or shuffle-based
-recipe. The mathematical layout description does not synthesize arbitrary
-communication. The old `row_*` names still visible in the sources implement
-these selected recipes and compatibility APIs.
+For `sum(f; dims=2)`, follow `_fragment_reduce` to the generated functions
+`_reduce_values` and `_reduced_ownership` in `src/rows.jl`. While generating,
+they call `reduction_plan` in `src/enumerate.jl`, which enumerates the
+ownership table and derives the local slot groups, the xor-shuffle lane bits
+and the fitted result ownership. `broadcast_slots` derives from the same
+tables which result slot each input slot reads when a reduction is broadcast
+back. Ownerships whose values span warps yield no plan and raise an error.
+
+## Internal tuple construction
+
+`@rtuple` is an unexported implementation helper for small integer ranges:
+
+```jldoctest
+julia> using Tylo: @rtuple;
+
+julia> @rtuple(0:3) do i
+           i*i
+       end
+(0, 1, 4, 9)
+```
+
+The lambda spelling is `@rtuple(i -> i*i, 0:3)`. The helper evaluates the
+callable and range expressions once, then calls the mapper once per index in
+range order. It preserves index types, supports stepped and empty ranges, and
+requests inlining at each scalar call site. Normal callback scope, captures
+and `return` behavior apply.
+
+The macro passes the range to a generated helper through `Val`; expansion of
+the scalar calls happens during method specialization. This permits ranges
+such as `0:N-1` when `N` comes from a type parameter. It does not make unknown
+runtime bounds static. Using it for arbitrary runtime ranges would specialize
+on each range value and is outside its intended kernel use.
+
+Fragment mapping, broadcast materialization, BF16 packing and selected stores
+use this helper instead of repeating tuple-generation code. Generators that
+construct instruction signatures, shared operand reuse or reduction trees
+remain explicit. Structural tests compare 4- and 64-slot ownership kernels
+against literal-call references; inlining alone is not a register-residency
+proof.
 
 ## Follow a TMEM load into arithmetic
 

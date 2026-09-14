@@ -28,7 +28,7 @@ function tmem_view_kernel!(addresses,bits,part_addresses,out,input,base,offset,:
     f=Fragment(ntuple(i -> @inbounds(input[64Int(tid)+i]),Val(64)),plan)
     shifted=f .- maximum(f;dims=axis)
     tail=window(shifted,Val(P ? (32,0) : (0,32)),Val((32,32)))
-    store!(pointer(out)+64Int(tid),pack_bf16(tail))
+    store!(pointer(out)+64Int(tid),pack(BFloat16,tail))
     nothing
 end
 

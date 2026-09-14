@@ -42,7 +42,7 @@ FP32 values per thread:
 ```jldoctest
 julia> using Tylo
 
-julia> atom = MMA16x8x16(Tylo.BFloat16);
+julia> atom = MMAAtom((16,8,16),Tylo.BFloat16);
 
 julia> f = Fragment(zero_accumulator(atom));
 

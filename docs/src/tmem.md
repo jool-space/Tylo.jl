@@ -66,7 +66,7 @@ with 128 physical lanes. For layout offset `i`:
 
 - The physical lane offset is `i % 128`.
 - The typed position along that lane is `i ÷ 128`.
-- One FP32 value occupies a word; two BF16 values share a word, low half first.
+- One FP32 value occupies a word; two BF16 or FP16 values share a word, low half first.
 
 Thus strides `(1,128)` map logical axis 1 along hardware lanes and axis 2 along
 values within a lane. Strides `(128,1)` exchange those logical roles.
@@ -77,7 +77,7 @@ Tylo's other low-level layout operations.
 
 A tile may describe layouts beyond the available instructions. `partition`
 currently accepts affine modes with these contiguous storage positions, a
-32-lane aligned band, and 16, 32, or 64 words per thread. Compatible hierarchical
+32-lane aligned band, and 1, 2, 4, 8, 16, 32, 64, or 128 words per thread. Compatible hierarchical
 modes are accepted; nonlinear swizzles and incompatible strides are rejected.
 It does not silently select another instruction or redistribute values.
 
@@ -99,20 +99,26 @@ julia> Tuple(Int.(size(rotated)))
 
 Reinterpretation changes the element representation of the same storage. It
 requires an explicit logical axis, a flat affine view, and complete aligned
-pairs when converting a BF16 view back to FP32. It does not convert values or
-make data ready. By contrast, `pack_bf16(f)` numerically converts FP32 registers
-and retains their ownership.
+pairs when converting a BF16/FP16 view back to FP32. It does not convert values or
+make data ready. By contrast, `pack(BFloat16,f)` numerically converts FP32 registers
+and retains their ownership. FP16 conversion uses `pack(Float16, f)`.
+A BF16/FP16 TMEM load returns a `PackedFragment{T}` after `wait_load`; call
+`unpack` for ordinary typed scalar arithmetic. These transfers read the two
+16-bit values already sharing each word. They do not use the ISA's distinct
+`.pack::16b` mode, which gathers halfwords from separate TMEM columns.
 
 A register slice uses `window(f, Val(origin), Val(shape))`. The current
 implementation can slice the local-value axis of lane-local and TMEM-transfer
 fragments in either orientation; it must retain every participating thread.
-Packed windows require complete BF16 pairs. Both origin and shape are static,
+Packed windows require complete element pairs. Both origin and shape are static,
 so slicing selects registers without dynamic tuple indexing. Storage windows
 use the same logical coordinates, with runtime origins permitted.
 
 `store!(destination, packed)` writes this thread's packed payload contiguously
-to a global pointer. It requires 16-byte alignment and a multiple of eight BF16
-values. The caller computes a distinct destination for each thread; the store
+to a typed global pointer (`BFloat16` or `Float16`), or a `UInt16` bit pointer.
+It writes complete 32-bit words, using vector stores where possible. Require
+16-byte alignment for four or more words, 8-byte alignment for two or three
+words, and 4-byte alignment for one word. The caller computes a distinct destination for each thread; the store
 does not infer a global matrix layout from fragment ownership.
 
 ## Completion and validation

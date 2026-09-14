@@ -85,8 +85,8 @@ end
     @test_throws ArgumentError TmemTransfer{(32,64),0}()
     @test_throws BoundsError coordinate(p,0,Val(0.5))
     @test_throws BoundsError coordinate(p,0,Val(64))
-    @test_throws ArgumentError partition(TmemTransfer{(32,8),2}(),window(tile,(0,0),Val((32,8))))
-    @test_throws ArgumentError TmemTile(Float16,UInt32(0),@Layout((32,64),(1,128)))
+    @test_throws ArgumentError partition(TmemTransfer{(32,3),2}(),window(tile,(0,0),Val((32,3))))
+    @test_throws ArgumentError TmemTile(Float64,UInt32(0),@Layout((32,64),(1,128)))
     swizzled=TmemTile(Float32,UInt32(0),Tylo.Layouts.compose(Tylo.Layouts.Swizzle{1,0,2}(),@Layout((32,64),(1,128))))
     @test_throws ArgumentError partition(p,swizzled)
     @test_throws ArgumentError permutedims(p,(1,1))
@@ -109,22 +109,22 @@ end
         @test_throws ArgumentError window(g,Val(permute ? (0,1) : (1,0)),Val((32,32)))
     end
     words=ntuple(UInt32,32)
-    packed=PackedBF16(words,plan)
+    packed=PackedFragment(BFloat16,words,plan)
     @test Tylo.Layouts.layout(packed) === plan
     @test window(packed,Val((0,32)),Val((32,32))).data == words[17:32]
     @test window(permutedims(packed),Val((32,0)),Val((32,32))).data == words[17:32]
     @test permutedims(permutedims(packed)) === packed
     @test_throws ArgumentError window(packed,Val((0,1)),Val((32,32)))
-    @test_throws DimensionMismatch PackedBF16(words,TmemTransfer{(32,32),2}())
+    @test_throws DimensionMismatch PackedFragment(BFloat16,words,TmemTransfer{(32,32),2}())
     part=partition(plan,TmemTile(Float32,UInt32(0),@Layout((32,64),(1,128))))
     @test Tylo._check_tmem_store(part,f) === nothing
     @test Tylo._check_tmem_store(permutedims(part),permutedims(f)) === nothing
     @test permutedims(permutedims(f)) === f
     runtime=TmemTile(Float32,UInt32(0),Layout((32,64),(1,128)))
     @test size(reinterpret_tile(BFloat16,runtime;dims=2)) === (32,128)
-    @test Tylo._check_tmem_store(part,RowFragment(data)) === nothing
+    @test Tylo._check_tmem_store(part,local_fragment(data)) === nothing
     @test_throws DimensionMismatch Tylo._check_tmem_store(part,permutedims(f))
-    pending=Tylo.PendingLoad(ntuple(UInt32,64),plan)
+    pending=Tylo.PendingLoad(Float32,ntuple(UInt32,64),plan)
     @test_throws MethodError map(abs,pending)
     @test_throws MethodError scale(pending,2f0)
     @test_throws MethodError getindex(pending,1)

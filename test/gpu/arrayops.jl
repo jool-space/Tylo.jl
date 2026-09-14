@@ -41,12 +41,12 @@ if !("--runtime-only" in ARGS)
         @test !occursin(r"\bcall",body)
         @test !occursin("shfl.sync",body)
     end
-    for (kind,n,shuffles) in ((Val(:local),3,0),(Val(:warp),3,15),(MMA16x8x16(BFloat16),4,12))
+    for (kind,n,shuffles) in ((Val(:local),3,0),(Val(:warp),3,15),(MMAAtom((16,8,16),BFloat16),4,12))
         codes=String[]
         for permute in (false,true)
             tt=Tuple{CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},typeof(kind),Val{n},Val{permute}}
             code=compile_kernel(array_softmax!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
-            save_code("array-softmax-$(nameof(typeof(kind)))-$permute",code)
+            save_code("array-softmax-$(kind isa Val ? typeof(kind).parameters[1] : nameof(typeof(kind)))-$permute",code)
             body=entry_body(code.ptx)
             @test !occursin(".local .",body)
             @test !occursin(r"\bcall",body)
@@ -62,7 +62,7 @@ end
 
 if CUDACore.functional()
 @testset "Fragment arithmetic and reductions on either logical axis" begin
-    atom=MMA16x8x16(BFloat16)
+    atom=MMAAtom((16,8,16),BFloat16)
     cases=Any[(Val(:local),3,32),(Val(:warp),3,64),(atom,4,32)]
     for wm in (1,2),rm in (1,2),rn in (1,3)
         push!(cases,(TiledMMA(atom,Val((wm,1)),Val((rm,rn)),Val(16)),4rm*rn,32wm))
@@ -78,7 +78,7 @@ if CUDACore.functional()
             push!(get!(byrow,reference_row(kind,n,t,e),Float32[]),values[e+1,t+1])
         end
         f=row_fragment(kind,ntuple(_ -> 0f0,Val(n)))
-        nr=Tylo._row_count(row_ownership(f))
+        nr=Tylo._register_count(Tylo._reduced_ownership(Tylo.Layouts.layout(f),Val(2)))
         input=CuArray(vec(values)); output=similar(input); minima=CuArray{Float32}(undef,nr*threads)
         expected=similar(values); expected_min=zeros(Float32,nr,threads)
         for t in 0:threads-1,e in 0:n-1

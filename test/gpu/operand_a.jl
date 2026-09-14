@@ -2,13 +2,14 @@ using Tylo.Layouts: @Layout
 
 function conversion_probe!(out,input,atom)
     lane=Int32(threadIdx().x)-Int32(1)
-    left=Tylo.MMAFragment(Float32,Accumulator(),ntuple(i -> @inbounds(input[i,lane+1]),Val(4)))
-    right=Tylo.MMAFragment(Float32,Accumulator(),ntuple(i -> @inbounds(input[i+4,lane+1]),Val(4)))
+    c=operand_layout(atom,Accumulator())
+    left=Fragment(ntuple(i -> @inbounds(input[i,lane+1]),Val(4)),c)
+    right=Fragment(ntuple(i -> @inbounds(input[i+4,lane+1]),Val(4)),c)
     a=pack_operand_a(atom,left,right)
     ntuple(i -> (@inbounds out[i,lane+1]=a.data[i]),Val(4))
     nothing
 end
-function conversion_shared_probe!(out,input,atom::MMA16x8x16{T}) where T
+function conversion_shared_probe!(out,input,atom::MMAAtom{(16,8,16),T}) where T
     lane=Int32(threadIdx().x)-Int32(1)
     smem=CuStaticSharedArray(T,256)
     # Independent source coordinate oracle; scalar stores establish the
@@ -25,7 +26,7 @@ function conversion_shared_probe!(out,input,atom::MMA16x8x16{T}) where T
     ntuple(i -> (@inbounds out[i,lane+1]=a.data[i]),Val(4))
     nothing
 end
-function chained_mma_kernel!(out,a_data,b_data,v_data,atom::MMA16x8x16{T}) where T
+function chained_mma_kernel!(out,a_data,b_data,v_data,atom::MMAAtom{(16,8,16),T}) where T
     s=CuStaticSharedArray(T,640);tid=Int32(threadIdx().x)-Int32(1)
     sa=SharedTile(pointer(s),@Layout((16, 16), (16, 1)))
     sb=SharedTile(pointer(s)+512,@Layout((16, 16), (1, 16)))
@@ -50,7 +51,7 @@ end
 if !("--runtime-only" in ARGS)
 @testset "Same-lane operand conversion assembly" begin
     for T in (BFloat16,Float16),arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
-        atom=MMA16x8x16(T)
+        atom=MMAAtom((16,8,16),T)
         tt=Tuple{CuDeviceMatrix{UInt32,1},CuDeviceMatrix{Float32,1},typeof(atom)}
         code=compile_kernel(conversion_probe!,tt;arch,threads=32)
         save_code("operand-a-$T-$arch",code);body=entry_body(code.ptx)
@@ -62,7 +63,7 @@ end
 if CUDACore.functional()
 @testset "Accumulator conversion bits and shared-load oracle" begin
     for T in (BFloat16,Float16)
-        atom=MMA16x8x16(T)
+        atom=MMAAtom((16,8,16),T)
         delta=T==BFloat16 ? 2f0^-7 : 2f0^-10
         cases=Float32[0,-0.0,1,1+delta/2,1+3delta/2,-1-delta/2,
             nextfloat(0f0),-nextfloat(0f0),Float32(nextfloat(zero(T))),
@@ -91,7 +92,7 @@ end
         a=T.(randn(rng,Float32,16,16).*0.3f0); b=T.(randn(rng,Float32,16,16).*0.3f0)
         v=T.(randn(rng,Float32,16,8))
         out=CuArray{Float32}(undef,16,8)
-        @cuda threads=32 chained_mma_kernel!(out,CuArray(permutedims(a)),CuArray(b),CuArray(v),MMA16x8x16(T))
+        @cuda threads=32 chained_mma_kernel!(out,CuArray(permutedims(a)),CuArray(b),CuArray(v),MMAAtom((16,8,16),T))
         reference=Float64.(T.(Float64.(a)*Float64.(b)))*Float64.(v)
         @test Array(out) ≈ reference rtol=5e-5 atol=3e-6
     end

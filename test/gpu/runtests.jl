@@ -1,4 +1,6 @@
 using Tylo, PTX, CUDACore, BFloat16s, Random, Test
+include("../fixtures.jl")
+
 
 Base.JLOptions().code_coverage == 0 || error(
     "GPU structural tests require --code-coverage=none; collect host coverage separately.")
@@ -14,13 +16,17 @@ end
 println("CUDA compiler: ", CUDACore.compiler_version())
 
 include("codegen.jl")
+include("tuples.jl")
 include("layouts.jl")
 include("fragments.jl")
 include("tmem.jl")
 include("tmem_views.jl")
 include("gemm.jl")
+include("atoms.jl")
 include("tma.jl")
 include("wgmma.jl")
+include("packing.jl")
+include("wgmma_fragments.jl")
 if "--attention" in ARGS
     include("../../examples/flash_attention/comparison.jl")
 end
@@ -37,3 +43,5 @@ include("online.jl")
 include("operand_a.jl")
 
 include("streaming_attention.jl")
+
+snapshot_report()

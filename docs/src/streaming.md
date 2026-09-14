@@ -11,16 +11,16 @@ Neither job chooses buffers, CTA roles, scheduling, or barrier placement.
 
 ## Online statistics
 
-`SoftmaxState` stores an FP32 maximum and unnormalized sum in an existing
-`RowValues` distribution. This algorithm helper currently assumes the original
-lane-local, warp-striped or warp-MMA row distributions and reduces dimension 2.
-It has no `dims` argument and does not accept every generic or permuted fragment.
-That is an unfinished API generalization, not a hardware requirement that
-online statistics must be called rows. An update returns a new state, unnormalized weights,
-and the factor that rescales a previous weighted numerator:
+`SoftmaxState(f; dims=2)` stores an FP32 maximum and unnormalized sum as
+reduced fragments. Choose the logical reduction axis explicitly; `dims=1`
+works for the corresponding ownership or a permuted fragment. Supported
+collectives are the same as `sum` and `maximum`, including completed WGMMA
+results. The state retains the axis and reduced ownership as type information.
+An update returns a new state, unnormalized weights, and the factor that
+rescales a previous weighted numerator:
 
 ```jldoctest
-julia> f = RowFragment((0f0, 0f0)); s = SoftmaxState(f);
+julia> f = Fragment((0f0, 0f0), Tylo.Layouts.LocalOwnership{2,2}()); s = SoftmaxState(f);
 
 julia> u = softmax_update(s, f);
 
@@ -42,7 +42,7 @@ The numerator update is `o′=α*o+p*V`. `softmax_normalize(o,state)` belongs af
 the final tile. `softmax_merge` combines independent summaries and exposes both
 numerator rescale factors. Floating-point chunking/merge order is not associative.
 
-The state and values must agree on the original row-result ownership. A 32-column MMA score accumulator and 64-column output
+The state and values must agree on the reduced ownership. A 32-column MMA score accumulator and 64-column output
 accumulator can share the same state when their M decomposition and one-N-warp
 distribution agree. A lane-local summary cannot silently become a warp summary.
 All lanes still participate in distributed reductions, including masked lanes.

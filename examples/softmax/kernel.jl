@@ -18,9 +18,9 @@ end
 function lane_softmax_kernel!(output,input,mask,::Val{N}) where N
     row=(Int32(blockIdx().x)-Int32(1))*Int32(blockDim().x)+Int32(threadIdx().x)
     width,rows=size(input)
-    f=RowFragment(ntuple(Val(N)) do j
+    f=Fragment(ntuple(Val(N)) do j
         row<=rows && j<=width && (@inbounds mask[j,row]) ? Float32(@inbounds input[j,row]) : -Inf32
-    end)
+    end, Tylo.Layouts.LocalOwnership{N,2}())
     result=softmax(f)
     ntuple(Val(N)) do j
         if row<=rows && j<=width
@@ -34,10 +34,10 @@ function warp_softmax_kernel!(output,input,mask,::Val{N}) where N
     row=(Int32(blockIdx().x)-Int32(1))*(Int32(blockDim().x)÷Int32(32))+tid÷Int32(32)+Int32(1)
     lane=tid%Int32(32)
     width,rows=size(input)
-    f=WarpRowFragment(ntuple(Val(N)) do e
+    f=Fragment(ntuple(Val(N)) do e
         j=lane+Int32(32(e-1))+Int32(1)
         row<=rows && j<=width && (@inbounds mask[j,row]) ? Float32(@inbounds input[j,row]) : -Inf32
-    end)
+    end, Tylo.Layouts.StripedOwnership{N,2}())
     result=softmax(f)
     ntuple(Val(N)) do e
         j=lane+Int32(32(e-1))+Int32(1)
@@ -48,18 +48,14 @@ function warp_softmax_kernel!(output,input,mask,::Val{N}) where N
     nothing
 end
 
-@generated function mask_accumulator(a::Tylo.MMAAccumulator{P,N},mask,tid) where {P,N}
-    fragments = Expr[]
-    for i in 1:N
-        words = [quote
-            r,c=coordinate(Tylo.Layouts.layout(a),tid,Val($(4(i-1)+j-1)))
-            @inbounds mask[r+Int32(1),c+Int32(1)] ? a.data[$i].data[$j] : -Inf32
-        end for j in 1:4]
-        push!(fragments,:(Tylo.MMAFragment(Float32,Accumulator(),($(words...),))))
-    end
+@generated function mask_accumulator(a::Fragment{Float32,N},mask,tid) where N
+    values = [quote
+        r,c=coordinate(Tylo.Layouts.layout(a),tid,Val($(e-1)))
+        @inbounds mask[r+Int32(1),c+Int32(1)] ? a.data[$e] : -Inf32
+    end for e in 1:N]
     quote
         Base.@inline
-        Tylo.MMAAccumulator(Tylo._plan($P),($(fragments...),))
+        Fragment(($(values...),),Tylo.Layouts.layout(a))
     end
 end
 

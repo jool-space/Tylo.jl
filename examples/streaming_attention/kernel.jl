@@ -5,7 +5,7 @@ using Tylo.Layouts: @Layout, Swizzle, compose, coordinate, cosize
 # One CTA owns 64 queries. Four warps own disjoint groups of 16 rows,
 # each with all 32 score columns and all 64 output columns.
 function configuration()
-    atom=MMA16x8x16(BFloat16)
+    atom=MMAAtom((16,8,16),BFloat16)
     scores=TiledMMA(atom,Val((4,1)),Val((1,4)),Val(64))
     output=TiledMMA(atom,Val((4,1)),Val((1,8)),Val(32))
     q=compose(Swizzle{3,3,3}(),@Layout((64, 64), (64, 1)))
@@ -27,31 +27,27 @@ shared_bytes(::Any)=16384 # Q: 64×64; K: 64×32; V: 32×64, all BF16
     nothing
 end
 
-@generated function mask_scores(a::Tylo.MMAAccumulator{P,N},mask,tid,row,key,m,n,::Val{Causal}) where {P,N,Causal}
-    fragments=Expr[]
-    for i in 1:N
-        words=[quote
-            r,c=coordinate(Tylo.Layouts.layout(a),tid,Val($(4(i-1)+j-1)))
-            qr,kc=Int(row)+Int(r),Int(key)+Int(c)
-            valid=qr<m && kc<n && (!$Causal || kc<=qr) && (@inbounds mask[kc+1,qr+1])
-            valid ? a.data[$i].data[$j]*0.125f0 : -Inf32
-        end for j in 1:4]
-        push!(fragments,:(Tylo.MMAFragment(Float32,Accumulator(),($(words...),))))
-    end
+@generated function mask_scores(a::Fragment{Float32,N},mask,tid,row,key,m,n,::Val{Causal}) where {N,Causal}
+    values=[quote
+        r,c=coordinate(Tylo.Layouts.layout(a),tid,Val($(e-1)))
+        qr,kc=Int(row)+Int(r),Int(key)+Int(c)
+        valid=qr<m && kc<n && (!$Causal || kc<=qr) && (@inbounds mask[kc+1,qr+1])
+        valid ? a.data[$e]*0.125f0 : -Inf32
+    end for e in 1:N]
     quote
         Base.@inline
-        Tylo.MMAAccumulator(Tylo._plan($P),($(fragments...),))
+        Fragment(($(values...),),Tylo.Layouts.layout(a))
     end
 end
 
 # A concrete bridge between two differently wide accumulators with identical
 # row ownership. Each adjacent pair of score atoms becomes one A operand.
 # Conversion to BF16 is visible here; the denominator above stays FP32.
-@generated function weighted_values(plan::TiledMMA{A,W,R,K},weights::Tylo.MMAAccumulator,
-                                    values::SharedTile,out::Tylo.MMAAccumulator,tid) where {A,W,R,K}
+@generated function weighted_values(plan::TiledMMA{A,W,R,K},weights::Fragment,
+                                    values::SharedTile,out::Fragment,tid) where {A,W,R,K}
     W==(4,1) && R==(1,8) && K==32 || error("this worked kernel uses a fixed PV tile")
     cs=[Symbol(:c,i) for i in 1:8]
-    statements=[:($(cs[j])=out.data[$j]) for j in 1:8]
+    statements=[:($(cs[j])=Tylo._atom_accumulator(out,Val($j))) for j in 1:8]
     for k in 0:1
         push!(statements,:(a=pack_operand_a(plan.atom,weights,Val(0),Val($k))))
         for j in 1:8
@@ -65,7 +61,7 @@ end
         @inbounds begin
             $(statements...)
         end
-        Tylo.MMAAccumulator(plan,($(cs...),))
+        Fragment(($([:($c.data[$k]) for c in cs for k in 1:4]...),),Tylo.Layouts.layout(out))
     end
 end
 

@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 jobs:
   test-gpu:
-    name: Julia ${{ matrix.version }} - aarch64 - gpu
-    runs-on: blackwell
+    name: Julia ${{ matrix.version }} - ${{ matrix.arch }} - ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       actions: write
@@ -22,116 +22,57 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.10', '1']
+        include:
+          - version: 'min'
+            arch: aarch64
+            runner: gb10
+          - version: '1'
+            arch: aarch64
+            runner: gb10
     steps:
       - uses: actions/checkout@v7
-        with:
-          path: Tylo
-      - name: Check out the pinned PTX reference
-        uses: actions/checkout@v7
-        with:
-          repository: jool-space/PTX.jl
-          ref: 32e36c122bc1c7af5f171cf478324b628b06af3a
-          path: PTX
       - name: Verify GPU is visible
         run: nvidia-smi
       - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
-          arch: aarch64
-      - name: Prepare the test environment
-        # Explicit develop also resolves sibling sources on Julia 1.10.
-        run: |
-          julia --startup-file=no --project=Tylo/test/gpu -e '
-            using Pkg
-            Pkg.develop([PackageSpec(path="Tylo"), PackageSpec(path="PTX")])
-            Pkg.instantiate()'
-      - name: Run host contracts
-        run: julia --startup-file=no --project=Tylo/test/gpu --code-coverage=user Tylo/test/runtests.jl
-      - name: Run tile and attention tests
-        # Bounds and coverage instrumentation change the code being compared.
-        # Collect host coverage above; compile GPU kernels as callers do.
-        run: julia --startup-file=no --project=Tylo/test/gpu --check-bounds=auto --code-coverage=none Tylo/test/gpu/runtests.jl --attention
-        env:
-          # GB10 runs warp/TMA tests; WGMMA and datacenter TMEM execution
-          # remain explicit skips. A missing GPU must fail this job.
-          TYLO_REQUIRE_GPU_RUNTIME: 'true'
-          TYLO_EVIDENCE: ${{ runner.temp }}/tylo-evidence
-      - uses: julia-actions/julia-processcoverage@v1
+          arch: ${{ matrix.arch }}
+      - uses: julia-actions/julia-runtest@v1
         with:
-          directories: Tylo/src,Tylo/ext
+          check_bounds: 'auto'
+      - uses: julia-actions/julia-processcoverage@v1
       - uses: codecov/codecov-action@v7
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: tile-evidence-gpu-${{ matrix.version }}
-          path: ${{ runner.temp }}/tylo-evidence
-  test-host:
-    name: Julia ${{ matrix.version }} - x64 - host
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      actions: write
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        version: ['1.10', '1']
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          path: Tylo
-      - name: Check out the pinned PTX reference
-        uses: actions/checkout@v7
-        with:
-          repository: jool-space/PTX.jl
-          ref: 32e36c122bc1c7af5f171cf478324b628b06af3a
-          path: PTX
-      - uses: julia-actions/setup-julia@v3
-        with:
-          version: ${{ matrix.version }}
-          arch: x64
-      - uses: julia-actions/cache@v3
-      - name: Prepare the test environment
-        # Explicit develop also resolves sibling sources on Julia 1.10.
-        run: |
-          julia --startup-file=no --project=Tylo/test/gpu -e '
-            using Pkg
-            Pkg.develop([PackageSpec(path="Tylo"), PackageSpec(path="PTX")])
-            Pkg.instantiate()'
-      - name: Select compiler artifacts without a GPU
-        # Without a driver or version preference, CUDA_Compiler_jll may have
-        # no selected artifact (and therefore no ptxas binding). Restart
-        # Julia after setting the preference so the JLL loads that toolkit.
-        run: |
-          julia --startup-file=no --project=Tylo/test/gpu -e '
-            using CUDACore
-            CUDACore.set_runtime_version!(v"13.3"; local_toolkit=false)'
-      - name: Run host contracts
-        run: julia --startup-file=no --project=Tylo/test/gpu --code-coverage=user Tylo/test/runtests.jl
-      - name: Run tile and attention tests
-        # Bounds and coverage instrumentation change the code being compared.
-        # Collect host coverage above; compile GPU kernels as callers do.
-        run: julia --startup-file=no --project=Tylo/test/gpu --check-bounds=auto --code-coverage=none Tylo/test/gpu/runtests.jl --attention
-        env:
-          TYLO_EVIDENCE: ${{ runner.temp }}/tylo-evidence
-      - uses: julia-actions/julia-processcoverage@v1
-        with:
-          directories: Tylo/src,Tylo/ext
-      - uses: codecov/codecov-action@v7
-        with:
-          files: lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: tile-evidence-host-${{ matrix.version }}
-          path: ${{ runner.temp }}/tylo-evidence
+    test-host:
+      name: Julia ${{ matrix.version }} - x64 - host
+      runs-on: ubuntu-latest
+      timeout-minutes: 60
+      permissions:
+        actions: write
+        contents: read
+      strategy:
+        fail-fast: false
+        matrix:
+          version: ['1']
+      steps:
+        - uses: actions/checkout@v7
+        - uses: julia-actions/setup-julia@v3
+          with:
+            version: ${{ matrix.version }}
+            arch: x64
+        - uses: julia-actions/cache@v3
+        - uses: julia-actions/julia-runtest@v1
+          with:
+            check_bounds: 'auto'
+        - uses: julia-actions/julia-processcoverage@v1
+        - uses: codecov/codecov-action@v7
+          with:
+            files: lcov.info
+            token: ${{ secrets.CODECOV_TOKEN }}
+            fail_ci_if_error: false
   docs:
     name: Documentation
     runs-on: ubuntu-latest
@@ -151,7 +92,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
       - name: Run doctests
-        shell: julia --startup-file=no --project=docs --color=yes {0}
+        shell: julia --project=docs --color=yes {0}
         run: |
           using Documenter: DocMeta, doctest
           using Tylo

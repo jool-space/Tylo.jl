@@ -9,7 +9,13 @@ function compile_kernel(f, tt; arch=CUDACore.SMVersion(10,0,:arch), threads=128)
     (;image,ptx=String(take!(io)))
 end
 
+include("snapshot.jl")
+
+# Every saved kernel is also compared against the baseline manifest selected
+# by TYLO_SNAPSHOT, so a milestone's "machine code unchanged" promise is
+# checked for all kernels without per-test edits.
 function save_code(name, code)
+    snapshot_check(name,code.image)
     haskey(ENV,"TYLO_EVIDENCE") || return
     dir = ENV["TYLO_EVIDENCE"]
     mkpath(dir)

@@ -55,12 +55,3 @@ end
 end
 # Reconstitute an isbits static plan, including validated constructor semantics.
 Tylo._plan(::Type{Tylo.WGMMA64{T,N,K,P}}) where {T,N,K,P} = Tylo.WGMMA64(T,Val(N),Val(K),Val(P))
-
-@generated function Tylo.store!(dst::GlobalTile,c::Tylo.WGMMAFragment{N},thread::Int32) where N
-    stores = [:(unsafe_store!(pointer(dst,Tylo.Layouts.coordinate(Tylo.Layouts.layout(c),thread,Val($i))),c.data[$(i+1)])) for i in 0:N÷2-1]
-    quote
-        Base.@inline
-        $(stores...)
-        nothing
-    end
-end

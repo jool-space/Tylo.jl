@@ -8,7 +8,7 @@ function gemm_config(::Type{T}=BFloat16; block=(64,64,32),warps=(2,2),swizzled=t
     stages in (1,2) || throw(ArgumentError("one or two copy stages required"))
     bm % (16warps[1]) == bn % (8warps[2]) == 0 || throw(ArgumentError("warp tiles must divide block"))
     bk in (16,32,64) || throw(ArgumentError("supported K tiles: 16,32,64"))
-    plan = TiledMMA(MMA16x8x16(T),Val(warps),Val((bm÷(16warps[1]),bn÷(8warps[2]))),Val(bk))
+    plan = TiledMMA(MMAAtom((16,8,16),T),Val(warps),Val((bm÷(16warps[1]),bn÷(8warps[2]))),Val(bk))
     a = @Layout (bm, bk) (bk, 1)
     b = @Layout (bk, bn) (1, bk)
     bits = trailing_zeros(bk)-3

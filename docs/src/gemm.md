@@ -19,7 +19,7 @@ A `TiledMMA` chooses an instruction atom, a warp arrangement, a grid of atom
 repetitions per warp, and the K extent consumed by one call:
 
 ```jldoctest
-julia> atom = MMA16x8x16(Tylo.BFloat16);
+julia> atom = MMAAtom((16,8,16),Tylo.BFloat16);
 
 julia> plan = TiledMMA(atom, Val((2, 2)), Val((2, 4)), Val(32));
 

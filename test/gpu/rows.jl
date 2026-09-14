@@ -1,19 +1,13 @@
-row_fragment(::Val{:local},data) = RowFragment(data)
-row_fragment(::Val{:warp},data) = WarpRowFragment(data)
-row_fragment(a::MMA16x8x16,data) = Tylo.MMAFragment(Float32,Accumulator(),data)
-@inline function row_fragment(p::TiledMMA{A,W,R},data) where {A,W,R}
-    Tylo.MMAAccumulator(p,ntuple(Val(prod(R))) do i
-        Tylo.MMAFragment(Float32,Accumulator(),ntuple(j -> data[4(i-1)+j],Val(4)))
-    end)
-end
+row_fragment(::Val{:local},data) = local_fragment(data)
+row_fragment(::Val{:warp},data) = striped_fragment(data)
+row_fragment(a::MMAAtom,data) = Fragment(data,operand_layout(a,Accumulator()))
+@inline row_fragment(p::TiledMMA,data) = Fragment(data,operand_layout(p,Accumulator()))
 row_words(f) = f.data
-@inline row_words(f::Tylo.MMAAccumulator{P,N}) where {P,N} =
-    ntuple(i -> f.data[(i-1)÷4+1].data[(i-1)%4+1],Val(4N))
 function row_probe!(sums,maxima,shifted,input,kind,::Val{N}) where N
     t=Int32(threadIdx().x)-Int32(1)
     f=row_fragment(kind,ntuple(i -> @inbounds(input[N*t+i]),Val(N)))
-    s,m=row_sum(f),row_max(f)
-    y=row_words(row_map(-,f,m))
+    s,m=sum(f; dims=2),maximum(f; dims=2)
+    y=row_words(f .- m)
     ntuple(Val(length(s.data))) do i
         @inbounds sums[length(s.data)*t+i]=s.data[i]
         @inbounds maxima[length(s.data)*t+i]=m.data[i]
@@ -28,14 +22,14 @@ end
 function reference_row(kind,n,t,e)
     kind isa Val{:local} && return t
     kind isa Val{:warp} && return t÷32
-    rm = kind isa MMA16x8x16 ? 1 : typeof(kind).parameters[3][1]
+    rm = kind isa MMAAtom ? 1 : typeof(kind).parameters[3][1]
     atom,word=e÷4,e%4
     16rm*(t÷32)+(t%32)÷4+8*(word÷2)+16*(atom%rm)
 end
 
 if !("--runtime-only" in ARGS)
 @testset "Row collective assembly" begin
-    for (kind,n,nshfl) in ((Val(:local),17,0),(Val(:warp),3,10),(MMA16x8x16(BFloat16),4,8)),
+    for (kind,n,nshfl) in ((Val(:local),17,0),(Val(:warp),3,10),(MMAAtom((16,8,16),BFloat16),4,8)),
         arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
         tt=Tuple{CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},typeof(kind),Val{n}}
         code=compile_kernel(row_probe!,tt;arch,threads=32)
@@ -51,9 +45,9 @@ if CUDACore.functional()
 @testset "Row reductions, result replication and broadcasts" begin
     cases=Any[(Val(:local),n,32) for n in (1,3,17)]
     append!(cases,[(Val(:warp),n,64) for n in (1,3,17)])
-    push!(cases,(MMA16x8x16(BFloat16),4,32))
+    push!(cases,(MMAAtom((16,8,16),BFloat16),4,32))
     for wm in (1,2),rm in (1,2),rn in (1,3)
-        push!(cases,(TiledMMA(MMA16x8x16(BFloat16),Val((wm,1)),Val((rm,rn)),Val(16)),4rm*rn,32wm))
+        push!(cases,(TiledMMA(MMAAtom((16,8,16),BFloat16),Val((wm,1)),Val((rm,rn)),Val(16)),4rm*rn,32wm))
     end
     for (kind,n,threads) in cases
         values=randn(MersenneTwister(4n+threads),Float32,n,threads)
@@ -64,7 +58,7 @@ if CUDACore.functional()
             push!(get!(byrow,reference_row(kind,n,t,e),Float32[]),values[e+1,t+1])
         end
         f=row_fragment(kind,ntuple(_ -> 0f0,Val(n)))
-        nr=Tylo._row_count(row_ownership(f))
+        nr=Tylo._register_count(Tylo._reduced_ownership(Tylo.Layouts.layout(f),Val(2)))
         input=CuArray(vec(values)); sums=CuArray{Float32}(undef,nr*threads)
         maxima=similar(sums); shifted=similar(input)
         @cuda threads=threads row_probe!(sums,maxima,shifted,input,kind,Val(n))

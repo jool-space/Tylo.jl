@@ -13,30 +13,43 @@ include("transforms.jl")
 function layout end
 
 """
-    LaneRows{N}()
+    LocalOwnership{N,Axis}()
+    StripedOwnership{N,Axis}()
 
-Ownership of a 32×N tile: lane t owns row t, with N consecutive values.
-This is a row distribution, independent of the load/store instruction.
+Two explicit warp ownership patterns. Each lane holds `N` local values along
+logical `Axis` (1 or 2). `LocalOwnership` assigns one independent sequence to
+each lane; `StripedOwnership` interleaves the 32 lanes within one sequence.
+Neither describes memory strides. Coordinates take a zero-based lane (0:31),
+local to this warp, and a zero-based value slot. Use `Ownership` for an explicit mapping.
 """
-struct LaneRows{N}
-    function LaneRows{N}() where N
-        N isa Int && N > 0 || throw(ArgumentError("positive static row width required"))
-        new{N}()
+struct LocalOwnership{N,Axis}
+    function LocalOwnership{N,Axis}() where {N,Axis}
+        _check_ownership(N,Axis)
+        new{N,Axis}()
     end
 end
-Base.size(::LaneRows{N}) where N = (32, N)
-
-@inline function coordinate(::LaneRows{N}, lane::Integer, ::Val{E}) where {N,E}
+struct StripedOwnership{N,Axis}
+    function StripedOwnership{N,Axis}() where {N,Axis}
+        _check_ownership(N,Axis)
+        new{N,Axis}()
+    end
+end
+function _check_ownership(n,axis)
+    n isa Int && n > 0 && axis isa Int && axis in (1,2) ||
+        throw(ArgumentError("ownership requires a positive value count and axis 1 or 2"))
+end
+Base.size(::LocalOwnership{N,A}) where {N,A} = A == 2 ? (32,N) : (N,32)
+Base.size(::StripedOwnership{N,A}) where {N,A} = A == 2 ? (1,32N) : (32N,1)
+@inline function coordinate(::LocalOwnership{N,A},t::Integer,::Val{E}) where {N,A,E}
     E isa Int && 0 <= E < N || throw(BoundsError())
-    (lane, oftype(lane, E))
+    A == 2 ? (t,oftype(t,E)) : (oftype(t,E),t)
 end
-
-# Compatibility slicing for the original lane-local register fragments.
-# Static indexing keeps tuples in registers.
-function check_columns(n, first, width)
-    first isa Int && width isa Int && 0 <= first && 0 < width &&
-        first <= n - width || throw(ArgumentError("column interval is outside the tile"))
-    nothing
+@inline function coordinate(::StripedOwnership{N,A},t::Integer,::Val{E}) where {N,A,E}
+    E isa Int && 0 <= E < N || throw(BoundsError())
+    value = t+oftype(t,32E)
+    A == 2 ? (zero(t),value) : (value,zero(t))
 end
+Base.permutedims(::LocalOwnership{N,A}) where {N,A} = LocalOwnership{N,3-A}()
+Base.permutedims(::StripedOwnership{N,A}) where {N,A} = StripedOwnership{N,3-A}()
 
 end

@@ -8,7 +8,7 @@ The shared allocation must be 1024-byte aligned; `transfer_bytes` includes
 all zero-filled out-of-bounds elements. This plan owns no memory or barriers.
 """
 struct TMALoad{T,S,A}
-    function TMALoad(::Type{T},::Val{S},::Val{A}) where {T,S,A}
+    @inline function TMALoad(::Type{T},::Val{S},::Val{A}) where {T,S,A}
         T === BFloat16 || T === Float16 || throw(ArgumentError("BF16 or FP16 required"))
         S isa Tuple && length(S) == 2 && all(x -> x isa Int && x > 0,S) &&
             A isa Int && A in (1,2) && S[A] == 64 && S[3-A] % 8 == 0 && S[3-A] <= 256 ||

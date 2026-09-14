@@ -4,12 +4,12 @@ function streaming_softmax_kernel!(output,input,mask,::Val{N}) where N
     tid=Int32(threadIdx().x)-Int32(1); lane=tid%Int32(32)
     row=(Int32(blockIdx().x)-Int32(1))*Int32(4)+tid÷Int32(32)+Int32(1)
     width,rows=size(input,1)%Int32,size(input,2)%Int32
-    state=SoftmaxState(WarpRowFragment(ntuple(_ -> 0f0,Val(N))))
+    state=SoftmaxState(Fragment(ntuple(_ -> 0f0,Val(N)), Tylo.Layouts.StripedOwnership{N,2}()))
     for start in Int32(0):Int32(32N):width-Int32(1)
-        f=WarpRowFragment(ntuple(Val(N)) do e
+        f=Fragment(ntuple(Val(N)) do e
             j=start+lane+Int32(32(e-1)+1)
             row<=rows && j<=width && (@inbounds mask[j,row]) ? Float32(@inbounds input[j,row]) : -Inf32
-        end)
+        end, Tylo.Layouts.StripedOwnership{N,2}())
         state=softmax_update(state,f).state
     end
     final_max,final_sum=only(state.maximum),only(state.sum)

@@ -173,7 +173,8 @@ injectivity. The caller must also provide aligned pointers and keep the
 allocations alive. Copy groups are per thread; `wait_copies` is not a CTA
 barrier and is not a readiness proof for an independently owned object.
 
-`MMA16x8x16` loads instruction-compatible shared tiles into typed fragments.
+`MMAAtom` describes an instruction by its operand ownerships; `load_a` and
+`load_b` load instruction-compatible shared tiles into typed fragments.
 `TiledMMA` repeats this atom over a warp arrangement and a per-warp grid.
 It reuses A/B operands across those repetitions. All participating lanes
 must execute collectively with compatible views; types do not prove that

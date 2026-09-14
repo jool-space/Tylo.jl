@@ -101,12 +101,13 @@ compiler cannot move arithmetic on the results above the wait. Pending
 accumulators have no arithmetic or store methods. Julia types do not enforce
 linear ownership, thread convergence, storage lifetime, or barrier correctness.
 
-`finish_mma` returns an immutable distributed fragment. Its ownership map is
-an ISA property, independent of storage. FP32 `map`, `scale`, and `store!` compose
-an epilogue without a separate kernel. `WGMMAFragment` currently remains separate
-from the generic `Fragment` broadcast/reduction API: `finish_mma` does not make
-`exp.(result)` or `sum(result; dims=2)` supported automatically. There is no automatic cross-warp
-redistribution or hidden scratch allocation.
+`finish_mma` returns an ordinary `Fragment` with WGMMA ownership. Its ownership
+map is an ISA property, independent of storage.
+It supports fused broadcast, type conversion, and `sum`/`maximum`/`minimum`
+along axis 2 (axis 1 after permutation). Reduction results are replicated
+within four-lane groups and broadcast back without another shuffle. Pending
+and partial accumulator states remain separate until their explicit wait
+and `finish_mma` steps.
 
 ## Worked consumers and current validation
 

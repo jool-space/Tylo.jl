@@ -23,13 +23,13 @@ function tmem_roundtrip_kernel!(out,input,::Val{P}) where P
     wait_stores()
     PTX.Utils.@unroll for half in 0:1
         values = @inbounds wait_load(load_async(partition(plan,window(band,P ? (64half,0) : (0,64half),Val(shape)))))
-        packed = pack_bf16(values .* 0.25f0)
+        packed = pack(BFloat16,values .* 0.25f0)
         bf = @inbounds partition(plan,window(reinterpret_tile(BFloat16,band;dims=axis),P ? (64half,0) : (0,64half),Val(shape)))
         store_async!(bf,packed)
         wait_stores()
         words = ptx"tcgen05.ld.sync.aligned.32x32b.x32.b32"(bf.address)
         ptx"tcgen05.wait::ld.sync.aligned"()
-        store!(pointer(out)+Int(tid)*256+128half,PackedBF16(words))
+        store!(pointer(out)+Int(tid)*256+128half,PackedFragment(BFloat16,words,Tylo.Layouts.LocalOwnership{2length(words),2}()))
     end
     sync_threads()
     if warp == UInt32(0)

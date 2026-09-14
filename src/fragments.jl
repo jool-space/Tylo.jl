@@ -16,70 +16,64 @@ struct Fragment{T,N,L}
         new{T,N,L}(data,ownership)
     end
 end
-_register_count(::Layouts.LaneRows{N}) where N = N
+_register_count(::Union{Layouts.LocalOwnership{N},Layouts.StripedOwnership{N}}) where N = N
 _register_count(l::Layouts.Ownership) = Int(size(l.mapping)[2])
 Layouts.layout(f::Fragment) = f.ownership
 
 """
-    RowFragment(values::NTuple{N,T})
+    PackedFragment(T, words::NTuple{W,UInt32}, ownership)
 
-Convenience constructor for `Fragment(values, Layouts.LaneRows{N}())`:
-each lane owns a complete logical row. This is one ownership arrangement,
-not the general fragment abstraction or a memory contiguity guarantee.
+Register representation of logical elements of type `T`, currently `BFloat16`
+or `Float16`. Each word holds two elements, low element first. Ownership counts
+logical elements, not words. This constructor interprets bits; `pack(T, f)`
+numerically converts values and `unpack(p)` exposes ordinary typed values.
 """
-const RowFragment{T,N} = Fragment{T,N,Layouts.LaneRows{N}}
-RowFragment(data::NTuple{N,T}) where {N,T} = Fragment(data,Layouts.LaneRows{N}())
-
-"""
-    PackedBF16(words::NTuple{W,UInt32})
-
-A packed fragment of 2W BF16 elements, two per word, low element first.
-The two-argument constructor accepts explicit ownership; the one-argument
-convenience constructor uses `Layouts.LaneRows`. Packing preserves logical
-coordinates and local slot order.
-"""
-struct PackedBF16{W,L}
+struct PackedFragment{T,W,L}
     data::NTuple{W,UInt32}
     ownership::L
-    function PackedBF16(data::NTuple{W,UInt32},ownership::L) where {W,L}
+    function PackedFragment(::Type{T}, data::NTuple{W,UInt32}, ownership::L) where {T,W,L}
+        (T === BFloat16 || T === Float16) || throw(ArgumentError("packing supports BFloat16 and Float16"))
         W > 0 || throw(ArgumentError("a packed fragment must contain values"))
         isbitstype(L) && _register_count(ownership) == 2W ||
             throw(DimensionMismatch("packed payload differs from ownership"))
-        new{W,L}(data,ownership)
+        new{T,W,L}(data, ownership)
     end
 end
-PackedBF16(data::NTuple{W,UInt32}) where W = PackedBF16(data,Layouts.LaneRows{2W}())
-Layouts.layout(f::PackedBF16) = f.ownership
+Layouts.layout(f::PackedFragment) = f.ownership
+Base.eltype(::Type{<:PackedFragment{T}}) where T = T
+Base.eltype(f::PackedFragment) = eltype(typeof(f))
 
 """
-    columns(fragment, Val(first), Val(width))
+    pack(T, fragment)
+    pack(fragment)
 
-Select consecutive logical columns at a zero-based, compile-time offset.
-Use `window` for axis-explicit register or memory partitions.
-Packed representations require boundaries between complete packed words.
+Convert logical values to `T` and pack adjacent local slots into register words.
+The one-argument form preserves the element type and all bits. Neither form
+moves data between threads or changes logical ownership. Supported types are
+`BFloat16` and `Float16`. A fragment must hold complete pairs.
 """
-@generated function columns(f::RowFragment{T,N}, ::Val{F}, ::Val{W}) where {T,N,F,W}
-    Layouts.check_columns(N,F,W)
-    values = [:(f.data[$i]) for i in F+1:F+W]
-    quote
-        Base.@inline
-        RowFragment(($(values...),))
-    end
+@inline function pack(::Type{T}, f::Fragment) where T
+    pack(map(T, f))
 end
-@inline function columns(f::PackedBF16{N},::Val{F},::Val{W}) where {N,F,W}
-    _register_window_axis(typeof(Layouts.layout(f))) == 2 ||
-        throw(ArgumentError("use window with explicit logical axes"))
-    iseven(F) && iseven(W) || error("packed BF16 slices require even boundaries")
-    window(f,Val((0,F)),Val((32,W)))
+@inline function pack(f::Fragment{T,N}) where {T,N}
+    (T === BFloat16 || T === Float16) || throw(ArgumentError("packing supports BFloat16 and Float16"))
+    iseven(N) || throw(ArgumentError("packing requires complete pairs"))
+    words = @rtuple(1:N÷2) do i
+        UInt32(reinterpret(UInt16, f.data[2i-1])) | (UInt32(reinterpret(UInt16, f.data[2i])) << 16)
+    end
+    PackedFragment(T, words, Layouts.layout(f))
 end
 
-# Explicit scalar calls make the indexing independent of LLVM loop unrolling.
-@generated function Base.map(op::F, f::Fragment{T,N}) where {F,T,N}
-    values = [:(op(f.data[$i])) for i in 1:N]
-    quote
-        Base.@inline
-        Fragment(($(values...),),Layouts.layout(f))
+"Expose the logical typed values of a packed fragment without numerical conversion."
+@inline function unpack(f::PackedFragment{T,W}) where {T,W}
+    values = @rtuple(0:2W-1) do i
+        reinterpret(T, (f.data[i÷2+1] >> (16*(i%2))) % UInt16)
     end
+    Fragment(values, Layouts.layout(f))
+end
+
+@inline function Base.map(op::F, f::Fragment{T,N}) where {F,T,N}
+    Fragment(@rtuple(i -> op(f.data[i]), 1:N), Layouts.layout(f))
 end
 
 "Multiply every register value by a scalar, preserving ownership."

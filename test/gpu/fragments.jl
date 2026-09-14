@@ -3,11 +3,11 @@ using Tylo.Layouts: @Layout
 # scale/slice/BF16/vector-store implementation used by the attention epilogue.
 function fragment_kernel!(out, input, alpha)
     tid = Int32(threadIdx().x)-Int32(1)
-    values = RowFragment(ntuple(i -> @inbounds(input[64tid+i]),Val(64)))
+    values = local_fragment(ntuple(i -> @inbounds(input[64tid+i]),Val(64)))
     for_half = window(values,Val((0,0)),Val((32,32)))
     for_tail = window(values,Val((0,32)),Val((32,32)))
-    store!(pointer(out)+128tid,pack_bf16(for_half .* alpha))
-    store!(pointer(out)+128tid+64,pack_bf16(for_tail .* alpha))
+    store!(pointer(out)+128tid,pack(BFloat16,for_half .* alpha))
+    store!(pointer(out)+128tid+64,pack(BFloat16,for_tail .* alpha))
     nothing
 end
 
@@ -31,7 +31,7 @@ function tmem_epilogue_kernel!(out, base::UInt32, alpha::Float32)
     values = @inbounds wait_load(load_async(partition(TmemTransfer{(32,64),2}(),output)))
     PTX.Utils.@unroll for half in 0:1
         part = window(values,Val((0,32half)),Val((32,32)))
-        store!(pointer(out)+Int(tid)*128+64half,pack_bf16(part .* alpha))
+        store!(pointer(out)+Int(tid)*128+64half,pack(BFloat16,part .* alpha))
     end
     nothing
 end
