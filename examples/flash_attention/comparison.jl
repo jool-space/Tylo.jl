@@ -1,5 +1,6 @@
 # Run via test/gpu/flash_attention.jl. Load the reference kernel into two
-# isolated modules; replace ONLY correction and epilogue in the second.
+# isolated modules; replace ONLY the TMA stripe loads, correction and
+# epilogue in the second.
 const FA_REFERENCE_PATH = joinpath(@__DIR__,"reference.jl")
 
 function attention_module(name; tiled=false)
@@ -7,7 +8,7 @@ function attention_module(name; tiled=false)
     mod = Module(name)
     Core.eval(mod,:(using PTX, CUDACore, Random, Tylo))
     if tiled
-        for helper in ("fab_corr_tile","fab_epi_stage")
+        for helper in ("fab_load_tile","fab_corr_tile","fab_epi_stage")
             source = replace(source,"function "*helper*"(" => "function unused_"*helper*"(")
         end
     end
