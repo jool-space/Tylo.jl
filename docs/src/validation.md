@@ -150,10 +150,11 @@ bounds semantics and disable GPU coverage instrumentation for the exact code
 comparison; host contracts supply coverage separately.
 
 The datacenter attention comparison compiles the reference kernel in
-`examples/flash_attention/reference.jl` and its Tylo variant:
+`examples/flash_attention/reference.jl` and its Tylo variant; the example's
+README has the rental checklist:
 
 ```sh
-TYLO_EVIDENCE=/tmp/tylo-evidence julia --project=test test/runtests.jl gpu/flash_attention
+TYLO_EVIDENCE=/tmp/tylo-evidence julia --project=test examples/flash_attention/run.jl
 julia --project=test test/tools/resources.jl /tmp/tylo-evidence
 ```
 

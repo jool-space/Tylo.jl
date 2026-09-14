@@ -33,23 +33,60 @@ saturated throughput benchmark.
 
 ## Run
 
-From the Tylo checkout, after instantiating the workspace:
+`run.jl` runs the comparison in one process; `--bench` adds the paired
+timings. The test runner (`test/runtests.jl gpu/flash_attention`) runs the
+same code-generation checks and execution cases but cannot pass `--bench`.
 
 ```sh
-TYLO_EVIDENCE=/tmp/tylo-evidence julia --project=test test/runtests.jl gpu/flash_attention
+TYLO_EVIDENCE=/tmp/tylo-evidence julia --project=test examples/flash_attention/run.jl
 
 # B200/B300 only:
-TYLO_EVIDENCE=/tmp/tylo-blackwell julia --project=test test/runtests.jl gpu/flash_attention --bench
+julia --project=test examples/flash_attention/run.jl --bench
 ```
 
 Evidence output contains PTX and cubins for inspection. The resource script
-below also assembles the PTX verbosely and records machine-code statistics:
+below assembles the PTX verbosely and records machine-code statistics; it
+needs only `ptxas`, so run it at home rather than on rented time:
 
 ```sh
 julia --project=test test/tools/resources.jl /tmp/tylo-evidence
 ```
 
-For cloud testing, wrap each invocation with a process timeout; a broken
-asynchronous kernel can otherwise wait indefinitely. A matching Compute
-Sanitizer can run `test/runtests.jl gpu/flash_attention` on B200/B300; the local
-GB10 sanitizer run covers register arithmetic and global stores only.
+## On a rented B200/B300
+
+Requirements: Linux, NVIDIA driver 580 or newer (CUDA 13), one visible GPU,
+network access, git, and about 10 GB of disk for the Julia depot. Copy this
+checkout's `Manifest.toml` next to the clone so the rental resolves the same
+package versions. Every command below is wrapped in a process timeout; a
+broken asynchronous kernel can otherwise wait indefinitely.
+
+```sh
+# 1. Julia 1.13 (about 1 minute)
+curl -fsSL https://install.julialang.org | sh -s -- --yes --default-channel 1.13
+export PATH="$HOME/.juliaup/bin:$PATH"
+
+# 2. Sources and packages (5-10 minutes: CUDA artifacts download, CUDACore precompiles)
+git clone https://github.com/jool-space/Tylo.jl Tylo && cd Tylo
+git checkout <commit validated on GB10>
+# scp the GB10 checkout's Manifest.toml into this directory first, if available
+julia --project=. -e 'using Pkg; Pkg.instantiate(; workspace=true)'
+julia --project=test -e 'using CUDACore; CUDACore.versioninfo()' 2>&1 | tee versioninfo.log
+# Expect: CUDA runtime 13.x, the B200/B300 device, capability 10.0 or 10.3.
+
+# 3. Gate: real TMEM allocation and round trips (about 3 minutes). Stop if red.
+timeout 900 julia --project=test test/runtests.jl --jobs=1 gpu/tmem gpu/packing 2>&1 | tee gate.log
+
+# 4. Attention: code generation, paired execution, CPU reference (about 5 minutes)
+TYLO_EVIDENCE=$PWD/evidence timeout 1500 julia --project=test examples/flash_attention/run.jl 2>&1 | tee attention.log
+
+# 5. Timings (about 5 minutes). Prints reference_us, tylo_us and ratio per case.
+timeout 1500 julia --project=test examples/flash_attention/run.jl --bench 2>&1 | tee bench.log
+
+# 6. Optional, if time remains: the whole GPU suite on real Blackwell (10-20 minutes)
+timeout 2400 julia --project=test test/runtests.jl --jobs=4 2>&1 | tee suite.log
+```
+
+Bring home `versioninfo.log`, `gate.log`, `attention.log`, `bench.log`, the
+`evidence/` directory and `nvidia-smi` output. A matching Compute Sanitizer
+run of `run.jl` is optional and slow; the local GB10 sanitizer run covers
+register arithmetic and global stores only.
