@@ -208,3 +208,34 @@ CUDA compiler 13.4.59 and PTX `ae2362f`.
 The derivation admits reductions that had no hand-written recipe before:
 lane-axis reductions of lane-local rows, the 2×2-patch ownership and either
 axis of a permuted accumulator. No sanitizer run is claimed for this batch.
+
+### Warp MMA atoms as data (2026-09-14)
+
+`MMAAtom{(m,n,k),TA,TB,TC}` describes a warp `mma.sync` instruction by its
+shape and element types; its A, B and accumulator ownerships come from one
+formula per element width, evaluated while generating. `MMAFragment` and
+`MMAAccumulator` are gone: operands are `PackedFragment`s and accumulators are
+flat `Fragment`s in the atom's or tiling's ownership. `load_fragment` and the
+two-argument `store!` move any static ownership through scalar accesses at its
+coordinates, and `test/gpu/atoms.jl` uses them as the oracle: generic loads,
+the instruction, and generic stores must reproduce a host matmul, and the
+`ldmatrix` loads must agree word for word with the generic loads.
+
+Gate results, same toolchain as the previous checkpoint:
+
+- Tylo: 3,583 GPU/assembly checks pass. Of 185 baseline kernels, 100 are
+  byte-identical, the two streaming attention kernels are identical up to the
+  renamed entry symbol, and 83 changed deliberately: the accumulator store is
+  now the generic aligned store, replacing inline `st.global.f32` in the warp
+  path and an unaligned `unsafe_store!` in the WGMMA path. Every one of the 83
+  is the same size or smaller; the only added opcodes are whole-word `STG.E`
+  with immediate offsets and address arithmetic, and 64 of them lost the
+  byte-wise `STG.E.U8` sequences the unaligned store had produced. Examples:
+  the 64×64×32 GEMM drops from 552 to 432 SASS instructions and the n64
+  two-stage Hopper pipeline from 480 to 288.
+- Megakernels: 238,340 checks pass; the eight projection kernels keep their
+  instruction multiset and bitwise outputs against `7770d93`; the Hopper
+  kernels are identical and multiset-equal.
+
+The snapshot normalizer now ignores symbol names, so type renames do not
+register as changes. No sanitizer run is claimed for this batch.

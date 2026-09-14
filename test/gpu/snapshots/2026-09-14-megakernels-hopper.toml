@@ -1,0 +1,18 @@
+[toolchain]
+julia = "1.13.0"
+cudacore = "6.4.0"
+cuda_compiler = "13.4.59"
+ptx_commit = "804a1a848a8a3e4154d2c9b624a5e1cadf07c054"
+kernel_count = 2
+tylo_commit = "7b2a898c1fddfbf58be1203b1a6147f6033a29d7"
+tylo_diff_sha256 = "70d9f0ed67d369d6233d8157e2c9276fa45203ea1289b44991c3adf43a6c1705"
+
+[kernels.hopper-stages2]
+normalized = "74c99f64d369d2ba6bfded1c5839e219568b3c639e9ee4f0de940f2e02527dea"
+multiset = "a0792447c3cb3118886ac89a4b7e36c7e06a7585b736f5944d7f31e170d5ca03"
+text = "a4cd181afeda2efb6b0f159622cf339687c7d187b2a71c94c161a9e3b06cd2c5"
+
+[kernels.hopper-stages1]
+normalized = "c0ab46bf64e7c9d3e040797998ab5989082e7aa3198bfdc7458f622d5894e00e"
+multiset = "5ee18bc209b360b0e970fb6ab803b4b7415add5b3fd91972fe2ef12fbbe69173"
+text = "d3c6ce0301bdd51bbef703a82d1bdcb75b6a2da61252964740d7a8c4ace59190"
