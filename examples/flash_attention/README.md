@@ -2,24 +2,13 @@
 
 `tiles.jl` replaces the existing kernel's correction and epilogue. Everything
 else—the softmax, QK/PV issue order, register budgets, barrier plan, and
-persistent work loop—comes from a fixed reference.
+persistent work loop—comes from `reference.jl`, a raw PTX.jl kernel ported
+from pyptx (Apache 2.0; see the file header and `LICENSE`).
 
-The comparison loads two isolated modules from
-`PTX/test/gpu/blackwell/flash_attention_defs.jl`. Only the two helper
-definitions are replaced in the Tylo module. Neither source checkout is
-rewritten and PTX does not acquire a dependency on Tylo.
-
-Reference:
-- PTX commit: `32e36c122bc1c7af5f171cf478324b628b06af3a`
-- File SHA256: `d4bcc34234bf2a9d85d9fed136f15e035d28dc84123f46d0651958745f132cdc`
-
-The reference update adopts upstream register-dependent TMEM waits in the
-softmax, correction and epilogue; the six paired machine-code comparisons
-remain required.
-
-The digest is checked before compilation. A mismatch requires reviewing the
-reference update. `TYLO_PTX_ROOT` can point to another checkout containing
-that exact file; the default is the loaded PTX package's source directory.
+`comparison.jl` loads `reference.jl` into two isolated modules. Only the two
+helper definitions are replaced in the Tylo module. `runtime.jl` prepares the
+TMA descriptors through Tylo's `prepare_tma` and runs both kernels on the same
+inputs.
 
 ## What the comparison checks
 
@@ -44,15 +33,13 @@ saturated throughput benchmark.
 
 ## Run
 
-From the Tylo checkout, after instantiating `test/gpu`:
+From the Tylo checkout, after instantiating the workspace:
 
 ```sh
-TYLO_EVIDENCE=/tmp/tylo-evidence \
-  TYLO_PTX_ROOT=/path/to/pinned-PTX julia --project=test test/runtests.jl gpu/flash_attention
+TYLO_EVIDENCE=/tmp/tylo-evidence julia --project=test test/runtests.jl gpu/flash_attention
 
 # B200/B300 only:
-TYLO_EVIDENCE=/tmp/tylo-blackwell \
-  TYLO_PTX_ROOT=/path/to/pinned-PTX julia --project=test test/runtests.jl gpu/flash_attention --bench
+TYLO_EVIDENCE=/tmp/tylo-blackwell julia --project=test test/runtests.jl gpu/flash_attention --bench
 ```
 
 Evidence output contains PTX and cubins for inspection. The resource script

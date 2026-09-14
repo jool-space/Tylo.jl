@@ -92,6 +92,6 @@ julia --project=test examples/gemm/run.jl 65 97 73
 ```
 
 Current local checks use Julia 1.13. Host compatibility is declared from Julia
-1.10; recent local host checks used 1.11 and 1.13. For the pinned datacenter
+1.10; recent local host checks used 1.11 and 1.13. For the datacenter
 attention comparison, assembly artifacts, and documentation build instructions,
 see [Current status and validation](validation.md).

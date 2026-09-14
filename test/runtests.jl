@@ -52,7 +52,7 @@ end
 # Each test file runs in its own module; names every file may use are
 # imported here rather than in each file.
 init_code = quote
-    using Tylo, PTX, CUDACore, BFloat16s, Random, Test, SHA, TOML
+    using Tylo, PTX, CUDACore, BFloat16s, Random, Test, TOML
     using Tylo.Layouts: @Layout, Layout, Swizzle, compose, coordinate, cosize, shape, static
     include($(joinpath(@__DIR__, "setup.jl")))
 end

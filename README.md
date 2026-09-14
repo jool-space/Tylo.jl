@@ -61,7 +61,7 @@ broadcast. See [the fragment support table](docs/src/rows.md).
 - [TMA/WGMMA GEMM](examples/hopper/README.md): producer/consumer pipeline and
   the primitives also used by Megakernels' `HopperProjection`.
 - [Datacenter FlashAttention experiment](examples/flash_attention/README.md):
-  TMEM correction and epilogue replacements in a pinned raw PTX kernel.
+  TMEM correction and epilogue replacements in a raw PTX kernel.
 
 Warp GEMM, TMA and register operations have GB10 runtime coverage. WGMMA and
 actual TMEM transfers have assembly coverage and prepared hardware tests;
@@ -93,9 +93,7 @@ Tests run in parallel with `ParallelTestRunner`. `host/` needs no GPU.
 their runtime sections run when the device satisfies the file's
 `# TEST_TARGET: cc>=8.0`-style banner (`test/targets.jl`). Set
 `TYLO_REQUIRE_GPU_RUNTIME=true` to fail instead of skipping without a GPU
-and `TYLO_EVIDENCE=<dir>` to save PTX and cubins. The datacenter attention comparison
-(`gpu/flash_attention`) needs the pinned PTX reference file; see
-[validation and reproduction](docs/src/validation.md).
+and `TYLO_EVIDENCE=<dir>` to save PTX and cubins.
 
 Build the manual locally, including its host doctests:
 

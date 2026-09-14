@@ -1,25 +1,14 @@
-# Run via test/gpu/flash_attention.jl. Read the existing PTX kernel into
-# two isolated modules; replace ONLY correction and epilogue in the second.
-# The digest makes a reference update an explicit review, never a silent change.
-using SHA
-
-const FA_REFERENCE_SHA256 = "d4bcc34234bf2a9d85d9fed136f15e035d28dc84123f46d0651958745f132cdc"
-const FA_REFERENCE_PATH = joinpath(get(ENV,"TYLO_PTX_ROOT",
-    dirname(dirname(pathof(PTX)))),"test","gpu","blackwell","flash_attention_defs.jl")
+# Run via test/gpu/flash_attention.jl. Load the reference kernel into two
+# isolated modules; replace ONLY correction and epilogue in the second.
+const FA_REFERENCE_PATH = joinpath(@__DIR__,"reference.jl")
 
 function attention_module(name; tiled=false)
     source = read(FA_REFERENCE_PATH,String)
-    bytes2hex(sha256(source)) == FA_REFERENCE_SHA256 ||
-        error("FlashAttention reference changed: review and update FA_REFERENCE_SHA256")
     mod = Module(name)
     Core.eval(mod,:(using PTX, CUDACore, Random, Tylo))
-    # Preserve the reference's host quantization exactly.
-    Core.eval(mod,:(bf16_bits(x::Float32) =
-        UInt16((reinterpret(UInt32,x)+UInt32(0x8000)) >> 16)))
-    Core.eval(mod,:(bf16_to_f32(x::UInt16) = reinterpret(Float32,UInt32(x)<<16)))
     if tiled
-        for name in ("fab_corr_tile","fab_epi_stage")
-            source = replace(source,"function "*name*"(" => "function unused_"*name*"(")
+        for helper in ("fab_corr_tile","fab_epi_stage")
+            source = replace(source,"function "*helper*"(" => "function unused_"*helper*"(")
         end
     end
     Base.include_string(mod,source,FA_REFERENCE_PATH)
@@ -32,7 +21,7 @@ const TiledAttention = attention_module(:TiledAttention;tiled=true)
 include("runtime.jl")
 
 function attention_types(cfg)
-    Tuple{CuDeviceVector{UInt16,1},
+    Tuple{CuDeviceVector{ReferenceAttention.BFloat16,1},
           PTX.TMADescriptorPtr,PTX.TMADescriptorPtr,PTX.TMADescriptorPtr,
           UInt32,UInt32,UInt32,UInt32,UInt32,Float32,
           CuDeviceVector{UInt32,1},typeof(Val(cfg))}
@@ -71,7 +60,6 @@ end
     end
 end
 
-println("FlashAttention reference SHA256: ",FA_REFERENCE_SHA256)
 if capability_major(10)
     run_attention_cases()
 else

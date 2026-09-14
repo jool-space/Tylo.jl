@@ -17,7 +17,7 @@ results do not automatically validate later changes.
 | Hopper WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, selected partial accumulators | SM90a assembly; H100/H200 tests prepared | Runtime and performance on Hopper remain unvalidated |
 | TMEM | FP32 and packed BF16/FP16 `.32x32b` loads/stores, x1–x128, logical windows and transfer partitions | SM100a assembly; address/register work runs on GB10 | Actual transfers need B200/B300; no tcgen05 MMA in Tylo |
 | Streaming attention | Complete single-head BF16 forward kernel, D=64, online statistics, masks and causal tails | GB10 correctness and dated paired measurements | Fixed schedule/geometry; small cases can be slower than the baseline |
-| Datacenter attention experiment | Correction and epilogue replacements in a pinned raw PTX kernel | Six complete kernel-code comparisons | Remaining kernel is the reference; B200/B300 runtime pending |
+| Datacenter attention experiment | Correction and epilogue replacements in a raw PTX kernel | Six complete kernel-code comparisons | Remaining kernel is the reference; B200/B300 runtime pending |
 
 For precise fragment-method coverage, see [Register fragments](rows.md). The
 online `SoftmaxState(f; dims)` uses reduced fragments on either implemented
@@ -149,16 +149,11 @@ fresh Julia process, which loads the selected toolkit. Both CI jobs use normal
 bounds semantics and disable GPU coverage instrumentation for the exact code
 comparison; host contracts supply coverage separately.
 
-The optional datacenter attention comparison requires the exact reference file
-whose SHA256 is recorded in `examples/flash_attention/README.md`. Set
-`TYLO_PTX_ROOT` to a checkout containing that file if the active PTX package has
-moved on; there is no need to reset a working PTX checkout.
+The datacenter attention comparison compiles the reference kernel in
+`examples/flash_attention/reference.jl` and its Tylo variant:
 
 ```sh
-# Optional: set this when the active PTX checkout lacks the pinned reference.
-export TYLO_PTX_ROOT=/path/to/pinned-PTX
-TYLO_EVIDENCE=/tmp/tylo-evidence \
-  TYLO_PTX_ROOT=/path/to/pinned-PTX julia --project=test test/runtests.jl gpu/flash_attention
+TYLO_EVIDENCE=/tmp/tylo-evidence julia --project=test test/runtests.jl gpu/flash_attention
 julia --project=test test/tools/resources.jl /tmp/tylo-evidence
 ```
 

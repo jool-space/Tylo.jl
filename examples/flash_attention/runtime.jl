@@ -6,15 +6,14 @@ function attention_case(B,H,S; input_scale=0.5f0, blocks=nothing, splitp=true)
     Q,K = (randn(rng,Float32,rows,128).*input_scale for _ in 1:2)
     V = randn(rng,Float32,rows,128)
     device_inputs = map(x -> CuArray(mod.fab_pack(x)),(Q,K,V))
-    maps = map(device_inputs) do x
-        desc = PTX.tensor_map_tile_2d(:bf16,pointer(x),rows,128,128,64;swizzle=:B128)
-        CuArray(collect(desc.data))
-    end
-    # Descriptor address conversion happens on the host; retain maps while
-    # either compiled kernel or a benchmark execution can still use them.
-    GC.@preserve maps device_inputs begin
-        descriptors = map(x -> reinterpret(PTX.TMADescriptorPtr,UInt(pointer(x))),maps)
-        output = CuArray{UInt16}(undef,rows*128)
+    # Each input is a row-major (rows, 128) tensor loaded as 128-row by
+    # 64-column B128-swizzled stripes. Retain the bindings while either
+    # compiled kernel or a benchmark execution can still use them.
+    plan = Tylo.TMALoad(mod.BFloat16,Val((128,64)),Val(2))
+    bindings = map(x -> Tylo.prepare_tma(plan,x),device_inputs)
+    GC.@preserve bindings device_inputs begin
+        descriptors = map(b -> b.descriptor,bindings)
+        output = CuArray{mod.BFloat16}(undef,rows*128)
         debug = CUDACore.zeros(UInt32,512)
         mblocks = S÷256
         total_work = mblocks*B*H
@@ -33,18 +32,18 @@ function attention_case(B,H,S; input_scale=0.5f0, blocks=nothing, splitp=true)
         end
         launch = k -> k(args...;blocks=grid,threads=512,shmem=mod.FAB_SMEM_BYTES)
         results = map(kernels) do k
-            fill!(output,UInt16(0x7fc0)) # NaN sentinel exposes missing output writes
+            fill!(output,reinterpret(mod.BFloat16,0x7fc0)) # NaN sentinel exposes missing output writes
             launch(k)
             CUDACore.synchronize()
             copy(Array(output))
         end
-        @test results[1] == results[2]
+        @test reinterpret(UInt16,results[1]) == reinterpret(UInt16,results[2])
         @test all(iszero,Array(debug))
         actual = reshape(results[2],128,rows)
         for head in 1:B*H
             r = (head-1)*S+1:head*S
             reference = mod.fab_cpu_ref(Q[r,:],K[r,:],V[r,:],inv(sqrt(128f0)))
-            decoded = permutedims(mod.bf16_to_f32.(actual[:,r]))
+            decoded = permutedims(Float32.(actual[:,r]))
             @test maximum(abs.(decoded-reference)) < 5f-2
         end
         if "--bench" in ARGS

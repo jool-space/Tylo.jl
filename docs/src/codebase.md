@@ -150,7 +150,7 @@ argument into a compile-time constant. See [Static layout notation](layouts.md#S
 | `examples/softmax/kernel.jl` | Generic arithmetic and reductions across selected ownerships | Physical input layout, masks and normalization domain |
 | `examples/streaming_attention/kernel.jl` | QK → online statistics → packed operand A → PV → normalization | D=64, chunk sizes, shared staging and traversal |
 | `examples/hopper/kernel.jl` | TMA and WGMMA share a storage contract | Producer/consumer roles, barriers and stage reuse |
-| `examples/flash_attention/tiles.jl` | TMEM correction/epilogue replace two raw helpers without changing checked machine code | The rest of the kernel remains the pinned PTX reference |
+| `examples/flash_attention/tiles.jl` | TMEM correction/epilogue replace two raw helpers without changing checked machine code | The rest of the kernel remains the raw PTX reference in `reference.jl` |
 
 The standalone streaming-attention kernel and the datacenter FlashAttention
 replacement experiment are separate consumers. The former is a complete Tylo
