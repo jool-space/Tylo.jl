@@ -4,7 +4,8 @@ using BFloat16s: BFloat16
 
 export SoftmaxState, softmax_update, softmax_merge, softmax_normalize, softmax_logsumexp
 
-export TMALoad, prepare_tma, shared_layout, shared_tile, transfer_bytes, tma_load!,
+export TMATile, TMALoad, TMABinding, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes,
+       tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores, swizzled_structure,
        WGMMA64, validate_wgmma, wgmma_operand, mma_async, wait_mma, finish_mma
 
 export Float8E4M3, Float8E5M2
@@ -12,9 +13,11 @@ export Float8E4M3, Float8E5M2
 export GlobalTile, SharedTile, window, CopyPlan, validate_copy, copy_async!,
        commit_copies, wait_copies, MMAAtom, TiledMMA, zero_accumulator,
        load_a, load_b, load_fragment, pack_operand_a, mma, store!, operand_layout, OperandA, OperandB, Accumulator,
-       instruction_atoms,
+       instruction_atoms, CopyAtom, copy_atoms, Registers, Addresses,
        Fragment, PackedFragment, scale, pack, unpack,
        TmemTile, TmemTransfer, partition, reinterpret_tile,
+       Tcgen05MMA, Tcgen05Operand, tcgen05_operand, accumulator, commit_mma,
+       tmem_allocate!, tmem_deallocate!, tmem_relinquish_permit,
        load_async, wait_load, store_async!, wait_stores,
        fence_after_thread_sync, fence_before_thread_sync
 
@@ -26,11 +29,13 @@ include("tmem.jl")
 include("memory.jl")
 include("copy.jl")
 include("mma.jl")
+include("copyatoms.jl")
 include("rows.jl")
 include("arrayops.jl")
 include("online.jl")
 include("tma.jl")
 include("wgmma.jl")
+include("tcgen05.jl")
 include("enumerate.jl")
 
 # GPU implementations load with PTX.jl. CPU layout/fragment operations have

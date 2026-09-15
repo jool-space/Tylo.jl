@@ -25,10 +25,16 @@ Base.@constprop :aggressive @inline function SoftmaxState(f; dims=2)
                  Fragment(ntuple(_ -> 0f0,count),reduced); dims)
 end
 
+# Element operations select instead of branching: a per-element branch
+# around the exponential costs more than the exponential itself. The
+# exponential is `exp2` of a scaled argument, which the GPU evaluates with
+# one `ex2` instruction (2 ulp) instead of a range-reduced series.
+@inline _softmax_exp(x::Float32) = exp2(x * 1.442695f0)
+@inline _softmax_exp(x) = exp(x)
 @inline _softmax_rescale(old_maximum, new_maximum) =
-    old_maximum == -Inf32 ? 0f0 : exp(old_maximum - new_maximum)
+    ifelse(old_maximum == -Inf32, 0f0, _softmax_exp(old_maximum - new_maximum))
 @inline _softmax_weight(score, new_maximum) =
-    new_maximum == -Inf32 ? 0f0 : exp(score - new_maximum)
+    ifelse(new_maximum == -Inf32, 0f0, _softmax_exp(score - new_maximum))
 
 """
     softmax_update(state, scores) -> (; state, weights, rescale)
@@ -66,8 +72,8 @@ end
 
 "Normalize using one FP32 reciprocal per result and multiplication; empty rows return zero."
 @inline function softmax_normalize(values, state::SoftmaxState)
-    reciprocal = map(normalizer -> normalizer == 0f0 ? 0f0 : inv(normalizer), state.sum)
-    ((value, scale) -> scale == 0f0 ? 0f0 : value * scale).(values, reciprocal)
+    reciprocal = map(normalizer -> ifelse(normalizer == 0f0, 0f0, inv(normalizer)), state.sum)
+    ((value, scale) -> ifelse(scale == 0f0, 0f0, value * scale)).(values, reciprocal)
 end
 
 "Final log-sum-exp in the state's reduced ownership; empty rows return -Inf."

@@ -96,9 +96,15 @@ generating, so it is a constant inside kernels.
 _words(atom::MMAAtom,role::OperandRole) =
     _register_count(operand_layout(atom,role)) * _element_bits(eltype(atom,role)) ÷ 32
 
-"Load a 16×16 A operand from shared memory; K contiguous in 16-byte groups."
+"""
+    load_a(atom, tile, lane)
+    load_b(atom, tile, lane)
+
+Load an atom's A (m×k) or B (k×n) operand from a shared tile through
+[`load_fragment`](@ref) with the operand's ownership.
+"""
 function load_a end
-"Load a 16×8 B operand from shared memory; K contiguous in 16-byte groups."
+@doc (@doc load_a) load_b
 function load_b end
 "Collectively multiply operands and return the updated immutable accumulator."
 function mma end
@@ -108,10 +114,12 @@ const _INSTRUCTION_ATOMS = MMAAtom[]
 """
     load_fragment(ownership, tile, thread)
 
-Load this thread's values of a memory tile through scalar loads at the
-coordinates the ownership assigns to it. Correct for any static ownership;
-instruction-specific loads such as `ldmatrix` are faster when their
-ownership matches. Packed element types return a `PackedFragment`.
+Load this thread's values of a memory tile at the coordinates the ownership
+assigns to it. Scalar loads are correct for any static ownership. A shared
+tile of 8- or 16-bit elements whose ownership decomposes into
+[`CopyAtom`](@ref) blocks along the layout's static unit-stride axis loads
+through `ldmatrix` instead, with the same result. Packed element types
+return a `PackedFragment`.
 """
 function load_fragment end
 """
@@ -120,10 +128,12 @@ function load_fragment end
     store!(pointer, packed::PackedFragment)
 
 Store an accumulator to a logical output view using its ownership. The
-two-argument tile form stores any fragment through scalar stores at its
-ownership's coordinates. The packed payload overload writes this thread's
-local words contiguously to a global typed BF16/FP16 pointer or a UInt16
-bit pointer. It writes complete words, using 4-, 8- or 16-byte alignment for
+tile form stores any fragment at its ownership's coordinates: scalar stores
+in general, `stmatrix` for a packed fragment whose ownership decomposes
+into [`CopyAtom`](@ref) blocks over a shared tile when compiling for
+sm_90 or later. The packed payload overload writes this thread's local
+words contiguously to a global typed BF16/FP16 pointer or a UInt16 bit
+pointer. It writes complete words, using 4-, 8- or 16-byte alignment for
 one, two/three or at least four words, and a sufficiently large distinct
 destination region for each thread.
 """

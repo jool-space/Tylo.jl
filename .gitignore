@@ -7,3 +7,4 @@
 
 /test/gpu/Manifest*.toml
 /reports/
+/examples/*/Manifest*.toml

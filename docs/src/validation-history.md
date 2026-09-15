@@ -34,6 +34,42 @@ B200/B300 runtime claim. Local logs, before/after resource reports and source
 hashes are in the ignored `reports/tmem-api-2026-09-10/` directory. The earlier
 fragment/broadcast batch has its own `reports/fragment-api-2026-09-10/` receipt.
 
+## 2026-09-15: streaming attention rescheduled
+
+The streaming attention example moved to 128 queries per CTA, two warp
+groups alternating on the tensor pipe, register-resident Q, TMA-fed K/V
+stages and an optional mask; `softmax_update` lost its per-element branches.
+Timings are microseconds, medians of 41 interleaved samples of eight warmed
+graph repetitions each, on the GB10 (SM clock about 0.9 GHz under this load),
+against the materialized cuBLAS baseline of the earlier report (strided
+batched over heads). TFLOPS count four flops per valid query/key pair and
+head dimension.
+
+| Queries×keys×heads | Mask | Streaming | TFLOPS | Materialized cuBLAS | TFLOPS |
+|:--|:--|--:|--:|--:|--:|
+| 64×64×1 | masked | 10.76 | 0.10 | 11.83 | 0.09 |
+| 129×257×1 | masked | 41.25 | 0.21 | 32.42 | 0.26 |
+| 256×256×1 | masked | 28.82 | 0.58 | 22.31 | 0.75 |
+| 1024×1024×1 | masked | 102.08 | 2.63 | 120.03 | 2.24 |
+| 2048×2048×1 | masked | 202.17 | 5.31 | 380.53 | 2.82 |
+| 1024×1024×1 | causal, masked | 103.63 | 1.30 | 107.25 | 1.25 |
+| 129×257×1 | masked, padded V | 41.63 | 0.20 | 33.40 | 0.25 |
+| 512×512×32 | none | 105.18 | 20.42 | 556.93 | 3.86 |
+| 1024×1024×16 | none | 184.00 | 23.34 | 1143.80 | 3.75 |
+| 1024×1024×16 | causal | 141.70 | 15.17 | 1143.96 | 1.88 |
+| 2048×2048×8 | none | 340.66 | 25.22 | 2582.65 | 3.33 |
+| 2048×2048×8 | causal | 250.87 | 17.13 | 2502.10 | 1.72 |
+| 4096×4096×4 | none | 654.97 | 26.23 | 6579.54 | 2.61 |
+
+For scale, an `mma.sync` micro-benchmark with one warp per sub-partition
+reaches 45 TFLOPS on this device and cuBLAS BF16 GEMM 43; the multi-head
+cases reach 45–58% of that. Runtime compilation reports 128 registers
+(unmasked), 140 (masked) and 178 (causal, masked), zero local bytes, 81 KiB
+shared memory and one 256-thread CTA per SM. Single-head cases below 2048
+queries occupy a fraction of the 48 SMs. The largest measured absolute error
+against the Float64 reference was 0.0032 (causal, 16 heads); the baseline's
+was 0.0066.
+
 ## 2026-09-10: streaming row state and complete GB10 attention
 
 Implementation: `60dda118bfc6d65a3b5b0b72fcba8c3d728eb68f`. This batch adds

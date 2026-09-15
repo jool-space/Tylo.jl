@@ -53,10 +53,12 @@ end
 """
     wgmma_operand(plan, role, tile, origin=(Int32(0),Int32(0)))
 
-Borrow an operand from canonical TMA shared storage. Origins are LOGICAL;
-A is (M,K), B is (K,N). Non-K origins must be multiples of eight, K origins
-multiples of 16; the whole plan must fit. Root storage must be 1024-byte
-aligned. Bounds/alignment checks may be elided with `@inbounds` once proven.
+Borrow an operand from canonical K-major swizzled shared storage (see
+[`swizzled_structure`](@ref)). Origins are LOGICAL; A is (M,K), B is (K,N).
+Non-K origins must be multiples of eight, K origins multiples of 16; the
+plan's K fits one swizzle row and the whole plan fits the tile. Root
+storage is aligned to eight swizzle rows. Bounds/alignment checks may be
+elided with `@inbounds` once proven.
 """
 function wgmma_operand end
 
@@ -81,11 +83,16 @@ function wait_mma end
 end
 
 "Check canonical operand geometry on the host; pointer alignment is checked at binding."
-function validate_wgmma(p::WGMMA64{T,N,K},role::Role,l::TMASharedLayout{S,A},origin=(0,0)) where {T,N,K,Role<:Union{OperandA,OperandB},S,A}
-    A == (Role === OperandA ? 2 : 1) || throw(ArgumentError("operand K axis does not match role"))
+function validate_wgmma(p::WGMMA64{T,N,K},role::Role,l::Layouts.AbstractLayout,origin=(0,0)) where {T,N,K,Role<:Union{OperandA,OperandB}}
+    A = Role === OperandA ? 2 : 1
+    s = swizzled_structure(typeof(l),T,A)
+    s === nothing && throw(ArgumentError("operand storage is not a canonical swizzled encoding"))
+    s.major === :K || throw(ArgumentError("shared/shared WGMMA operands are K-major"))
+    row = s.row_elements
+    K <= row || throw(ArgumentError("the plan's K does not fit one swizzle row"))
     k,r = origin[A],origin[3-A]
     outer = Role === OperandA ? 64 : N
-    k >= 0 && k % 16 == 0 && k+K <= 64 && r >= 0 && r % 8 == 0 && r+outer <= S[3-A] ||
+    k >= 0 && k % 16 == 0 && k % row + K <= row && k+K <= size(l)[A] && r >= 0 && r % 8 == 0 && r+outer <= size(l)[3-A] ||
         throw(ArgumentError("WGMMA origin or extent is not descriptor-compatible"))
     nothing
 end

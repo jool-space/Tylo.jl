@@ -13,19 +13,20 @@
 end
 
 Base.@propagate_inbounds function wgmma_operand(p::WGMMA64{T,N,K},role::Role,
-        t::SharedTile{T,TMASharedLayout{S,A}},origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {T,N,K,Role<:Union{OperandA,OperandB},S,A}
+        t::SharedTile{T,L},origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {T,N,K,Role<:Union{OperandA,OperandB},L}
     # A/B compatibility is structural, even when bounds checks are elided.
-    A == (Role === OperandA ? 2 : 1) || throw(ArgumentError("operand K axis does not match role"))
+    s = _operand_structure(L,T,Role)
+    s.major === :K || throw(ArgumentError("shared/shared WGMMA operands are K-major"))
+    K <= s.row_elements || throw(ArgumentError("the plan's K does not fit one swizzle row"))
     @boundscheck begin
-        PTX.smem_addr_u32(t.ptr) % UInt32(1024) == 0 || throw(ArgumentError("WGMMA storage alignment"))
+        PTX.smem_addr_u32(t.ptr) % UInt32(8s.swizzle_bytes) == 0 || throw(ArgumentError("WGMMA storage alignment"))
         validate_wgmma(p,role,t.layout,origin)
     end
-    k,r = origin[A],origin[3-A]
     # Non-K origin is aligned to a full eight-row swizzle cycle. Start address
     # is unswizzled; hardware applies the descriptor's swizzle to each access.
-    start = PTX.smem_addr_u32(t.ptr) + (r*Int32(128)+k*Int32(2)) % UInt32
-    desc = PTX.wgmma_descriptor(start;leading_byte_offset=16,stride_byte_offset=1024,
-        swizzle=PTX.WgmmaSwizzle.B128)
+    start = PTX.smem_addr_u32(t.ptr) + (_unswizzled(t.layout)(origin)*Int32(sizeof(T))) % UInt32
+    desc = PTX.wgmma_descriptor(start;leading_byte_offset=16,stride_byte_offset=s.stride_bytes,
+        swizzle=_wgmma_swizzle(s.swizzle_bytes))
     WGMMAOperand{typeof(p),Role}(desc)
 end
 

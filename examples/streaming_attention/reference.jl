@@ -11,11 +11,11 @@ function attention_reference(q,k,v,mask;causal=false,rounded=false)
             x=scores[r,valid];p=exp.(x.-maximum(x));p./=sum(p)
             out[:,r]=transpose(Float64.(v[valid,:]))*p
         else
-            # Match the per-32-key BF16 probability boundary, while doing the
+            # Match the per-64-key BF16 probability boundary, while doing the
             # statistics and weighted sum independently in Float64.
             maximum_old=-Inf;denominator=0.0;numerator=zeros(Float64,64)
-            for first in 1:32:n
-                js=[j for j in first:min(first+31,n) if mask[j,r] && (!causal || j<=r)]
+            for first in 1:64:n
+                js=[j for j in first:min(first+63,n) if mask[j,r] && (!causal || j<=r)]
                 isempty(js) && continue
                 maximum_new=max(maximum_old,maximum(scores[r,js]))
                 alpha=maximum_old == -Inf ? 0.0 : exp(maximum_old-maximum_new)

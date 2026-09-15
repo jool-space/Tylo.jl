@@ -120,8 +120,9 @@ buffer or synchronize the CTA. The two-stage example uses this while another
 stage is pending, and drains with `Val(0)` at the end. That rule is part of the
 example's schedule, not a general rule for every two-buffer pipeline.
 
-Inside `mma(plan, ...)`, the extension selects shared windows for each warp,
-loads packed A/B registers with `ldmatrix`, repeats `mma.sync.m16n8k16`, and
+Inside `mma(plan, ...)`, Tylo selects shared windows for each warp, loads
+packed A/B registers through the copy derived from the atom's operand
+ownerships (`ldmatrix` for these tiles), repeats the atom's `mma.sync`, and
 returns the updated accumulator. There is no hidden allocation or CTA barrier.
 This warp instruction's result is ready for register arithmetic after the call;
 the asynchronous WGMMA path has a different completion API.

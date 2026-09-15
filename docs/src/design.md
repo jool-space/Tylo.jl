@@ -11,7 +11,7 @@ reuse. Those choices can differ while using the same Tylo primitive.
 |:--|:--|:--|
 | Logical domain and storage | `GlobalTile`, `SharedTile`, `TmemTile`, with a layout | Which thread owns a value, or whether the storage is ready |
 | Register values and ownership | `Fragment(values, ownership)` | A memory address, or a valid MMA operand representation |
-| A supported operation | `MMAAtom`, `CopyPlan`, `TiledMMA`, `TMALoad`, `WGMMA64`, `TmemTransfer` | A complete pipeline or an arbitrary layout conversion |
+| A supported operation | `MMAAtom`, `CopyAtom`, `CopyPlan`, `TiledMMA`, `TMATile`, `WGMMA64`, `TmemTransfer`, `Tcgen05MMA` | A complete pipeline or an arbitrary layout conversion |
 | Completion | Explicit waits/fences, with pending types for TMEM loads and WGMMA results | Allocation lifetime, converged participation, or exclusive access |
 
 Two maps explain most of the interface:

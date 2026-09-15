@@ -76,12 +76,16 @@ register redistribution engine.
 
 The [worked attention kernel](https://github.com/jool-space/Tylo.jl/tree/main/examples/streaming_attention)
 composes QK, the online update, same-lane BF16 conversion, PV and final
-normalization. It fixes D=64 and a 64×32 score tile, while sequence lengths,
-bounds and masks remain runtime data. Its one-stage copy schedule uses 16 KiB
-shared memory and keeps score/probability tiles off global memory. The Boolean
-input mask is still M×N. Probability rounding happens before PV; the denominator
+normalization. It fixes D=64 and 64-key tiles, while sequence lengths, heads,
+bounds and masks remain runtime data. Its schedule streams K and V by TMA
+through four shared stages and alternates two warp groups on the tensor
+pipe, keeping score/probability tiles off global memory. An optional Boolean
+input mask is M×N. Probability rounding happens before PV; the denominator
 remains FP32. Independent high-precision and same-boundary references make this
-distinction testable.
+distinction testable. The element operations of `softmax_update` select
+instead of branching and use `exp2` of a scaled argument; that kernel showed
+the per-element branches around a full-precision `exp` to cost more than the
+exponentials themselves.
 
 CuTe's Ampere attention example expresses the same adjacent-atom correspondence
 through layout division and reshaping; ThunderKittens expresses the row update

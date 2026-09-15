@@ -106,6 +106,10 @@
 #     and stayed negative — emu is falsified terminally; the knob
 #     remains for reproduction only.
 #   * Debug scaffolding (waitmap / beacons / lockstep / s_f16) not ported.
+#   * The shared-memory descriptors use pyptx's masked form (constant
+#     fields | address >> 4) as in the original; an earlier revision of
+#     this port built them through PTX.jl's checked builder, whose runtime
+#     checks the B200 run of 2026-09-14 executed and which are now host-only.
 #   * Shape parameters (seqlen, n_tiles, total_work, ...) are runtime
 #     kernel arguments — one compiled kernel serves every shape (pyptx
 #     rebuilds per shape). Static loop structure is unchanged: the pyptx
@@ -300,14 +304,36 @@ end
 @inline fab_kmaj_off(kk::Int) = UInt64((kk ÷ 4) * 1024 + (kk % 4) * 2)
 
 # S(stage) = Q(stage) @ K(k_idx)^T — 8 k16 UMMAs, accumulate within the tile.
-@inline function fab_qk_mma(::Val{STAGE}, ::Val{KIDX}, tmem::UInt32,
-                             dq0::UInt64, dk0::UInt64, idesc::UInt32,
+# MMA operands, built once per work loop: instruction descriptors for the
+# two products and the shared-memory descriptors of Q, the K slots and the
+# V slots, as pyptx's masked_descriptor: the constant fields (leading 16 /
+# stride 1024 / B128 for the K-major operands, leading 16384 for V) with
+# the 16-byte-unit address masked in. The checked builder validates the
+# same encodings on the host (tcgen05_descriptor.jl's tested equivalence).
+const FAB_DESC_KMAJ = tcgen05_descriptor(UInt32(0); leading_bytes = 16,
+                                         stride_bytes = 1024, swizzle = BlackwellLayout.B128)
+const FAB_DESC_MNMAJ = tcgen05_descriptor(UInt32(0); leading_bytes = 16384,
+                                          stride_bytes = 1024, swizzle = BlackwellLayout.B128)
+@inline fab_masked_descriptor(fields::UInt64, addr::UInt32) =
+    fields | UInt64((addr & UInt32(0x3FFF0)) >> 4)
+@inline function fab_mma_operands(q_ptr, kv_ptr)
+    idesc_qk = tcgen05_instr_desc_f16bf16_f32(
+        m = 128, n = FAB_BN, ab_dtype = :bf16, a_major = :K, b_major = :K)
+    idesc_pv = tcgen05_instr_desc_f16bf16_f32(
+        m = 128, n = FAB_HD, ab_dtype = :bf16, a_major = :K, b_major = :MN)
+    dq0 = fab_masked_descriptor(FAB_DESC_KMAJ, smem_addr_u32(q_ptr))
+    dk0 = fab_masked_descriptor(FAB_DESC_KMAJ, smem_addr_u32(kv_ptr))
+    dv0 = fab_masked_descriptor(FAB_DESC_MNMAJ, smem_addr_u32(kv_ptr + FAB_TILE_BYTES))
+    (; idesc_qk, idesc_pv, dq0, dk0, dv0)
+end
+
+@inline function fab_qk_mma(::Val{STAGE}, ::Val{KIDX}, tmem::UInt32, ops,
                              bars::BarrierSet) where {STAGE, KIDX}
     d = tmem + UInt32(STAGE * 128)
     for kk in 0:7
-        da = dq0 + UInt64(STAGE * FAB_SLOT_UNITS) + fab_kmaj_off(kk)
-        db = dk0 + UInt64(KIDX * 2 * FAB_SLOT_UNITS) + fab_kmaj_off(kk)
-        ptx"tcgen05.mma.cta_group::1.kind::f16"(d, da, db, idesc, kk != 0)
+        da = ops.dq0 + UInt64(STAGE * FAB_SLOT_UNITS) + fab_kmaj_off(kk)
+        db = ops.dk0 + UInt64(KIDX * 2 * FAB_SLOT_UNITS) + fab_kmaj_off(kk)
+        ptx"tcgen05.mma.cta_group::1.kind::f16"(d, da, db, ops.idesc_qk, kk != 0)
     end
     fab_commit(bars.s_full[STAGE])
 end
@@ -320,8 +346,8 @@ end
 # first group.
 @inline function fab_pv_mma(dbg::FabDbg, ::Val{SPLITP}, ::Val{STAGE}, ::Val{VIDX},
                              first_accum::Bool,
-                             ::Val{PAR}, tmem::UInt32, dv0::UInt64,
-                             idesc::UInt32, bars::BarrierSet,
+                             ::Val{PAR}, tmem::UInt32, ops,
+                             bars::BarrierSet,
                              ph_pq::UInt32, ph_or::UInt32) where {SPLITP, STAGE,
                                                                   VIDX, PAR}
     d = tmem + UInt32(256 + STAGE * 128)
@@ -339,8 +365,8 @@ end
             # (kk ∈ 0:7); the checked UInt32() truncation would leave a
             # live InexactError branch in the loop-carried form.
             a = tmem + ((STAGE * 128 + kk * 8) % UInt32)
-            db = dv0 + ((VIDX * 2 * FAB_SLOT_UNITS + kk * 128) % UInt64)
-            ptx"tcgen05.mma.cta_group::1.kind::f16"(d, a, db, idesc,
+            db = ops.dv0 + ((VIDX * 2 * FAB_SLOT_UNITS + kk * 128) % UInt64)
+            ptx"tcgen05.mma.cta_group::1.kind::f16"(d, a, db, ops.idesc_pv,
                                                     !(first_accum & (kk == 0)))
         end
     end
@@ -727,21 +753,7 @@ function fab_kernel!(
     # MMA dispatch warp (single thread)
     # =====================================================================
     if tid == FAB_MMA_TID
-        idesc_qk = tcgen05_instr_desc_f16bf16_f32(
-            m = 128, n = FAB_BN, ab_dtype = :bf16, a_major = :K, b_major = :K)
-        idesc_pv = tcgen05_instr_desc_f16bf16_f32(
-            m = 128, n = FAB_HD, ab_dtype = :bf16, a_major = :K, b_major = :MN)
-        # K-major operands: pyptx masked_descriptor ≡ leading 16 / stride
-        # 1024 / B128 (see tcgen05_descriptor.jl's tested equivalence).
-        dq0 = tcgen05_descriptor(smem_addr_u32(q_ptr);
-                                 leading_bytes = 16, stride_bytes = 1024,
-                                 swizzle = BlackwellLayout.B128)
-        dk0 = tcgen05_descriptor(smem_addr_u32(kv_ptr);
-                                 leading_bytes = 16, stride_bytes = 1024,
-                                 swizzle = BlackwellLayout.B128)
-        dv0 = tcgen05_descriptor(smem_addr_u32(kv_ptr) + UInt32(FAB_TILE_BYTES);
-                                 leading_bytes = 16384, stride_bytes = 1024,
-                                 swizzle = BlackwellLayout.B128)
+        ops = fab_mma_operands(q_ptr, kv_ptr)
 
         sp = Val(CFG.splitp)
         kph0 = UInt32(0); kph1 = UInt32(0); kph2 = UInt32(0); kph3 = UInt32(0)
@@ -756,20 +768,20 @@ function fab_kernel!(
             # second Q tile's TMA overlaps the first QK ──
             ph_qa = fab_wait(d, bars.q[0], ph_qa, Val(3))
             kph0 = fab_wait(d, bars.kv_full[0], kph0, Val(4))
-            fab_qk_mma(Val(0), Val(0), tmem, dq0, dk0, idesc_qk, bars)
+            fab_qk_mma(Val(0), Val(0), tmem, ops, bars)
             ph_qb = fab_wait(d, bars.q[1], ph_qb, Val(3))
-            fab_qk_mma(Val(1), Val(0), tmem, dq0, dk0, idesc_qk, bars)
+            fab_qk_mma(Val(1), Val(0), tmem, ops, bars)
             fab_commit(bars.kv_free[0])
 
             # ── peeled j=0: PV(0) with V slot 1, S(1) with K slot 2 ──
             kph1 = fab_wait(d, bars.kv_full[1], kph1, Val(4))
             kph2 = fab_wait(d, bars.kv_full[2], kph2, Val(4))
             ph_pq0, ph_or00 = fab_pv_mma(d, sp, Val(0), Val(0), true, Val(0),
-                                          tmem, dv0, idesc_pv, bars, ph_pq0, ph_or00)
-            fab_qk_mma(Val(0), Val(1), tmem, dq0, dk0, idesc_qk, bars)
+                                          tmem, ops, bars, ph_pq0, ph_or00)
+            fab_qk_mma(Val(0), Val(1), tmem, ops, bars)
             ph_pq1, ph_or10 = fab_pv_mma(d, sp, Val(1), Val(0), true, Val(0),
-                                          tmem, dv0, idesc_pv, bars, ph_pq1, ph_or10)
-            fab_qk_mma(Val(1), Val(1), tmem, dq0, dk0, idesc_qk, bars)
+                                          tmem, ops, bars, ph_pq1, ph_or10)
+            fab_qk_mma(Val(1), Val(1), tmem, ops, bars)
             fab_commit(bars.kv_free[2])
             fab_commit(bars.kv_free[1])
 
@@ -785,22 +797,22 @@ function fab_kernel!(
                 kph3 = fab_wait(d, bars.kv_full[3], kph3, Val(4))
                 kph0 = fab_wait(d, bars.kv_full[0], kph0, Val(4))
                 ph_pq0, ph_or01 = fab_pv_mma(d, sp, Val(0), Val(1), false, Val(1),
-                                              tmem, dv0, idesc_pv, bars, ph_pq0, ph_or01)
-                fab_qk_mma(Val(0), Val(0), tmem, dq0, dk0, idesc_qk, bars)
+                                              tmem, ops, bars, ph_pq0, ph_or01)
+                fab_qk_mma(Val(0), Val(0), tmem, ops, bars)
                 ph_pq1, ph_or11 = fab_pv_mma(d, sp, Val(1), Val(1), false, Val(1),
-                                              tmem, dv0, idesc_pv, bars, ph_pq1, ph_or11)
-                fab_qk_mma(Val(1), Val(0), tmem, dq0, dk0, idesc_qk, bars)
+                                              tmem, ops, bars, ph_pq1, ph_or11)
+                fab_qk_mma(Val(1), Val(0), tmem, ops, bars)
                 fab_commit(bars.kv_free[0])
                 fab_commit(bars.kv_free[3])
                 # j even: V in slot 1, next K in slot 2
                 kph1 = fab_wait(d, bars.kv_full[1], kph1, Val(4))
                 kph2 = fab_wait(d, bars.kv_full[2], kph2, Val(4))
                 ph_pq0, ph_or00 = fab_pv_mma(d, sp, Val(0), Val(0), false, Val(0),
-                                              tmem, dv0, idesc_pv, bars, ph_pq0, ph_or00)
-                fab_qk_mma(Val(0), Val(1), tmem, dq0, dk0, idesc_qk, bars)
+                                              tmem, ops, bars, ph_pq0, ph_or00)
+                fab_qk_mma(Val(0), Val(1), tmem, ops, bars)
                 ph_pq1, ph_or10 = fab_pv_mma(d, sp, Val(1), Val(0), false, Val(0),
-                                              tmem, dv0, idesc_pv, bars, ph_pq1, ph_or10)
-                fab_qk_mma(Val(1), Val(1), tmem, dq0, dk0, idesc_qk, bars)
+                                              tmem, ops, bars, ph_pq1, ph_or10)
+                fab_qk_mma(Val(1), Val(1), tmem, ops, bars)
                 fab_commit(bars.kv_free[2])
                 fab_commit(bars.kv_free[1])
                 trip += UInt32(1)
@@ -814,9 +826,9 @@ function fab_kernel!(
             # ── peeled j = n_tiles-1 (odd): PV only, V in slot 3 ──
             kph3 = fab_wait(d, bars.kv_full[3], kph3, Val(4))
             ph_pq0, ph_or01 = fab_pv_mma(d, sp, Val(0), Val(1), false, Val(1),
-                                          tmem, dv0, idesc_pv, bars, ph_pq0, ph_or01)
+                                          tmem, ops, bars, ph_pq0, ph_or01)
             ph_pq1, ph_or11 = fab_pv_mma(d, sp, Val(1), Val(1), false, Val(1),
-                                          tmem, dv0, idesc_pv, bars, ph_pq1, ph_or11)
+                                          tmem, ops, bars, ph_pq1, ph_or11)
             fab_commit(bars.kv_free[3])
             fab_commit(bars.o_done)
 

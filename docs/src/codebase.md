@@ -13,15 +13,17 @@ bindings.
 | `src/tuples.jl` | Internal range-to-tuple expansion with inlined scalar calls | `test/host/tuples.jl`, `test/gpu/tuples.jl` |
 | `src/elements.jl` | Element widths and the FP8 element types (Microfloats twins with `cvt.rn.satfinite` semantics) | `test/host/elements.jl` |
 | `src/layouts/layouts.jl`, `src/layouts/` | Affine coordinate maps, static notation, composition, swizzles and windows | `test/host/layouts.jl`, `test/host/layout_macro.jl` |
-| `src/memory.jl` | Typed global/shared pointers plus storage layout; address-unit conversion | `src/ptx/copy.jl`, `test/gpu/gemm.jl` |
+| `src/memory.jl` | Typed global/shared pointers plus storage layout and a declared alignment; address-unit conversion | `test/host/memory.jl`, `test/gpu/vectors.jl`, `test/gpu/gemm.jl` |
 | `src/fragments.jl`, `src/arrayops.jl` | Local values plus ownership, generic scalar broadcast, axis views and supported reductions/windows | `test/host/arrayops.jl`, `test/gpu/arrayops.jl` |
-| `src/enumerate.jl` | Host enumeration of ownership tables: reduction plans, broadcast slot maps, affine fits, windows and in-lane relayouts | `test/host/enumerate.jl` |
+| `src/enumerate.jl` | Host enumeration of ownership tables: reduction plans, broadcast slot maps, affine fits, windows, in-lane relayouts, matrix copy and vector plans | `test/host/enumerate.jl`, `test/host/copy.jl`, `test/host/memory.jl` |
 | `src/rows.jl`, `src/ptx/rows.jl` | Generated reductions from derived plans; warp shuffle bindings | `test/host/rows.jl`, `test/gpu/rows.jl` |
-| `src/copy.jl`, `src/ptx/copy.jl` | Vector copy assignment, structural validation, full and bounded copies | `test/gpu/boundaries.jl` |
+| `src/copy.jl`, `src/ptx/copy.jl` | Vector copy assignment, structural validation, full and bounded copies; derived `ldmatrix`/`stmatrix` loads and stores of fragments | `test/gpu/boundaries.jl`, `test/gpu/atoms.jl` |
+| `src/copyatoms.jl` | `CopyAtom` register and address ownerships of the 8×8 matrix copy instructions | `test/host/copy.jl` |
 | `src/mma.jl`, `src/ptx/mma.jl` | `MMAAtom` operand ownerships, tiling, instruction bindings, generic loads/stores and same-lane conversion | `test/gpu/atoms.jl`, `test/gpu/gemm.jl`, `test/gpu/operand_a.jl` |
-| `src/tma.jl`, `src/ptx/tma.jl`, `ext/CUDACoreExt.jl` | Canonical TMA storage, descriptor preparation and launch/lifetime binding | `test/host/hopper.jl`, `test/gpu/tma.jl` |
+| `src/tma.jl`, `src/ptx/tma.jl`, `ext/CUDACoreExt.jl` | TMA tiles over element widths and swizzle rows, the canonical swizzled storage and its structural recognition, loads, stores, descriptor preparation and launch/lifetime binding | `test/host/hopper.jl`, `test/host/tcgen05.jl`, `test/gpu/tma.jl` |
 | `src/wgmma.jl`, `src/ptx/wgmma.jl` | Warpgroup plan, shared descriptors, partial accumulators and register-dependent completion | `test/gpu/wgmma.jl` |
 | `src/tmem.jl`, `src/ptx/ptx.jl` | TMEM address mapping, transfer partitions, pending loads and packed stores | `test/host/tmem.jl`, `test/gpu/tmem_views.jl`, `test/gpu/tmem.jl` |
+| `src/tcgen05.jl`, `src/ptx/tcgen05.jl` | `Tcgen05MMA` atoms: structural recognition of swizzled shared encodings, descriptors, TMEM accumulators, K-stepped issue, commit and TMEM allocation | `test/host/tcgen05.jl`, `test/gpu/tcgen05.jl`, `test/gpu/flash_attention.jl` |
 | `src/online.jl` | Current online softmax state, update, merge and normalization | `test/host/online.jl`, `test/gpu/online.jl` |
 
 `using Tylo` loads the descriptions, host operations and, from `src/ptx/`,
@@ -148,7 +150,7 @@ argument into a compile-time constant. See [Static layout notation](layouts.md#S
 |:--|:--|:--|
 | `examples/gemm/kernel.jl` | Global/shared/register/MMA/store composition | Tile choice, grid, shared allocation and copy pipeline |
 | `examples/softmax/kernel.jl` | Generic arithmetic and reductions across selected ownerships | Physical input layout, masks and normalization domain |
-| `examples/streaming_attention/kernel.jl` | QK → online statistics → packed operand A → PV → normalization | D=64, chunk sizes, shared staging and traversal |
+| `examples/streaming_attention/kernel.jl` | TMA tiles → QK → online statistics → packed operand A → PV → normalization, two warp groups alternating on the tensor pipe | D=64, tile sizes, stage count, barrier protocol and traversal |
 | `examples/hopper/kernel.jl` | TMA and WGMMA share a storage contract | Producer/consumer roles, barriers and stage reuse |
 | `examples/flash_attention/tiles.jl` | TMEM correction/epilogue replace two raw helpers without changing checked machine code | The rest of the kernel remains the raw PTX reference in `reference.jl` |
 

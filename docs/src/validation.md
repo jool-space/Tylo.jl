@@ -10,14 +10,14 @@ results do not automatically validate later changes.
 | Area | Implemented scope | Evidence available | Main limit |
 |:--|:--|:--|:--|
 | Layout mathematics | Hierarchical affine shapes/strides, static/runtime leaves, composition, XOR swizzles, factorization, windows, two-axis permutation | Host tests; selected device arithmetic on GB10 | No general inverse/complement solver or symbolic simplifier |
-| Register arithmetic | Generic `Fragment` values, scalar broadcast, conversions and axis permutation; ready warp-MMA and completed WGMMA values | Host and GB10 tests | Not a full array interface; packed and pending representations have explicit boundaries |
+| Register arithmetic and memory access | Generic `Fragment` values, scalar broadcast, conversions and axis permutation; loads and stores derived from ownership: `ldmatrix`/`stmatrix` blocks, then vectors within a tile's declared alignment, then scalars | Host and GB10 tests; machine code of every prior kernel unchanged | Not a full array interface; bounded stores stay scalar |
 | Reductions/windows | Selected lane-local, warp-striped, warp-MMA, WGMMA and TMEM ownership recipes | Independent coordinate/numerical references, assembly, GB10 | Arbitrary ownership does not imply a supported collective or slice |
-| Warp-MMA GEMM | BF16/FP16 `m16n8k16`, repeated atoms, full/bounded copies and stores, one/two copy stages | SM80/90a/100a/121a assembly; GB10 runtime | No claim of a tuned GEMM library; no split-K/autotuning |
-| TMA | 2D loads with one canonical B128-swizzled, K=64 BF16/FP16 storage format | GB10 runtime, bounds/reuse/lifetime tests | No arbitrary layouts, stores, multicast or clusters |
+| Warp MMA | 24 `mma.sync` atoms (16-bit, TF32, FP8, INT8) as ownership tables; derived `ldmatrix`/`stmatrix` operand copies; `TiledMMA` GEMM with full/bounded copies and stores, one/two copy stages | SM80/89/90a/100a/121a assembly; GB10 runtime oracle for every atom | No claim of a tuned GEMM library; no split-K/autotuning |
+| TMA | 2D loads and stores of one-, two- and four-byte elements with 32-, 64- or 128-byte swizzle rows, from matrices or batches of matrices with logical bounds, into canonical storage expressed as `Swizzle{B,M,3}` over packed rows and shared with `ldmatrix`, WGMMA and tcgen05 operands | GB10 runtime for every width, batches, clipping, reuse and lifetime tests | No multicast, clusters, boxes beyond one matrix or unswizzled boxes |
 | Hopper WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, selected partial accumulators | SM90a assembly; H100/H200 tests prepared | Runtime and performance on Hopper remain unvalidated |
-| TMEM | FP32 and packed BF16/FP16 `.32x32b` loads/stores, x1–x128, logical windows and transfer partitions | SM100a assembly; B200 round trips; address/register work on GB10 | No tcgen05 MMA in Tylo |
-| Streaming attention | Complete single-head BF16 forward kernel, D=64, online statistics, masks and causal tails | GB10 correctness and dated paired measurements | Fixed schedule/geometry; small cases can be slower than the baseline |
-| Datacenter attention experiment | TMA loads, correction and epilogue replacements in a raw PTX kernel | Six complete kernel-code comparisons; paired B200 execution and timings | Remaining kernel is the reference; softmax stream and tcgen05 MMA still raw PTX |
+| TMEM and tcgen05 MMA | FP32 and packed BF16/FP16 `.32x32b` loads/stores, x1–x128, logical windows and transfer partitions; `Tcgen05MMA` atoms (f16/tf32/f8f6f4/i8 kinds, M=128) with shared operands recognized structurally as the 128-byte-swizzled encoding, TMEM accumulators and TMEM-sourced A, commit and TMEM allocation | SM100a assembly; B200 round trips of the transfers; MMA issue compared against the reference attention kernel on GB10 | MMA execution not yet run on B200; M=64 and cta_group::2 not described |
+| Streaming attention | Complete multi-head BF16 forward kernel, D=64: TMA-fed stages, register-resident Q, online statistics, optional masks, causal tails, two warp groups alternating on the tensor pipe | GB10 correctness, dated paired measurements against a materialized cuBLAS baseline and the measured `mma.sync` peak | Fixed geometry (128 queries × 64 keys per step); single-head cases below 2048 queries underfill the 48 SMs |
+| Datacenter attention experiment | TMA loads, both MMA issues, correction and epilogue replaced in a raw PTX kernel | Six kernel-code comparisons on GB10; paired B200 execution and timings of the pre-MMA revision | Softmax stream, barrier plan and roles remain raw PTX; the MMA revision awaits B200 execution |
 
 For precise fragment-method coverage, see [Register fragments](rows.md). The
 online `SoftmaxState(f; dims)` uses reduced fragments on either implemented
@@ -281,3 +281,168 @@ Gate results, Julia 1.13.0, CUDACore 6.4.0, CUDA compiler 13.4.59, PTX from
   re-resolving its workspace for Tylo's new dependency; the eight projection
   kernels keep their instruction multiset and bitwise outputs against
   `7770d93`, and the Hopper kernels are identical and multiset-equal.
+
+### Copy atoms (2026-09-14)
+
+The `ldmatrix` and `stmatrix` instructions are now data, like the warp
+MMA instructions. `CopyAtom{:load|:store,Trans}` holds the two ownerships
+of one 8×8 matrix copy in `src/copyatoms.jl`: the 16-byte row each lane
+addresses and the two 16-bit units each lane holds. `matrix_copy_plan` in
+`src/enumerate.jl` covers any 32-lane ownership with those blocks along the
+shared layout's static unit-stride axis, choosing the transposed instruction
+when the register pattern requires it, grouping consecutive blocks into
+`.x1`/`.x2`/`.x4` instructions and permuting the words into the fragment's
+slot order; adjacent 8-bit elements form units, so FP8 and INT8 operands
+qualify. `load_fragment` and `store!` use the plan for shared tiles and fall
+back to scalar accesses otherwise; `stmatrix` is emitted only when compiling
+for sm_90 or later. `load_a`/`load_b` are now that load with the operand's
+ownership and serve every atom, and the tiled shared-tile `mma` accepts every
+atom with a 32-bit accumulator. The old hand-written m16n8k16 loads and the
+`CopyPlan` cp.async copies remain as they were.
+
+Evidence, Julia 1.13.0, CUDACore 6.4.0, CUDA compiler 13.4.59, GB10:
+
+- `test/host/copy.jl` checks the atom tables against the ISA figures and the
+  derived plans for all 24 atoms: plain instructions for K-contiguous
+  storage, transposed for MN-contiguous 16-bit storage, no plan for 8-bit
+  MN-contiguous rows, FP32 values, lane-local rows or multi-warp ownerships.
+- `test/gpu/atoms.jl` compiles a shared-memory round trip for every atom and
+  asserts that the assembly contains exactly the planned `ldmatrix` widths and
+  transpositions, `stmatrix` only at sm_90 or later, and no local memory or
+  calls; at runtime every atom's operands survive registers → `stmatrix` →
+  raw shared memory → `ldmatrix` → registers on GB10, swizzled and not.
+- Machine code: the 16 GEMM kernels, the four operand-load kernels and the
+  16-bit oracle kernels compiled before and after the change have identical
+  normalized SASS; the PTX differs by one moved `and.b32` and by block labels.
+- Tylo: 84,009 checks pass in 2m50s on four workers with the expected
+  hardware skips. Megakernels: 238,340 checks pass in 4m47s with one expected
+  Hopper skip, including its projection and Hopper kernel comparisons.
+
+### tcgen05 MMA atoms (2026-09-14)
+
+`Tcgen05MMA{(m,n,k),TA,TB,TC}` in `src/tcgen05.jl` describes a
+`tcgen05.mma.cta_group::1` instruction by shape and element types, for the
+f16, tf32, f8f6f4 and i8 kinds with M=128. Its operands are not thread-owned.
+The accumulator is a `TmemTile` in the atom's TMEM layout (`accumulator`),
+also accepted as A for TMEM-sourced products. Shared operands are encodings:
+`b128_structure` recognizes a static layout type as the canonical
+128-byte-swizzled core-matrix form (`Swizzle{3,3,3}` composed with 128-byte
+rows, which `TMASharedLayout` already is) and reads the descriptor's
+majorness, leading and stride offsets from its strides. `tcgen05_operand`
+packs the descriptor with PTX.jl's constant fields, `mma` derives the
+instruction descriptor from the operand encodings and steps K through the
+tile's layout, by a constant when the K axis is one flat mode, and
+`commit_mma` and the TMEM allocation verbs complete the surface.
+
+The vendored FlashAttention kernel is the consumer. `tiles.jl` now also
+replaces its QK and PV issue: the Q buffer and the KV ring are described as
+stacks of 128-byte rows, both products are one atom each, and origins select
+stages, slots and publish groups. The reference's own descriptor prologue was
+returned to pyptx's masked form (its port had used PTX.jl's checked builder,
+whose runtime checks executed in the B200 run). Evidence, GB10, CUDA
+compiler 13.4.59, sm_100a/sm_103a/sm_100f:
+
+- Both kernels issue identical TMEM loads and stores, waits, fences, commits,
+  barrier arrivals and global stores, and neither has an exception path. In
+  the default split-P configuration both issue 128 `tcgen05.mma`; in the
+  quarter-granular fallback the tiled helper's loop unrolls completely while
+  LLVM unrolls the reference's only partially (116 of 128 materialized).
+- The tiled kernel's machine code is smaller: 3,032 versus 3,672 SASS
+  instructions (sm_100a, split-P), because the atom's descriptor arithmetic
+  keeps the descriptor's high word constant where the reference materializes
+  64-bit adds per K step. The PTX instruction multisets differ only by those
+  42 `add.s64`; line order differs where the epilogue's conversions and the
+  phase flips were scheduled. Byte-identical machine code is therefore no
+  longer the gate; `comparison.jl` asserts the instruction counts and that the
+  tiled kernel never grows.
+- `test/gpu/tcgen05.jl` compiles a 128×128×64 product with K-major and
+  MN-major B through the atom for sm_100a with no local memory or calls, four
+  MMAs, one commit and one x128 TMEM load; its execution and the attention
+  cases await a B200.
+- Tylo: 84,077 checks pass in 3m03s on four workers.
+
+### Aligned tiles, vector accesses and one shared encoding (2026-09-15)
+
+`GlobalTile` and `SharedTile` take a third argument, `Val(align)`, declaring
+in bytes that the pointer and every non-unit stride are multiples of the
+alignment; windows keep it only at aligned origins, and a swizzle limits the
+claim to the bytes it leaves in place. Bounds checks verify the declaration
+structurally and are elided with `@inbounds`. The default is the element
+size, so every existing kernel compiles unchanged. `vector_plan` in
+`src/enumerate.jl` groups a thread's slots into 16-, 8- or 4-byte vectors
+that are contiguous along the tile's unit-stride axis and start aligned on
+every thread; `load_fragment` and `store!` use them after the `ldmatrix`
+and `stmatrix` paths, as whole words for packed element types, through
+`VecElement` tuples so no new instruction wrappers were needed.
+
+`TMASharedLayout` is gone. `shared_layout(plan)` returns the composition
+`Swizzle{3,3,3}` over 128-byte rows, the encoding `b128_structure` already
+recognized, so TMA storage, `ldmatrix` loads, `wgmma_operand` and
+`tcgen05_operand` describe one layout type; `wgmma_operand` accepts any
+K-major canonical tile through the same structural recognition.
+
+Evidence, GB10: `test/host/memory.jl` covers the alignment declaration and
+the vector plans; `test/gpu/vectors.jl` compiles and executes round trips
+for FP32 accumulator pairs (`b64`), lane-local rows (`v2.b64`), BF16 and
+FP8 operand words (`b32`) with one access per vector, and the scalar path
+with one per element, agreeing exactly. Normalized SASS of the 16 GEMM, 4
+operand-load, 48 oracle, 78 copy, 8 WGMMA, 56 Hopper, 6 TMEM, 12 attention
+and 2 tcgen05 kernels is identical to the previous checkpoint. Tylo:
+84,147 checks pass in 2m56s on four workers.
+
+### TMA tiles as data (2026-09-15)
+
+`TMATile(T, Val(shape), Val(axis), Val(width))` replaces `TMALoad` (kept as
+the name of the 128-byte plan): one-, two- and four-byte elements, 32-,
+64- or 128-byte swizzle rows, and stores as well as loads through one
+binding. `shared_layout(plan)` is `Swizzle{B,M,3}` over packed rows, the
+hardware swizzle family in elements, and `swizzled_structure` (formerly
+`b128_structure`) recognizes every width, so `wgmma_operand` and
+`tcgen05_operand` read the descriptor layout code, stride and alignment
+from the storage instead of assuming 128 bytes. `tma_store!`,
+`commit_tma_stores`, `wait_tma_reads` and `wait_tma_stores` expose the
+bulk-group completion model. Two hardware rules found on GB10 and now
+checked: the inner origin starts a 16-byte chunk, and store origins are
+non-negative (loads zero-fill negative origins, stores reject them).
+
+Evidence, GB10: `test/gpu/tma.jl` executes loads for four element types,
+three row widths, both logical axes, three outer extents and three origins
+including zero-filled out-of-bounds ones, and stores for three element
+types with clipping past both far edges, comparing every element; the
+store path assembles to one tensor store, one commit and both waits with
+no calls. `test/host/hopper.jl` checks every plan's layout against the
+byte-level hardware rule; `test/host/tcgen05.jl` checks the structures and
+descriptor codes of 64- and 32-byte rows. Normalized SASS of every prior
+kernel is identical to the previous checkpoint. Tylo: 85,265 checks pass in
+3m30s on four workers.
+
+### Streaming attention as a driving consumer (2026-09-15)
+
+The streaming attention example was rewritten around the question of what
+Tylo needs to ship one competitive kernel on the GB10. Each CTA now owns
+128 queries of one head as two groups of four warps; Q is held in registers
+as A operands; K and V tiles of 64 keys arrive by TMA through four shared
+stages from rank-3 bindings (one matrix per head, padded V bounded by its
+logical key count), so tails need no scalar copies; the two groups alternate
+on the tensor pipe through two named barriers so one group's softmax
+overlaps the other's MMAs; B operands load in pairs with one `ldmatrix.x4`;
+the mask is optional and the masked path has no per-element branches; the
+epilogue stores through the aligned vector path.
+
+Two Tylo changes came out of it. `softmax_update`, `softmax_normalize` and
+their element operations select instead of branching and evaluate `exp2` of
+a scaled argument: a per-element branch around a full-precision `exp` cost
+2,878 cycles per 64-key update in isolation, 547 afterwards. TMA bindings
+take rank-3 arrays and a `bounds` keyword.
+
+Evidence, GB10 at the 0.9 GHz the SM sustains under this load: the
+`mma.sync` micro-benchmark reaches 45 TFLOPS with one warp per
+sub-partition; cuBLAS BF16 GEMM reaches 43. The kernel reaches 23.3
+TFLOPS on 1024 queries × 1024 keys × 16 heads unmasked (184 µs) and 26.2 on
+4096² × 4 heads, against
+the original schedule's 3 TFLOPS on the single-head 2048² case and the
+materialized cuBLAS baseline's 3.8 on the same 16-head case. Single-head
+cases below 2048 queries occupy a fraction of the 48 SMs and gain less. The
+runtime test covers masks, tails, empty keys, padded V, heads and graph
+replay; the assembly test pins the instruction counts of the loop. Tylo:
+85,312 checks pass in 3m22s on four workers.

@@ -152,6 +152,10 @@ dimensions and its launch grid.
 - `GlobalTile` and `SharedTile` borrow typed LLVM pointers. Their layouts
   count elements; pointer access converts to bytes. Global coordinates are
   widened before offset arithmetic to support allocations larger than 4 GiB.
+  A third argument, `Val(align)`, declares that the pointer and every
+  non-unit stride are multiples of `align` bytes; fragment loads and stores
+  then vectorize up to that width, and windows keep the declaration only at
+  aligned origins. The default is the element size.
 - `Fragment` holds immutable values and explicit ownership. MMA operands
   retain instruction-specific packing. Neither is an addressable local array;
   register indexing stays static.
@@ -173,8 +177,15 @@ injectivity. The caller must also provide aligned pointers and keep the
 allocations alive. Copy groups are per thread; `wait_copies` is not a CTA
 barrier and is not a readiness proof for an independently owned object.
 
-`MMAAtom` describes an instruction by its operand ownerships; `load_a` and
-`load_b` load instruction-compatible shared tiles into typed fragments.
+`MMAAtom` describes an instruction by its operand ownerships. `CopyAtom`
+describes the 8×8 `ldmatrix`/`stmatrix` matrix copies the same way, by the
+row each lane addresses and the two units each lane holds. `load_fragment`
+and `store!` derive the copy of any 32-lane ownership from those tables:
+blocks along the shared layout's static unit-stride axis, plain or
+transposed, grouped into `.x1`/`.x2`/`.x4` instructions, with the words
+permuted into the fragment's slot order; `validate_copy(ownership, T,
+layout)` checks the addressed rows on the host. `load_a` and `load_b` are
+that load with the atom's operand ownership.
 `TiledMMA` repeats this atom over a warp arrangement and a per-warp grid.
 It reuses A/B operands across those repetitions. All participating lanes
 must execute collectively with compatible views; types do not prove that

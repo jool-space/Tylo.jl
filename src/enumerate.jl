@@ -242,3 +242,146 @@ function window_plan(o, origin::Tuple{Int,Int}, shape::Tuple{Int,Int})
     ownership === nothing && return nothing
     (; slots, ownership)
 end
+
+# Matrix copies: cover a 32-lane ownership with the 8×8 blocks of a
+# `CopyAtom`. Coordinates are converted to memory coordinates (rows along
+# the non-contiguous axis, 16-bit units along the contiguous one) so the
+# same derivation serves K-major and MN-major storage of either operand.
+_contiguous_axis(::Type) = nothing
+function _contiguous_axis(::Type{Layouts.Layout{S,D}}) where {S,D}
+    D <: Tuple && length(D.parameters) == 2 || return nothing
+    unit = findall(p -> p === Layouts.StaticInt{1},collect(D.parameters))
+    length(unit) == 1 ? unit[1] : nothing
+end
+_contiguous_axis(::Type{Layouts.Composition{F,L}}) where {F,L} = _contiguous_axis(L)
+_contiguous_axis(::Type{Layouts.Window{S,L,O}}) where {S,L,O} = _contiguous_axis(L)
+
+"""
+    MatrixCopyPlan
+
+The derived decomposition of a 32-lane ownership into `CopyAtom` blocks.
+`trans` selects the transposed instruction, `axis` is the logical axis that
+memory stores contiguously, `per_unit` the elements per 16-bit unit, `grid`
+the block counts along memory rows and columns, and `words[b]` the
+fragment word (1-based) that block `b` transfers, with blocks numbered
+column-major over the grid. Consecutive blocks group into instructions of
+up to four matrices.
+"""
+struct MatrixCopyPlan
+    trans::Bool
+    axis::Int
+    per_unit::Int
+    grid::Tuple{Int,Int}
+    words::Vector{Int}
+end
+_matrix_pattern(trans,t,e) = trans ? (2(t%4)+e,t÷4) : (t÷4,2(t%4)+e)
+
+"""
+    matrix_copy_plan(ownership, T, axis) -> MatrixCopyPlan or nothing
+
+Cover a 32-lane ownership of `T` elements with 8×8 `ldmatrix`/`stmatrix`
+blocks, given the logical `axis` that memory stores contiguously. Every
+lane must hold complete words of adjacent elements along that axis, every
+block must be held by the same two units of every lane, and those units
+must follow the atom's register pattern, plain or transposed. Otherwise
+there is no plan and scalar accesses remain the correct route.
+"""
+function matrix_copy_plan(o,::Type{T},axis::Int) where T
+    axis in (1,2) || throw(ArgumentError("choose logical axis 1 or 2"))
+    _thread_count(o) == 32 || return nothing
+    bits = _element_bits(T)
+    bits in (8,16) || return nothing
+    per = 16 ÷ bits
+    table = ownership_table(o)
+    slots = size(table,2)
+    slots % 2per == 0 || return nothing
+    nunits = slots ÷ per
+    units = Matrix{Tuple{Int,Int}}(undef,32,nunits)
+    for t in 1:32, u in 1:nunits
+        first = table[t,per*(u-1)+1]
+        first[axis] % per == 0 || return nothing
+        for j in 1:per-1
+            c = table[t,per*(u-1)+1+j]
+            c[axis] == first[axis]+j && c[3-axis] == first[3-axis] || return nothing
+        end
+        units[t,u] = (first[3-axis],first[axis] ÷ per)
+    end
+    rows, cols = Int(size(o)[3-axis]), Int(size(o)[axis]) ÷ per
+    rows % 8 == 0 && cols % 8 == 0 || return nothing
+    grid = (rows÷8,cols÷8)
+    inside(t,br,bc) = [u for u in 1:nunits if 8br <= units[t,u][1] < 8br+8 && 8bc <= units[t,u][2] < 8bc+8]
+    for trans in (false,true)
+        words = Int[]
+        fits = true
+        for bc in 0:grid[2]-1, br in 0:grid[1]-1
+            us = inside(1,br,bc)
+            length(us) == 2 && us[2] == us[1]+1 && isodd(us[1]) &&
+                all(inside(t,br,bc) == us for t in 2:32) || (fits = false; break)
+            all(units[t+1,us[1]+e] == (8br,8bc) .+ _matrix_pattern(trans,t,e) for t in 0:31, e in 0:1) ||
+                (fits = false; break)
+            push!(words,(us[1]+1)÷2)
+        end
+        fits && allunique(words) && length(words) == nunits÷2 &&
+            return MatrixCopyPlan(trans,axis,per,grid,words)
+    end
+    nothing
+end
+"Consecutive block ranges, each one instruction of up to four matrices."
+function _matrix_groups(n)
+    groups = UnitRange{Int}[]
+    start = 1
+    while start <= n
+        width = n-start+1 >= 4 ? 4 : n-start+1 >= 2 ? 2 : 1
+        push!(groups,start:start+width-1)
+        start += width
+    end
+    groups
+end
+
+"""
+    validate_copy(ownership, T, layout)
+
+Check on the host that the matrix copy derived for a 32-lane `ownership`
+over a shared `layout` addresses whole, contiguous, 16-byte aligned rows for
+every lane. Throws when no copy derives or a row is broken; returns `nothing`.
+"""
+function validate_copy(o,::Type{T},l::Layouts.AbstractLayout) where T
+    axis = _contiguous_axis(typeof(l))
+    axis === nothing && throw(ArgumentError("the layout type has no static unit-stride axis"))
+    map(Int,size(l)) == map(Int,size(o)) || throw(DimensionMismatch("ownership and layout shapes differ"))
+    plan = matrix_copy_plan(o,T,axis)
+    plan === nothing && throw(ArgumentError("no matrix copy covers this ownership"))
+    for group in _matrix_groups(length(plan.words)), lane in 0:31
+        c = _matrix_address(Val(first(group)-1),Val(length(group)),Val(plan.grid[1]),Val(axis),Val(8plan.per_unit),lane)
+        _check_vector(l,c,axis,Val(8plan.per_unit),T)
+    end
+    nothing
+end
+
+"""
+    vector_plan(ownership, T, axis, align) -> (; width, groups) or nothing
+
+Group each thread's slots into vectors of `width` bytes (16, 8 or 4) that
+are contiguous along logical `axis` and start at coordinates whose byte
+offset is a multiple of the width, identically on every thread, given a tile
+alignment of `align` bytes. The widest such grouping wins; `nothing` when
+even the narrowest multi-element vector does not fit.
+"""
+function vector_plan(o,::Type{T},axis::Int,align::Int) where T
+    axis in (1,2) || throw(ArgumentError("choose logical axis 1 or 2"))
+    table = ownership_table(o)
+    threads, slots = size(table)
+    for width in (16,8,4)
+        width <= align || continue
+        k = width ÷ sizeof(T)
+        k >= 2 && slots % k == 0 || continue
+        groups = [collect(g:g+k-1) for g in 1:k:slots]
+        fits = all(begin
+            c0 = table[t,g[1]]
+            (c0[axis]*sizeof(T)) % width == 0 &&
+                all(table[t,g[j]] == (axis == 1 ? (c0[1]+j-1,c0[2]) : (c0[1],c0[2]+j-1)) for j in 2:k)
+        end for t in 1:threads, g in groups)
+        fits && return (; width, groups)
+    end
+    nothing
+end

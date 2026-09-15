@@ -13,11 +13,15 @@ inputs.
 ## What the comparison checks
 
 The default and quarter-publication variants assemble for SM100a, SM103a,
-and SM100f. Checks compare PTX operation counts for TMEM load/store widths,
-waits, fences, MMA, barrier arrivals/initialization, and global vector stores.
-The kernel entry must not materialize its register tuples as local arrays.
-The complete kernel machine-code section must also match byte for byte.
-Debug/source metadata outside the executable section may differ.
+and SM100f. Checks compare PTX operation counts for TMEM load/store widths, waits, fences,
+MMA, commits, barrier arrivals/initialization, and global vector stores, and
+require that neither kernel has an exception path and that the entry does
+not materialize its register tuples as local arrays. The tiled kernel's
+machine code must not be larger than the reference's; it is currently about
+17% smaller, because the atom's descriptor arithmetic lets the compiler keep
+the descriptor's high word constant. Byte-identical machine code was the gate
+while only loads, correction and epilogue were replaced; see the validation
+page for the recorded differences.
 
 On B200/B300 the suite also compares both implementations bit for bit and
 against the reference's CPU attention calculation. Cases include strong
