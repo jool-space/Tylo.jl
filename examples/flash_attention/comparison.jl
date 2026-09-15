@@ -73,7 +73,11 @@ end
                 @test count(spelling,codes[1].ptx) <= count(spelling,codes[2].ptx)
             end
         end
-        @test count("tcgen05.mma",codes[2].ptx) == 128
+        # Julia 1.10 sometimes unrolls the K loop only partially (80 instead
+        # of 128, depending on what the worker compiled before); 1.11+ always
+        # unrolls it fully.
+        mmas = count("tcgen05.mma",codes[2].ptx)
+        @test VERSION >= v"1.11" ? mmas == 128 : mmas in (80,128)
     end
 end
 

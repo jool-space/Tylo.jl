@@ -9,7 +9,7 @@ makedocs(;
     sitename="Tylo.jl",
     format=Documenter.HTML(;
         prettyurls=get(ENV, "CI", "false") == "true",
-        canonical="https://jool-space.github.io/Tylo.jl",
+        canonical="https://docs.jool.space/Tylo.jl",
         edit_link="main",
         assets=String[],
     ),
@@ -32,5 +32,7 @@ makedocs(;
 
 deploydocs(;
     repo="github.com/jool-space/Tylo.jl",
+    deploy_repo="github.com/jool-space/docs",
     devbranch="main",
+    dirname="Tylo.jl",
 )

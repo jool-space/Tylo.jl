@@ -16,9 +16,6 @@ Static = "aedffcd0-7271-4cad-89d0-dc628f76c6d3"
 [weakdeps]
 CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
 
-[sources]
-PTX = {rev = "main", url = "https://github.com/jool-space/PTX.jl"}
-
 [extensions]
 CUDACoreExt = "CUDACore"
 
@@ -27,6 +24,6 @@ Adapt = "4"
 BFloat16s = "0.6"
 CUDACore = "6.2"
 Microfloats = "0.2"
-PTX = "0.1"
+PTX = "0.0.1"
 Static = "1"
 julia = "1.10"

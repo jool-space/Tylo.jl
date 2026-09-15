@@ -3,6 +3,7 @@
 using CUDACore.GPUCompiler: CompilerJob, methodinstance
 isdefined(@__MODULE__, :TestTargets) || include(joinpath(@__DIR__, "targets.jl"))
 using .TestTargets
+include(joinpath(@__DIR__, "coverage.jl"))
 
 # Explicit ownership patterns reused across host and device tests.
 @inline local_fragment(data::NTuple{N}) where N = Fragment(data,Tylo.Layouts.LocalOwnership{N,2}())

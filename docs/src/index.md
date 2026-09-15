@@ -83,7 +83,8 @@ From this checkout, host tests need no GPU:
 julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
 ```
 
-The GPU environment expects a sibling `../PTX` checkout and Julia 1.10 or later:
+The GPU environment expects the jool registry (which provides PTX) and Julia 1.10
+or later:
 
 ```sh
 julia --project=. -e 'using Pkg; Pkg.instantiate(; workspace=true)'
@@ -91,7 +92,8 @@ julia --project=test test/runtests.jl --jobs=4
 julia --project=test examples/gemm/run.jl 65 97 73
 ```
 
-Current local checks use Julia 1.13. Host compatibility is declared from Julia
-1.10; recent local host checks used 1.11 and 1.13. For the datacenter
+Current local checks use Julia 1.13. Compatibility is declared from Julia 1.10;
+the full suite also passes on 1.10.12 and 1.11.9 (Julia 1.10 unrolls the
+FlashAttention K loop only partially, which the comparison accounts for). For the datacenter
 attention comparison, assembly artifacts, and documentation build instructions,
 see [Current status and validation](validation.md).

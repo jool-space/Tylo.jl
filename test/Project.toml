@@ -9,9 +9,5 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Tylo = "845906dd-ae2b-43fc-b595-f8c9a7396ab9"
 
-[sources]
-PTX = {rev = "main", url = "https://github.com/jool-space/PTX.jl"}
-Tylo = {path = ".."}
-
 [compat]
 ParallelTestRunner = "2.6"

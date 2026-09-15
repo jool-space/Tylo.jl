@@ -1,6 +1,6 @@
 # Tylo
 
-[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://jool-space.github.io/Tylo.jl/dev/)
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://docs.jool.space/Tylo.jl/dev/)
 [![Build Status](https://github.com/jool-space/Tylo.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/jool-space/Tylo.jl/actions/workflows/CI.yml)
 
 Composable tile programming for NVIDIA GPUs in Julia.
