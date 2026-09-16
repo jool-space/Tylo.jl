@@ -10,4 +10,5 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Tylo = "845906dd-ae2b-43fc-b595-f8c9a7396ab9"
 
 [compat]
+BFloat16s = "0.6.2"
 ParallelTestRunner = "2.6"
