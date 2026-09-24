@@ -11,7 +11,7 @@ bindings.
 |:--|:--|:--|
 | `src/Tylo.jl` | Public bindings, file ordering and device-operation declarations | `Project.toml` for extension triggers |
 | `src/tuples.jl` | Internal range-to-tuple expansion with inlined scalar calls | `test/host/tuples.jl`, `test/gpu/tuples.jl` |
-| `src/elements.jl` | Element widths and the FP8 element types (Microfloats twins with `cvt.rn.satfinite` semantics) | `test/host/elements.jl` |
+| `src/elements.jl` | Element widths, the Microfloats FP8 element types and `convert_element`, the saturating conversion through Microfloats' funnel | `test/host/elements.jl` |
 | `src/layouts/layouts.jl`, `src/layouts/` | Affine coordinate maps, static notation, composition, swizzles and windows | `test/host/layouts.jl`, `test/host/layout_macro.jl` |
 | `src/memory.jl` | Typed global/shared pointers plus storage layout and a declared alignment; address-unit conversion | `test/host/memory.jl`, `test/gpu/vectors.jl`, `test/gpu/gemm.jl` |
 | `src/fragments.jl`, `src/arrayops.jl` | Local values plus ownership, generic scalar broadcast, axis views and supported reductions/windows | `test/host/arrayops.jl`, `test/gpu/arrayops.jl` |
@@ -20,7 +20,7 @@ bindings.
 | `src/rows.jl`, `src/ptx/rows.jl` | Generated reductions from derived plans; warp shuffle bindings | `test/host/rows.jl`, `test/gpu/rows.jl` |
 | `src/copy.jl`, `src/ptx/copy.jl` | Vector copy assignment, structural validation, full and bounded copies; derived `ldmatrix`/`stmatrix` loads and stores of fragments | `test/gpu/boundaries.jl`, `test/gpu/atoms.jl` |
 | `src/copyatoms.jl` | `CopyAtom` register and address ownerships of the 8×8 matrix copy instructions | `test/host/copy.jl` |
-| `src/mma.jl`, `src/ptx/mma.jl` | `MMAAtom` operand ownerships, tiling, instruction bindings, generic loads/stores and same-lane conversion | `test/gpu/atoms.jl`, `test/gpu/gemm.jl`, `test/gpu/operand_a.jl` |
+| `src/mma.jl`, `src/ptx/mma.jl` | `MMAAtom` and block-scaled `ScaledMMAAtom` operand ownerships, tiling, instruction bindings, generic loads/stores and same-lane conversion | `test/gpu/atoms.jl`, `test/gpu/scaled_atoms.jl`, `test/gpu/gemm.jl`, `test/gpu/operand_a.jl` |
 | `src/tma.jl`, `src/ptx/tma.jl`, `ext/CUDACoreExt.jl` | TMA tiles over element widths and swizzle rows, the canonical swizzled storage and its structural recognition, loads, stores, descriptor preparation and launch/lifetime binding | `test/host/hopper.jl`, `test/host/tcgen05.jl`, `test/gpu/tma.jl` |
 | `src/wgmma.jl`, `src/ptx/wgmma.jl` | Warpgroup plan, shared descriptors, partial accumulators and register-dependent completion | `test/gpu/wgmma.jl` |
 | `src/tmem.jl`, `src/ptx/ptx.jl` | TMEM address mapping, transfer partitions, pending loads and packed stores | `test/host/tmem.jl`, `test/gpu/tmem_views.jl`, `test/gpu/tmem.jl` |

@@ -472,3 +472,43 @@ cases below 2048 queries occupy a fraction of the 48 SMs and gain less. The
 runtime test covers masks, tails, empty keys, padded V, heads and graph
 replay; the assembly test pins the instruction counts of the loop. Tylo:
 85,312 checks pass in 3m22s on four workers.
+
+### FP8 elements on Microfloats' conversion funnel (2026-09-21)
+
+Tylo's two FP8 twin types are gone. The element types are Microfloats'
+`Float8_E4M3FN` and `Float8_E5M2`, re-exported, so FP8 arrays made by other
+packages feed atoms without a reinterpret. What the twins existed for, the
+`cvt.rn.satfinite` policy, is now a property of the conversion:
+`convert_element` rounds to nearest even and saturates whatever policy the
+type declares, and stores of FP32 accumulators to FP8 tiles use it.
+
+`pack(T, f)` converts all lanes of a fragment in one call of Microfloats 0.2.7's
+vector funnel, and `unpack(F, p)` is new and widens packed FP8 to `Float16`,
+`BFloat16`, `Float32` or `Float64`. In a kernel compiled for a target with
+the instructions each becomes one native `cvt` per two lanes
+(`cvt.rn.satfinite.e4m3x2.{f32,f16x2,bf16x2}`, `cvt.rn.{f16x2,bf16x2}.e4m3x2`),
+with no calls and no local memory; an sm_80 compile of the same kernel takes
+the generic path. `test/gpu/packing.jl` pins both and compares the device
+bits with the host for FP32, FP16 and BF16 sources, including infinities,
+saturating values and subnormals. The 134 PTX files of the atom and vector
+tests are identical to the previous ones apart from the type names.
+
+The work found a defect in Microfloats 0.2.7: its target gate compared
+symbols, which CUDACore 6.4 does not fold, so kernels kept the generic path
+next to the native instruction behind a runtime branch. Microfloats 0.2.8
+fixes it, and Tylo requires that version.
+
+The same batch adds the first block-scaled atom. `ScaledMMAAtom{(16,8,32)}`
+binds `mma.sync … kind::mxf8f6f4.block_scale.scale_vec::1X` for the four
+E4M3/E5M2 pairings with `Float8_E8M0FNU` scales: one instruction multiplies
+one MXFP8 block of 32 along K, so a K loop needs no dequantization. The ISA
+describes the scale selectors with figures only, so the ownerships of the two
+scale operands were measured on the GB10: a kernel gave every thread and
+byte of the scale registers its own exponent and the result named, for each
+row and column, the register it had read. Lanes `4q` and `4q+1` (or `4q+2`
+and `4q+3`) supply rows `q` and `q+8`, any lane of quad `q` supplies column
+`q`, and the byte selector picks one of four scales, which Tylo uses for four
+consecutive K blocks. `test/gpu/scaled_atoms.jl` multiplies four and eight
+blocks with random operands and scales against an FP64 oracle, exactly, for
+every pairing, and pins clean assembly for sm_121a and sm_120f.
+Tylo: 87,744 checks pass in 4m07s on four workers.

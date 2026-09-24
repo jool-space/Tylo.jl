@@ -51,11 +51,21 @@ Base.eltype(f::PackedFragment) = eltype(typeof(f))
 Convert logical values to `T` and pack adjacent local slots into register words.
 The one-argument form preserves the element type and all bits. Neither form
 moves data between threads or changes logical ownership. Supported element
-types are 8- and 16-bit: `BFloat16`, `Float16`, `Float8E4M3`, `Float8E5M2`,
+types are 8- and 16-bit: `BFloat16`, `Float16`, `Float8_E4M3FN`, `Float8_E5M2`,
 `Int8` and `UInt8`. A fragment must hold complete words.
+
+Conversion follows [`convert_element`](@ref). Microfloat destinations convert
+all lanes in one call of Microfloats' vector funnel, which a kernel lowers to
+one native `cvt` instruction per two lanes where the target has it, from
+`Float32`, `Float16` and `BFloat16` values alike.
 """
 @inline function pack(::Type{T}, f::Fragment) where T
-    pack(map(T, f))
+    pack(map(Base.Fix1(convert_element,T), f))
+end
+@inline pack(::Type{T}, f::Fragment{T}) where T<:Microfloat = pack(f)
+@inline function pack(::Type{T}, f::Fragment{S,N}) where {T<:Microfloat,S,N}
+    lanes = Microfloats.cvt(Microfloats.SVector{N,T}, f.data, RoundNearest, SAT)
+    pack(Fragment(Tuple(lanes), Layouts.layout(f)))
 end
 @generated function pack(f::Fragment{T,N}) where {T,N}
     _element_bits(T) in (8,16) || return :(throw(ArgumentError("packing supports 8- and 16-bit element types")))
@@ -70,7 +80,20 @@ end
     end
 end
 
-"Expose the logical typed values of a packed fragment without numerical conversion."
+"""
+    unpack(packed)
+    unpack(F, packed)
+
+Expose the logical typed values of a packed fragment without numerical
+conversion. With a wide floating-point type `F` (`Float16`, `BFloat16`,
+`Float32`, `Float64`), numerically widen packed Microfloat elements to `F`
+instead: exact, and one native `cvt` instruction per two lanes in a kernel
+whose target has it.
+"""
+@inline function unpack(::Type{F}, f::PackedFragment{T}) where {F<:Microfloats.WideFloat,T<:Microfloat}
+    lanes = unpack(f)
+    Fragment(Tuple(Microfloats.cvt(Microfloats.SVector{length(lanes.data),F}, lanes.data)), Layouts.layout(f))
+end
 @generated function unpack(f::PackedFragment{T,W}) where {T,W}
     per = 32 ÷ _element_bits(T)
     U = _carrier(T)

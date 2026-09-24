@@ -36,7 +36,7 @@ _warp_shapes(::Val{8}) = ((16,8,16),(16,8,32))
 _warp_shapes(::Val{16}) = ((16,8,8),(16,8,16))
 _warp_shapes(::Val{32}) = ((16,8,4),(16,8,8))
 _warp_shapes(::Val) = ()
-_input_family(::Type{T}) where T<:Union{Float8E4M3,Float8E5M2} = :fp8
+_input_family(::Type{T}) where T<:Union{Float8_E4M3FN,Float8_E5M2} = :fp8
 _input_family(::Type{T}) where T<:Union{Int8,UInt8} = :int8
 _input_family(::Type{T}) where T<:Union{BFloat16,Float16} = :fp16
 _input_family(::Type{Float32}) = :tf32
@@ -96,6 +96,89 @@ generating, so it is a constant inside kernels.
 _words(atom::MMAAtom,role::OperandRole) =
     _register_count(operand_layout(atom,role)) * _element_bits(eltype(atom,role)) ÷ 32
 
+"The row scales of a [`ScaledMMAAtom`](@ref)'s A operand: `m×4`, (row, K block)."
+struct ScaleA <: OperandRole end
+"The column scales of a [`ScaledMMAAtom`](@ref)'s B operand: `4×n`, (K block, column)."
+struct ScaleB <: OperandRole end
+
+"""
+    ScaledMMAAtom{(m,n,k),TA,TB,TS}()
+    ScaledMMAAtom((16,8,32), TA, TB=TA, TS=Float8_E8M0FNU)
+
+A block-scaled warp `mma.sync`: `D = (A .* scale_A) * (B .* scale_B) + C` with
+one scale per row of A and one per column of B. With K = 32 one instruction
+multiplies one microscaling block, so a K loop over a matrix quantized in
+blocks of 32 along K (MXFP8: `Float8_E4M3FN` or `Float8_E5M2` elements with
+`Float8_E8M0FNU` power-of-two scales) accumulates the full product with no
+dequantization. The accumulator is `Float32`.
+
+A, B and the accumulator have the ownerships of the dense
+`MMAAtom{(m,n,k),TA,TB,Float32}`. The atom adds two operands,
+[`ScaleA`](@ref) and [`ScaleB`](@ref): each thread holds one register of four
+scales, those of its row (or column) for four consecutive K blocks, and the
+`block` argument of [`mma`](@ref) selects one of the four. Their ownerships
+were measured on a GB10: lanes `4q` and `4q+1` hold the scales of rows `q` and
+`q+m÷2`, the instruction can equally read them from lanes `4q+2` and `4q+3`,
+and every lane of quad `q` may supply the scale of column `q`. The layouts
+therefore replicate: every lane loads the scales of a row and of a column,
+and no lane is special.
+"""
+struct ScaledMMAAtom{S,TA,TB,TS}
+    function ScaledMMAAtom{S,TA,TB,TS}() where {S,TA,TB,TS}
+        _check_scaled_atom(S,TA,TB,TS)
+        new{S,TA,TB,TS}()
+    end
+end
+Base.@constprop :aggressive @inline ScaledMMAAtom(shape::NTuple{3,Int},::Type{TA},::Type{TB}=TA,
+        ::Type{TS}=Float8_E8M0FNU) where {TA,TB,TS} = ScaledMMAAtom{shape,TA,TB,TS}()
+@inline function _check_scaled_atom(S,TA,TB,TS)
+    S === (16,8,32) || throw(ArgumentError("block-scaled MMA multiplies one 32-element block: shape (16,8,32)"))
+    _input_family(TA) === :fp8 && _input_family(TB) === :fp8 ||
+        throw(ArgumentError("block-scaled MMA takes FP8 operands"))
+    TS === Float8_E8M0FNU || throw(ArgumentError("block scales are Float8_E8M0FNU"))
+    nothing
+end
+"The dense atom with the same A, B and accumulator operands."
+dense_atom(::ScaledMMAAtom{S,TA,TB}) where {S,TA,TB} = MMAAtom{S,TA,TB,Float32}()
+Base.size(::ScaledMMAAtom{S}) where S = S
+threads(::ScaledMMAAtom) = 32
+Base.eltype(a::ScaledMMAAtom,role::Union{OperandA,OperandB,Accumulator}) = eltype(dense_atom(a),role)
+Base.eltype(::ScaledMMAAtom{S,TA,TB,TS},::Union{ScaleA,ScaleB}) where {S,TA,TB,TS} = TS
+"Scales held in one scale register: those of four consecutive K blocks."
+const SCALE_BLOCKS = 4
+
+_operand_layout(a::ScaledMMAAtom,role::Union{OperandA,OperandB,Accumulator}) = _operand_layout(dense_atom(a),role)
+# (m, 4): scale of row r and block s at r + m*s. Lane bit 0 selects the upper
+# half of the rows, lane bit 1 replicates, the quad is the row within a half.
+function _operand_layout(a::ScaledMMAAtom{S},::ScaleA) where S
+    m,n,k = S
+    _ownership((m,SCALE_BLOCKS),((2,m÷2),(2,0),(8,1)),((SCALE_BLOCKS,m),))
+end
+# (4, n): scale of block s and column c at s + 4c. All four lanes of quad c
+# replicate column c.
+function _operand_layout(a::ScaledMMAAtom{S},::ScaleB) where S
+    m,n,k = S
+    _ownership((SCALE_BLOCKS,n),((4,0),(8,SCALE_BLOCKS)),((SCALE_BLOCKS,1),))
+end
+@generated operand_layout(a::A,::R) where {A<:ScaledMMAAtom,R<:OperandRole} = :($(_operand_layout(A(),R())))
+@inline zero_accumulator(a::ScaledMMAAtom) = zero_accumulator(dense_atom(a))
+
+"""
+    load_scale_a(atom, tile, lane)
+    load_scale_b(atom, tile, lane)
+
+Load one register of block scales from a shared tile: `m×4` row scales for A
+(row, K block) or `4×n` column scales for B (K block, column), four
+consecutive K blocks each. A scale matrix over more blocks is windowed four
+blocks at a time, so its block count is padded to a multiple of four.
+"""
+function load_scale_a end
+@doc (@doc load_scale_a) load_scale_b
+function load_scale_b end
+"Block-scaled atoms with an instruction binding."
+scaled_instruction_atoms() = copy(_SCALED_INSTRUCTION_ATOMS)
+const _SCALED_INSTRUCTION_ATOMS = ScaledMMAAtom[]
+
 """
     load_a(atom, tile, lane)
     load_b(atom, tile, lane)
@@ -106,7 +189,14 @@ Load an atom's A (m×k) or B (k×n) operand from a shared tile through
 function load_a end
 @doc (@doc load_a) load_b
 function load_b end
-"Collectively multiply operands and return the updated immutable accumulator."
+"""
+    mma(atom, a, b, accumulator)
+    mma(scaled_atom, a, b, accumulator, scale_a, scale_b, block)
+
+Collectively multiply operands and return the updated immutable accumulator.
+A [`ScaledMMAAtom`](@ref) also takes its two scale registers and the zero-based
+`block` (0 to 3) that selects which of their four scales applies.
+"""
 function mma end
 "Atoms with an instruction binding."
 instruction_atoms() = copy(_INSTRUCTION_ATOMS)

@@ -59,6 +59,55 @@ end
     end
 end
 
+# FP8 packing converts through Microfloats' funnel. A kernel compiled for a
+# target with the instructions gets one native `cvt` per two lanes, for
+# packing from FP32, FP16 and BF16 values and for widening back; older targets
+# run the same generic code as the host. Either way the bits match the host.
+function fp8_packing_kernel!(words,wide,back,input,::Type{T},::Val{W}) where {T,W}
+    t = Int32(threadIdx().x)-Int32(1)
+    f = Fragment(ntuple(i -> @inbounds(input[4W*t+i]),Val(4W)),Tylo.Layouts.LocalOwnership{4W,2}())
+    packed = pack(T,f)
+    a = unpack(eltype(wide),packed)
+    b = unpack(Float32,packed)
+    Tylo.@rtuple(1:W) do i
+        @inbounds words[W*t+i] = packed.data[i]
+    end
+    Tylo.@rtuple(1:4W) do i
+        @inbounds wide[4W*t+i] = a.data[i]
+        @inbounds back[4W*t+i] = b.data[i]
+    end
+    nothing
+end
+@testset "FP8 register packing" begin
+    names = Dict(Float8_E4M3FN=>"e4m3x2",Float8_E5M2=>"e5m2x2",Float32=>"f32",Float16=>"f16x2",BFloat16=>"bf16x2")
+    for T in (Float8_E4M3FN,Float8_E5M2), S in (Float32,Float16,BFloat16), H in (Float16,BFloat16), w in (1,4)
+        tt = Tuple{CuDeviceVector{UInt32,1},CuDeviceVector{H,1},CuDeviceVector{Float32,1},CuDeviceVector{S,1},Type{T},Val{w}}
+        begin # assembly checks
+            native = compile_kernel(fp8_packing_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
+            save_code("fp8-packing-$(T)-$(S)-$(H)-w$w",native)
+            body = entry_body(native.ptx)
+            @test count("cvt.rn.satfinite.$(names[T]).$(names[S])",body) == 2w
+            @test occursin("cvt.rn.$(names[H]).$(names[T])",body)
+            @test !occursin(".local .",body)
+            @test !occursin(r"\bcall",body)
+            # sm_80 has none of these instructions and takes the generic path.
+            generic = compile_kernel(fp8_packing_kernel!,tt;arch=CUDACore.SMVersion(8,0),threads=32)
+            @test !occursin(names[T],entry_body(generic.ptx))
+        end
+        if runtime_supported(@__FILE__)
+            values = S.(randn(MersenneTwister(91),Float32,32*4w) .* 40f0)
+            values[1:8] .= S.(Float32[0,-0.0,Inf,-Inf,447.9,6f4,-1f9,1f-40])
+            input = CuArray(values)
+            words = CUDACore.zeros(UInt32,32w); wide = CUDACore.zeros(H,32*4w); back = CUDACore.zeros(Float32,32*4w)
+            @cuda threads=32 fp8_packing_kernel!(words,wide,back,input,T,Val(w))
+            expected = map(x -> Tylo.convert_element(T,x),values)
+            @test reinterpret(UInt8,Array(words)) == reinterpret.(UInt8,expected)
+            @test Array(wide) == H.(expected)
+            @test Array(back) == Float32.(expected)
+        end
+    end
+end
+
 # A complete allocation/load/store/readback/deallocation path for every exposed
 # .32x32b width and logical element type. All addresses are warp-uniform.
 function typed_tmem_kernel!(out,input,::Val{W},::Val{A}) where {W,A}

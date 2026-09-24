@@ -185,6 +185,20 @@ transposed, grouped into `.x1`/`.x2`/`.x4` instructions, with the words
 permuted into the fragment's slot order; `validate_copy(ownership, T,
 layout)` checks the addressed rows on the host. `load_a` and `load_b` are
 that load with the atom's operand ownership.
+`ScaledMMAAtom` is the block-scaled `mma.sync` of consumer Blackwell
+(`.kind::mxf8f6f4`): `D = (A .* scale_A) * (B .* scale_B) + C` with FP8
+operands and one `Float8_E8M0FNU` power-of-two scale per row of A and per
+column of B. With K = 32 one instruction multiplies one microscaling block,
+so a K loop over MXFP8 operands accumulates the product without
+dequantizing anything. A, B and the accumulator keep the dense atom's
+ownerships. The scales are two more operands, `ScaleA` (16×4) and `ScaleB`
+(4×8): a lane's register holds the four scales of its row or column for four
+consecutive K blocks, and the `block` argument of `mma` selects one. These
+ownerships replicate (lane bit 1 of a row scale and both lane bits of a column
+scale have zero stride), which is what the instruction's thread selectors
+permit; they were measured on a GB10 by giving every thread and byte its own
+exponent.
+
 `TiledMMA` repeats this atom over a warp arrangement and a per-warp grid.
 It reuses A/B operands across those repetitions. All participating lanes
 must execute collectively with compatible views; types do not prove that

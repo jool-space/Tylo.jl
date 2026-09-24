@@ -80,9 +80,9 @@ end
     @test validate_copy(a,BFloat16,@Layout (16,16) (1,16)) === nothing
     @test validate_copy(b,BFloat16,@Layout (16,8) (1,16)) === nothing
     @test validate_copy(b,BFloat16,Tylo.Layouts.window(@Layout((64,32),(1,64)),(16,8),Val((16,8)))) === nothing
-    fp8 = MMAAtom((16,8,32),Float8E4M3)
-    @test validate_copy(operand_layout(fp8,OperandA()),Float8E4M3,@Layout (16,32) (32,1)) === nothing
-    @test validate_copy(operand_layout(fp8,OperandA()),Float8E4M3,compose(Swizzle{1,4,1}(),@Layout (16,32) (32,1))) === nothing
+    fp8 = MMAAtom((16,8,32),Float8_E4M3FN)
+    @test validate_copy(operand_layout(fp8,OperandA()),Float8_E4M3FN,@Layout (16,32) (32,1)) === nothing
+    @test validate_copy(operand_layout(fp8,OperandA()),Float8_E4M3FN,compose(Swizzle{1,4,1}(),@Layout (16,32) (32,1))) === nothing
     @test_throws ArgumentError validate_copy(a,BFloat16,@Layout (16,16) (17,1))   # rows not 16-byte aligned
     @test_throws ArgumentError validate_copy(a,BFloat16,compose(Swizzle{1,2,1}(),l)) # swizzle breaks 8-element rows
     @test_throws ArgumentError validate_copy(a,BFloat16,@Layout (16,16) (2,32))   # no unit stride

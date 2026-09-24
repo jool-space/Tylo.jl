@@ -8,7 +8,7 @@ using Tylo.Layouts: @Layout, Layout, Swizzle, compose, window, static
     @test operand_layout(a,Accumulator()) == @Layout((128,128),(1,128))
     @test operand_layout(Tcgen05MMA((128,64,16),Float16),Accumulator()) == @Layout((128,64),(1,128))
     @test Tcgen05MMA((128,64,8),Float32) isa Tcgen05MMA
-    @test Tcgen05MMA((128,256,32),Float8E4M3,Float8E5M2,Float32) isa Tcgen05MMA
+    @test Tcgen05MMA((128,256,32),Float8_E4M3FN,Float8_E5M2,Float32) isa Tcgen05MMA
     @test Tcgen05MMA((128,32,32),Int8,UInt8,Int32) isa Tcgen05MMA
     @test_throws ArgumentError Tcgen05MMA((128,128,8),BFloat16)      # K is 256 bits
     @test_throws ArgumentError Tcgen05MMA((64,128,16),BFloat16)      # M=64 layout not described
@@ -32,7 +32,7 @@ end
         PTX.tcgen05_instr_desc_f16bf16_f32(m=128,n=64,ab_dtype=:tf32)
     @test Tylo.instruction_descriptor(Tcgen05MMA((128,32,32),Int8,UInt8,Int32)) ==
         PTX.tcgen05_instr_desc_i8(m=128,n=32,a_dtype=:s8,b_dtype=:u8)
-    @test Tylo.instruction_descriptor(Tcgen05MMA((128,256,32),Float8E4M3,Float8E5M2,Float32)) ==
+    @test Tylo.instruction_descriptor(Tcgen05MMA((128,256,32),Float8_E4M3FN,Float8_E5M2,Float32)) ==
         PTX.tcgen05_instr_desc_f8f6f4(m=128,n=256,a_dtype=:e4m3,b_dtype=:e5m2)
 end
 
@@ -58,9 +58,9 @@ end
     @test structure(typeof(v),BFloat16,1) == (;major=:MN,swizzle_bytes=128,leading_bytes=16384,stride_bytes=1024,row_elements=64,groups=2)
     @test structure(typeof(window(q,(Int32(128),Int32(0)),Val((128,128)))),BFloat16,2).major === :K
     # Element widths change the swizzle's unchanged low bits and the row extent.
-    @test structure(typeof(compose(Swizzle{3,4,3}(),@Layout((128,128),(128,1)))),Float8E4M3,2).major === :K
+    @test structure(typeof(compose(Swizzle{3,4,3}(),@Layout((128,128),(128,1)))),Float8_E4M3FN,2).major === :K
     @test structure(typeof(compose(Swizzle{3,2,3}(),@Layout((128,32),(32,1)))),Float32,2).major === :K
-    @test structure(typeof(compose(Swizzle{3,3,3}(),@Layout((128,128),(128,1)))),Float8E4M3,2) === nothing
+    @test structure(typeof(compose(Swizzle{3,3,3}(),@Layout((128,128),(128,1)))),Float8_E4M3FN,2) === nothing
     # Narrower rows: 64- and 32-byte swizzles with eight-row groups packed
     # (stride 8W) or spread, and MN-major groups one row wide.
     @test structure(typeof(compose(Swizzle{2,3,3}(),@Layout((128,32),(32,1)))),BFloat16,2) ==

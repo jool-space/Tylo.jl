@@ -1,14 +1,14 @@
 # Instruction bindings for the atoms Tylo implements. Every other operation
 # on the atom derives from its ownership layouts. The table is the dense
 # warp-MMA surface PTX.jl exposes for these element types.
-const _PTX_NAMES = Dict(BFloat16=>"bf16",Float16=>"f16",Float32=>"tf32",Float8E4M3=>"e4m3",
-                        Float8E5M2=>"e5m2",Int8=>"s8",UInt8=>"u8",Int32=>"s32")
+const _PTX_NAMES = Dict(BFloat16=>"bf16",Float16=>"f16",Float32=>"tf32",Float8_E4M3FN=>"e4m3",
+                        Float8_E5M2=>"e5m2",Int8=>"s8",UInt8=>"u8",Int32=>"s32")
 _mma_instruction(::Type{A}) where A<:MMAAtom = nothing
 for (shape,TA,TB,TC) in vcat(
         [((16,8,k),T,T,Float32) for k in (8,16) for T in (BFloat16,Float16)],
         [((16,8,k),Float16,Float16,Float16) for k in (8,16)],
         [((16,8,k),Float32,Float32,Float32) for k in (4,8)],
-        [((16,8,k),TA,TB,Float32) for k in (16,32) for TA in (Float8E4M3,Float8E5M2) for TB in (Float8E4M3,Float8E5M2)],
+        [((16,8,k),TA,TB,Float32) for k in (16,32) for TA in (Float8_E4M3FN,Float8_E5M2) for TB in (Float8_E4M3FN,Float8_E5M2)],
         [((16,8,k),TA,TB,Int32) for k in (16,32) for TA in (Int8,UInt8) for TB in (Int8,UInt8)])
     m,n,k = shape
     tc = _PTX_NAMES[TC] === "tf32" ? "f32" : _PTX_NAMES[TC]
@@ -55,6 +55,50 @@ _accumulator_carrier(::Type{Float16}) = UInt32
         d = $instruction(_as_words(a),_as_words(b),_to_carrier($carrier,c.data))
         $result
     end
+end
+
+# Block-scaled atoms: `.kind::mxf8f6f4` with one UE8M0 scale per row and column
+# (`.scale_vec::1X`). The byte selectors take the block; the thread selectors
+# are zero, which the replicated scale ownerships make as good as any.
+_scaled_mma_instruction(::Type{A}) where A<:ScaledMMAAtom = nothing
+for TA in (Float8_E4M3FN,Float8_E5M2), TB in (Float8_E4M3FN,Float8_E5M2)
+    name = "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32." *
+           "$(_PTX_NAMES[TA]).$(_PTX_NAMES[TB]).f32.ue8m0"
+    instruction = Meta.parse("ptx\"$name\"")
+    @eval _scaled_mma_instruction(::Type{ScaledMMAAtom{(16,8,32),$TA,$TB,Float8_E8M0FNU}}) = $instruction
+    push!(_SCALED_INSTRUCTION_ATOMS,ScaledMMAAtom{(16,8,32),TA,TB,Float8_E8M0FNU}())
+end
+@generated function mma(atom::A,a::FA,b::FB,c::FC,sa::FSA,sb::FSB,block::Integer) where {A<:ScaledMMAAtom,FA,FB,FC,FSA,FSB}
+    instruction = _scaled_mma_instruction(A)
+    instruction === nothing && return :(throw(ArgumentError("no instruction binding for this block-scaled MMA atom")))
+    atom_instance = A()
+    for (F,role) in ((FA,OperandA()),(FB,OperandB()),(FC,Accumulator()),(FSA,ScaleA()),(FSB,ScaleB()))
+        F <: Union{Fragment,PackedFragment} || return :(throw(ArgumentError("MMA operands are fragments")))
+        eltype(F) === eltype(atom_instance,role) ||
+            return :(throw(ArgumentError("MMA operand element type differs from the atom")))
+        L = F.parameters[3]
+        same_distribution(_static_instance(L),operand_layout(atom_instance,role)) ||
+            return :(throw(ArgumentError("MMA operand ownership differs from the atom")))
+    end
+    quote
+        Base.@inline
+        @boundscheck 0 <= block < SCALE_BLOCKS || throw(BoundsError())
+        byte = block % UInt16
+        d = $instruction(_as_words(a),_as_words(b),c.data,sa.data[1],byte,0x0000,sb.data[1],byte,0x0000)
+        Fragment(d,operand_layout(atom,Accumulator()))
+    end
+end
+Base.@propagate_inbounds load_a(a::ScaledMMAAtom,t::SharedTile,lane::Integer) = load_a(dense_atom(a),t,lane)
+Base.@propagate_inbounds load_b(a::ScaledMMAAtom,t::SharedTile,lane::Integer) = load_b(dense_atom(a),t,lane)
+Base.@propagate_inbounds function load_scale_a(a::ScaledMMAAtom,t::SharedTile,lane::Integer)
+    size(t) == (size(a)[1],SCALE_BLOCKS) || throw(DimensionMismatch("A scales must be $(size(a)[1])×$SCALE_BLOCKS"))
+    eltype(t) === eltype(a,ScaleA()) || throw(ArgumentError("scale tile element type differs from the atom"))
+    load_fragment(operand_layout(a,ScaleA()),t,lane)
+end
+Base.@propagate_inbounds function load_scale_b(a::ScaledMMAAtom,t::SharedTile,lane::Integer)
+    size(t) == (SCALE_BLOCKS,size(a)[2]) || throw(DimensionMismatch("B scales must be $SCALE_BLOCKS×$(size(a)[2])"))
+    eltype(t) === eltype(a,ScaleB()) || throw(ArgumentError("scale tile element type differs from the atom"))
+    load_fragment(operand_layout(a,ScaleB()),t,lane)
 end
 
 # Operand loads derive from the atom's ownership: ldmatrix where the
@@ -150,7 +194,7 @@ end
         c = Layouts.coordinate(Layouts.layout(acc),tid,Val(e))
         q = (Int(origin[1])+Int(c[1]),Int(origin[2])+Int(c[2]))
         if _valid_coordinate(dst,q)
-            unsafe_store!(pointer(dst,q),T(acc.data[e+1]))
+            unsafe_store!(pointer(dst,q),convert_element(T,acc.data[e+1]))
         end
     end
     nothing

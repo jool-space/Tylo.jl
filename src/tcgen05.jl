@@ -65,8 +65,8 @@ first `mma` with `accumulate=false` initializes it.
 _tcgen05_dtype(::Type{BFloat16}) = :bf16
 _tcgen05_dtype(::Type{Float16}) = :f16
 _tcgen05_dtype(::Type{Float32}) = :tf32
-_tcgen05_dtype(::Type{Float8E4M3}) = :e4m3
-_tcgen05_dtype(::Type{Float8E5M2}) = :e5m2
+_tcgen05_dtype(::Type{Float8_E4M3FN}) = :e4m3
+_tcgen05_dtype(::Type{Float8_E5M2}) = :e5m2
 _tcgen05_dtype(::Type{Int8}) = :s8
 _tcgen05_dtype(::Type{UInt8}) = :u8
 """

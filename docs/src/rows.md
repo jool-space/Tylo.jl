@@ -245,9 +245,15 @@ fragments of those element types. Instructions consume two 16-bit or four
 8-bit values in each 32-bit register operand. `pack(T, f)` performs conversion
 and constructs that packed representation; `pack(f)` preserves every bit of
 already typed 8- or 16-bit values. `unpack` returns an ordinary `Fragment{T}`
-without conversion. The 8-bit element types are `Int8`, `UInt8` and Tylo's
-`Float8E4M3` and `Float8E5M2`, whose FP32 conversions round to nearest even
-and saturate to the largest finite value, as `cvt.rn.satfinite` does.
+without conversion; `unpack(F, p)` numerically widens packed FP8 elements to
+`Float16`, `BFloat16`, `Float32` or `Float64`. The 8-bit element types are
+`Int8`, `UInt8` and Microfloats' `Float8_E4M3FN` and `Float8_E5M2`, which Tylo
+re-exports. Tylo converts into them through [`Tylo.convert_element`](@ref):
+round to nearest even and saturate to the largest finite value, as
+`cvt.rn.satfinite` does, whatever overflow policy the type declares. The
+conversions go through Microfloats' conversion funnel, so a kernel compiled
+for a target with the instructions gets one native `cvt` per two values, from
+FP32, FP16 and BF16 sources and back, and the same bits as the host.
 
 ```jldoctest
 julia> f = Fragment((1f0, -2f0), Tylo.Layouts.LocalOwnership{2,2}());

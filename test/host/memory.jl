@@ -41,8 +41,8 @@ end
     @test Tylo.vector_plan(operand_layout(atom,OperandA()),BFloat16,2,16) == (;width=4,groups=[[1,2],[3,4],[5,6],[7,8]])
     @test Tylo.vector_plan(operand_layout(atom,OperandB()),BFloat16,1,4) == (;width=4,groups=[[1,2],[3,4]])
     @test Tylo.vector_plan(operand_layout(atom,OperandA()),BFloat16,2,2) === nothing
-    fp8 = MMAAtom((16,8,32),Float8E4M3)
-    @test Tylo.vector_plan(operand_layout(fp8,OperandA()),Float8E4M3,2,16).width == 4
+    fp8 = MMAAtom((16,8,32),Float8_E4M3FN)
+    @test Tylo.vector_plan(operand_layout(fp8,OperandA()),Float8_E4M3FN,2,16).width == 4
     # Lane-local rows vectorize to the declared width; striped rows never do.
     @test Tylo.vector_plan(LocalOwnership{4,2}(),Float32,2,16) == (;width=16,groups=[[1,2,3,4]])
     @test Tylo.vector_plan(LocalOwnership{4,2}(),Float32,2,8) == (;width=8,groups=[[1,2],[3,4]])

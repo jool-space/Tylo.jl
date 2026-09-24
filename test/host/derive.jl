@@ -20,7 +20,7 @@ end
 atom = MMAAtom((16,8,16),BFloat16)
 tiled(w,r) = Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val(w),Val(r),Val(16))))
 ownerships = Any[operand_layout(atom,OperandA()),operand_layout(atom,OperandB()),operand_layout(atom,Accumulator()),
-    operand_layout(MMAAtom((16,8,32),Float8E4M3),OperandA()),operand_layout(MMAAtom((16,8,8),Float32),OperandB()),
+    operand_layout(MMAAtom((16,8,32),Float8_E4M3FN),OperandA()),operand_layout(MMAAtom((16,8,8),Float32),OperandB()),
     LocalOwnership{3,2}(),LocalOwnership{4,1}(),StripedOwnership{2,1}(),StripedOwnership{5,2}(),
     Tylo.TmemTransfer{(32,4),2}(),Tylo.TmemTransfer{(8,32),1}(),
     Tylo.WGMMAOwnership{8}(),Tylo.WGMMAOwnership{24}(),Tylo.WGMMAOwnership{64}(),

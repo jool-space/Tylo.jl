@@ -89,12 +89,12 @@ words_type(atom) = Tylo._element_bits(eltype(atom,OperandA())) == 32 ? Float32 :
 # so the comparison exposes ownership mistakes rather than rounding.
 oracle_inputs(rng,::Type{T},dims) where T<:Union{BFloat16,Float16} = T.(rand(rng,-4:4,dims...) ./ 4)
 oracle_inputs(rng,::Type{Float32},dims) = Float32.(rand(rng,-8:8,dims...) ./ 8)  # exact in TF32
-oracle_inputs(rng,::Type{T},dims) where T<:Union{Float8E4M3,Float8E5M2} = T.(rand(rng,-4:4,dims...) ./ 2)
+oracle_inputs(rng,::Type{T},dims) where T<:Union{Float8_E4M3FN,Float8_E5M2} = T.(rand(rng,-4:4,dims...) ./ 2)
 oracle_inputs(rng,::Type{Int8},dims) = rand(rng,Int8(-8):Int8(7),dims...)
 oracle_inputs(rng,::Type{UInt8},dims) = rand(rng,UInt8(0):UInt8(15),dims...)
 oracle_expected(a,b,::Type{TC}) where TC = TC.(Float64.(a)*Float64.(b))
 oracle_expected(a,b,::Type{Int32}) = Int32.(Int64.(a)*Int64.(b))
-oracle_archs(atom) = eltype(atom,OperandA()) in (Float8E4M3,Float8E5M2) ?
+oracle_archs(atom) = eltype(atom,OperandA()) in (Float8_E4M3FN,Float8_E5M2) ?
     (CUDACore.SMVersion(8,9),CUDACore.SMVersion(12,1,:arch)) :
     (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
 oracle_name(atom) = join((string(eltype(atom,OperandA())),string(eltype(atom,OperandB())),

@@ -18,7 +18,7 @@ end
 cases() = ((operand_layout(MMAAtom((16,8,16),BFloat16),Accumulator()),Float32),
            (LocalOwnership{4,2}(),Float32),
            (operand_layout(MMAAtom((16,8,16),BFloat16),OperandA()),BFloat16),
-           (operand_layout(MMAAtom((16,8,32),Float8E4M3),OperandA()),Float8E4M3))
+           (operand_layout(MMAAtom((16,8,32),Float8_E4M3FN),OperandA()),Float8_E4M3FN))
 
 @testset "Vector access assembly" begin
     for (ownership,T) in cases(), A in (sizeof(T),16)
