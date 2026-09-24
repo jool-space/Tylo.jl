@@ -17,6 +17,37 @@ include("algebra.jl")
 
 function layout end
 
+# ── Display ─────────────────────────────────────────────────────────────
+# Layouts print as the `@Layout` call that builds them: static leaves as
+# numbers, runtime leaves interpolated with `$`.
+_show_tree(io::IO,x::StaticInt) = print(io,Int(x))
+_show_tree(io::IO,x::Integer) = print(io,'$',x)
+function _show_tree(io::IO,t::Tuple)
+    print(io,'(')
+    for (i,x) in enumerate(t)
+        i > 1 && print(io,", ")
+        _show_tree(io,x)
+    end
+    length(t) == 1 && print(io,',')
+    print(io,')')
+end
+function Base.show(io::IO,l::Layout)
+    print(io,"@Layout ")
+    _show_tree(io,shape(l)); print(io,' ')
+    _show_tree(io,strides(l))
+end
+Base.show(io::IO,::Swizzle{B,M,S}) where {B,M,S} = print(io,"Swizzle{",B,", ",M,", ",S,"}()")
+Base.show(io::IO,c::Composition) = (print(io,"compose("); show(io,c.outer); print(io,", "); show(io,c.inner); print(io,')'))
+function Base.show(io::IO,w::Window{S}) where S
+    print(io,"window("); show(io,w.parent); print(io,", ")
+    _show_tree(io,w.origin); print(io,", ",S,')')
+end
+function Base.show(io::IO,o::Ownership{S}) where S
+    print(io,"Ownership(",S,", ")
+    show(io,o.mapping)
+    print(io,')')
+end
+
 # ── Ownership coordinates ───────────────────────────────────────────────
 # A static ownership's coordinate is evaluated through its projections onto
 # the two logical axes, worked out while generating: each axis is a sum of

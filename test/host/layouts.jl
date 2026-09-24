@@ -119,3 +119,11 @@ end
     @test Tylo._byte_offset(Val(3),BFloat16,small,(Int32(2),Int32(3))) === Int32(134)
     @test Tylo._byte_offset(Val(3),BFloat16,small,(static(2),static(3))) == 134
 end
+
+@testset "Display in constructor syntax" begin
+    @test repr(@Layout((4, 8), (8, 1))) == "@Layout (4, 8) (8, 1)"
+    @test repr(Layout((Int32(10), static(8)), (static(1), Int32(16)))) == "@Layout (\$10, 8) (1, \$16)"
+    @test repr(Ownership((2, 4))) == "Ownership((2, 4), @Layout (1, 8) (0, 1))"
+    @test repr(Fragment((1f0, 2f0), Ownership((2, 1)))) == "Fragment((1.0f0, 2.0f0), Ownership((2, 1), @Layout (1, 2) (0, 1)))"
+    @test repr(compose(Swizzle{3,3,3}(), @Layout((8, 64), (64, 1)))) == "compose(Swizzle{3, 3, 3}(), @Layout (8, 64) (64, 1))"
+end

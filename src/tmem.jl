@@ -189,3 +189,9 @@ PendingLoad(::Type{T}, words::NTuple{N,UInt32}, ownership::L) where {T,N,L} = Pe
         throw(DimensionMismatch("TMEM store ownership differs from transfer"))
     nothing
 end
+
+function Base.show(io::IO,t::TmemTile{T}) where T
+    print(io,"TmemTile(",T,", 0x",string(t.address;base=16,pad=8),", ")
+    show(io,t.layout)
+    print(io,')')
+end

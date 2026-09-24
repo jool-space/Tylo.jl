@@ -145,3 +145,11 @@ end
     Fragment(@rtuple(i -> op(f.data[i]), 1:N), Layouts.layout(f))
 end
 
+
+function Base.show(io::IO,f::Fragment)
+    print(io,"Fragment(")
+    show(io,f.data)
+    print(io,", ")
+    show(io,Layouts.layout(f))
+    print(io,')')
+end

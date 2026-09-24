@@ -257,3 +257,11 @@ _affine(::Type{Layouts.Window{S,L,O}}) where {S,L,O} = _affine(L)
 @inline _slot_address(t::MemoryTile{T},base,c::Tuple{Int,Int}) where T =
     base + _linear(t.layout)(c)*sizeof(T)
 
+
+function Base.show(io::IO,t::MemoryTile{T,AS,L,A,B}) where {T,AS,L,A,B}
+    B === Nothing || print(io,"bound(")
+    print(io,AS == 1 ? "GlobalTile(" : "SharedTile(",T,", 0x",string(reinterpret(UInt64,t.ptr);base=16),", ")
+    show(io,t.layout)
+    print(io,", ",A,')')
+    B === Nothing || (print(io,", "); show(io,t.bounds); print(io,')'))
+end

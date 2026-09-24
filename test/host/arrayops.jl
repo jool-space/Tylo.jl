@@ -45,13 +45,15 @@ end
     @test only(@inferred (x -> minimum(x;dims=2))(f)) === -2f0
     @test only(sum(f;dims=2)) === 1f0
     @test (f .- maximum(f;dims=2)).data == (-5f0,-3f0,0f0)
-    for dims in (:,0,3,(),(1,2),(2,2),2.0,(2.0,))
+    for dims in (0,3,(),(1,2),(2,2),2.0,(2.0,))
         @test_throws ArgumentError sum(f;dims)
     end
     # Reducing the lane axis is a warp collective; its plan exists, and GPU tests run it.
     @test Tylo.reduction_plan(Tylo.Layouts.layout(f),1).bits == [0,1,2,3,4]
-    @test_throws ArgumentError sum(f)
-    @test_throws ArgumentError sum(Float64.(f);dims=2)
+    @test_throws ArgumentError sum(f)                    # shuffles run on the device
+    @test only(sum(Float64.(f);dims=2)) === 1.0          # within a thread, any type
+    @test_throws ArgumentError sum(Float64.(f);dims=1)   # across lanes, 32-bit words
+    @test only(sum(Fragment((1f0,2f0,3f0,4f0),Ownership((2,2))))) === 10f0
     @test isequal(only(maximum(local_fragment((1f0,NaN32));dims=2)),NaN32)
     @test only(maximum(local_fragment((-Inf32,-Inf32));dims=2)) === -Inf32
 

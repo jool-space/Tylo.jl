@@ -36,6 +36,8 @@ coordinate held by this thread.
     plan = reduction_plan(o,Axis)
     plan === nothing &&
         return :(throw(ArgumentError("no reduction implementation for this ownership layout and axis")))
+    isempty(plan.bits) || (isbitstype(T) && sizeof(T) == 4) ||
+        return :(throw(ArgumentError("a reduction across lanes shuffles 32-bit values; convert first")))
     results = map(plan.groups) do group
         local_value = length(group) == 1 ? :(data[$(only(group))]) :
             :(_local_reduce(op,($([:(data[$e]) for e in group]...),)))

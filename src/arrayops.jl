@@ -135,18 +135,17 @@ Base.@constprop :aggressive @inline _reduction_axis_argument(d::Integer) =
     d == 1 || d == 2 ? Int(d) : throw(ArgumentError("unsupported reduction axis for a fragment"))
 Base.@constprop :aggressive @inline _reduction_axis_argument(d::Tuple{Integer}) = _reduction_axis_argument(only(d))
 @inline _reduction_axis_argument(d) = throw(ArgumentError("unsupported reduction axis for a fragment"))
+# The whole tile: one axis, then the other.
+Base.@constprop :aggressive @inline _fragment_reduce(operation, f, fragment::Fragment, ::Colon, init) =
+    _fragment_reduce(operation, identity, _fragment_reduce(operation, f, fragment, 2, nothing), 1, init)
 Base.@constprop :aggressive @inline function _fragment_reduce(operation, f, fragment::Fragment, dimensions, init)
     axis = _reduction_axis_argument(dimensions)
     layout = Layouts.layout(fragment)
     result = _reduced_ownership(layout, Val(axis))
     if init === nothing
         mapped = f === identity ? fragment : map(f, fragment)
-        eltype(mapped) === Float32 ||
-            throw(ArgumentError("fragment reductions currently require Float32 values"))
         Fragment(_reduce_values(operation, _register_values(mapped), layout, Val(axis)), result)
     else
-        eltype(init) === Float32 ||
-            throw(ArgumentError("fragment reductions currently require Float32 values"))
         _same_distribution(Layouts.layout(init), result) ||
             throw(DimensionMismatch("init must hold the reduced ownership"))
         Fragment(_reduce_values_init(operation, f, _register_values(fragment), layout, Val(axis), init.data), result)
@@ -182,8 +181,11 @@ end
     maximum([f,] fragment; dims, init)
     minimum([f,] fragment; dims, init)
 
-Reduce FP32 values over a logical axis, retaining a singleton dimension and
-explicit result ownership, after applying `f` to each value. Broadcast the
+Reduce over a logical axis (`dims=1` or `2`), or the whole tile
+(`dims=:`, the default), retaining singleton dimensions and explicit result
+ownership, after applying `f` to each value. Values reduced within a
+thread may have any type; values combined across lanes are shuffled as
+32-bit words, so they must be 32 bits wide. Broadcast the
 result back with ordinary dotted arithmetic, for example
 `fragment .- maximum(fragment; dims=2)`.
 

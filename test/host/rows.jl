@@ -59,3 +59,12 @@ end
         @test eltype(coords) == Tuple{Int32,Int32}
     end
 end
+
+@testset "Reductions of any type within a thread" begin
+    f = Fragment(Int32.((1,2,3,4,5,6)), Ownership((2,3)))
+    @test sum(f; dims=2).data == (Int32(9), Int32(12))
+    @test maximum(f; dims=1).data == (Int32(2), Int32(4), Int32(6))
+    h = Fragment(Float16.((1,2,3,4)), Ownership((1,4)))
+    @test only(sum(h; dims=2)) === Float16(10)
+    @test only(sum(abs2, h; dims=2, init=Fragment((Float16(1),), Ownership((1,1))))) === Float16(31)
+end

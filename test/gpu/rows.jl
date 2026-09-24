@@ -68,3 +68,25 @@ if runtime_supported(@__FILE__)
     end
 end
 end
+
+# Any 32-bit type crosses lanes; `dims=:` reduces the whole tile.
+function integer_row_probe!(out,input)
+    t=Int32(threadIdx().x)-Int32(1)
+    f=Fragment(ntuple(i -> @inbounds(input[3t+i]),Val(3)),lane_local(3,2))
+    total=only(sum(f))                     # every lane: the sum of all 96
+    column=maximum(f;dims=1)               # every lane: the column maxima
+    @inbounds out[4t+1]=total
+    ntuple(i -> (@inbounds out[4t+1+i]=column.data[i]),Val(3))
+    nothing
+end
+if runtime_supported(@__FILE__)
+    @testset "Integer reductions across lanes" begin
+        input=Int32.(rand(MersenneTwister(3),-1000:1000,96))
+        out=CUDACore.zeros(Int32,128)
+        @cuda threads=32 integer_row_probe!(out,CuArray(input))
+        host=reshape(Array(out),4,32)
+        rows=reshape(input,3,32)
+        @test all(==(sum(input)),host[1,:])
+        @test all(host[2:4,t] == vec(maximum(rows;dims=2)) for t in 1:32)
+    end
+end
