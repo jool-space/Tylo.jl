@@ -38,8 +38,7 @@ swizzle_bytes(::TMATile{T,S,A,W}) where {T,S,A,W} = W
 The canonical storage a TMA tile occupies: rows of the swizzle width along
 the inner axis, packed, with the matching hardware swizzle, as
 `Swizzle{B,M,3}` composed with the row layout. Offsets are elements. The
-same encoding is what `ldmatrix` loads, `wgmma_operand` and
-`tcgen05_operand` describe (see [`swizzled_structure`](@ref)).
+same encoding is what `ldmatrix` loads, `operand` describes (see [`swizzled_structure`](@ref)).
 """
 @inline function shared_layout(::TMATile{T,S,A,W}) where {T,S,A,W}
     row = Layouts.static(W ÷ sizeof(T))

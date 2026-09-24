@@ -9,7 +9,7 @@ Partials must divide k/16; total registers per thread must not exceed 128.
 Use `finish_mma` to sum partials after waiting. No allocation or CTA barrier.
 The sizes must be constants. The finished accumulator is a `Fragment` in
 `operand_layout(atom, Accumulator())`; A and B are shared-memory descriptors
-from [`wgmma_operand`](@ref), not registers.
+from [`operand`](@ref), not registers.
 """
 struct WGMMAAtom{T,N,K,P} <: Atom
     function WGMMAAtom{T,N,K,P}() where {T,N,K,P}
@@ -55,17 +55,6 @@ struct WGMMAOperand{P,Role}
     descriptor::UInt64
 end
 
-"""
-    wgmma_operand(plan, role, tile, origin=(Int32(0),Int32(0)))
-
-Borrow an operand from canonical K-major swizzled shared storage (see
-[`swizzled_structure`](@ref)). Origins are LOGICAL; A is (M,K), B is (K,N).
-Non-K origins must be multiples of eight, K origins multiples of 16; the
-plan's K fits one swizzle row and the whole plan fits the tile. Root
-storage is aligned to eight swizzle rows. Bounds/alignment checks may be
-elided with `@inbounds` once proven.
-"""
-function wgmma_operand end
 
 """
     mma_async(plan, a, b, accumulator)

@@ -16,8 +16,8 @@
     end
     ptx"fence.proxy.async.shared::cta"()
     sync_threads()
-    @inbounds ad = wgmma_operand(p,OperandA(),a,(Int32(64),k0))
-    @inbounds bd = wgmma_operand(p,OperandB(),b,(k0,Int32(8)))
+    @inbounds ad = operand(p,OperandA(),a,(Int32(64),k0))
+    @inbounds bd = operand(p,OperandB(),b,(k0,Int32(8)))
     c = finish_mma(wait_mma(mma_async(p,ad,bd,zero_accumulator(p))))
     if Normalize
         scores = c .* (1f0/128f0)

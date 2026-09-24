@@ -14,7 +14,7 @@ layout of packed 32-, 64- or 128-byte rows, which is Tylo's TMA storage;
 see [`swizzled_structure`](@ref)), or a `TmemTile` for A; the
 accumulator is a `TmemTile` whose layout is [`operand_layout`](@ref) with
 `Accumulator`. Descriptors and the instruction descriptor derive
-from those encodings ([`tcgen05_operand`](@ref)); `mma` steps the operands
+from those encodings ([`operand`](@ref)); `mma` steps the operands
 along K through their layouts, so K-major and MN-major storage share one
 path. Completion is asynchronous: [`commit_mma`](@ref) arrives on an
 mbarrier once every prior instruction of this thread has finished.
@@ -105,7 +105,7 @@ _k_axis(::Type{OperandB}) = 1
 A shared-memory A or B operand of a [`Tcgen05Atom`](@ref): the descriptor of
 the tile's base, the tile's layout and the logical origin. `mma` derives each
 K step's descriptor from the layout, so the same operand serves K-major and
-MN-major storage. Construct with [`tcgen05_operand`](@ref).
+MN-major storage. Construct with [`operand`](@ref).
 """
 struct Tcgen05Operand{P,Role,Major,T,L}
     base::UInt64              # descriptor of the tile's base
@@ -114,17 +114,6 @@ struct Tcgen05Operand{P,Role,Major,T,L}
     origin::Tuple{Int32,Int32}
 end
 Base.size(o::Tcgen05Operand) = size(o.layout)
-"""
-    tcgen05_operand(atom, role, tile::SharedTile, origin=(Int32(0),Int32(0)))
-
-Borrow an A (M,K) or B (K,N) operand from a canonical swizzled shared
-tile. The tile's static layout is recognized structurally (see
-[`swizzled_structure`](@ref)); the origin's coordinates are multiples of
-eight, and the non-K extent from the origin covers the atom's M or N. The
-root storage is aligned to eight swizzle rows (1024 bytes for 128-byte
-rows). Bounds checks may be elided with `@inbounds`.
-"""
-function tcgen05_operand end
 """
     commit_mma(barrier)
 

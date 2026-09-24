@@ -199,6 +199,24 @@ Base.@propagate_inbounds function load_fragment(a::Atom,role::OperandRole,t::Mem
     load_fragment(o,t,thread)
 end
 """
+    operand(atom, role, tile::SharedTile, origin=(Int32(0), Int32(0)))
+    operand(operand, origin)
+
+An A (M×K) or B (K×N) operand of an atom that reads shared memory itself
+([`WGMMAAtom`](@ref), [`Tcgen05Atom`](@ref)): a descriptor of `tile` at the
+logical `origin`, where register atoms use [`load_fragment`](@ref). The
+tile's static layout must be a canonical swizzled encoding, recognized
+structurally (see [`swizzled_structure`](@ref)); WGMMA reads K-major
+storage, tcgen05 K-major or MN-major. Origins are multiples of eight along
+the non-K axis and start a 16-byte chunk along K, and the atom's extent
+from the origin fits the tile; the root storage is aligned to eight
+swizzle rows (1024 bytes for 128-byte rows). These are checked unless
+elided with `@inbounds`. The second form moves a tcgen05 operand to another
+origin without rebuilding its descriptor.
+"""
+function operand end
+
+"""
     mma(atom, a, b, accumulator)
     mma(scaled_atom, a, b, accumulator, scale_a, scale_b, block)
 

@@ -9,7 +9,7 @@
     s === nothing && return :(throw(ArgumentError("the shared operand is not a canonical swizzled tile; see swizzled_structure")))
     :($s)
 end
-Base.@propagate_inbounds function tcgen05_operand(a::A,role::Role,t::SharedTile{T,L},
+Base.@propagate_inbounds function operand(a::A,role::Role,t::SharedTile{T,L},
         origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {A<:Tcgen05Atom,Role<:Union{OperandA,OperandB},T,L}
     T === eltype(a,role) || throw(ArgumentError("operand tile element type differs from the atom"))
     s = _operand_structure(L,T,Role)
@@ -52,12 +52,8 @@ end
     l = _static_instance(L <: Layouts.Window ? L.parameters[2] : L)
     :($(_axis_pairs(Layouts.shape(l)[Axis],strides(l)[Axis])[1][1]))
 end
-"""
-    tcgen05_operand(operand::Tcgen05Operand, origin)
-
-The same tile at another logical origin, without recomputing the descriptor.
-"""
-Base.@propagate_inbounds function tcgen05_operand(o::Tcgen05Operand{P,Role,Major,T,L},origin::Tuple{Int32,Int32}) where {P,Role,Major,T,L}
+# The same tile at another origin, from the base descriptor.
+Base.@propagate_inbounds function operand(o::Tcgen05Operand{P,Role,Major,T,L},origin::Tuple{Int32,Int32}) where {P,Role,Major,T,L}
     kaxis = _k_axis(Role)
     chunk = Int32(16 ÷ sizeof(T))
     m,n,k = size(P())

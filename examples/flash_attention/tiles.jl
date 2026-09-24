@@ -86,17 +86,17 @@ const FAB_ROWS_T_LAYOUT = Tylo.Layouts.compose(Tylo.Layouts.Swizzle{3,3,3}(),
 @inline fab_bf16_tile(ptr,layout) = Tylo.SharedTile(reinterpret(Core.LLVMPtr{BFloat16,3},ptr),layout)
 @inline function fab_mma_operands(q_ptr, kv_ptr)
     # The kernel's dynamic shared memory is 1024-byte aligned by construction.
-    q = @inbounds Tylo.tcgen05_operand(FAB_QK_ATOM,Tylo.OperandA(),fab_bf16_tile(q_ptr,FAB_ROWS_LAYOUT))
-    k = @inbounds Tylo.tcgen05_operand(FAB_QK_ATOM,Tylo.OperandB(),fab_bf16_tile(kv_ptr,FAB_ROWS_T_LAYOUT))
-    v = @inbounds Tylo.tcgen05_operand(FAB_PV_ATOM,Tylo.OperandB(),fab_bf16_tile(kv_ptr + FAB_TILE_BYTES,FAB_ROWS_LAYOUT))
+    q = @inbounds Tylo.operand(FAB_QK_ATOM,Tylo.OperandA(),fab_bf16_tile(q_ptr,FAB_ROWS_LAYOUT))
+    k = @inbounds Tylo.operand(FAB_QK_ATOM,Tylo.OperandB(),fab_bf16_tile(kv_ptr,FAB_ROWS_T_LAYOUT))
+    v = @inbounds Tylo.operand(FAB_PV_ATOM,Tylo.OperandB(),fab_bf16_tile(kv_ptr + FAB_TILE_BYTES,FAB_ROWS_LAYOUT))
     (; q, k, v)
 end
 
 @inline function fab_qk_mma(::Val{STAGE}, ::Val{KIDX}, tmem::UInt32, ops,
                              bars::BarrierSet) where {STAGE, KIDX}
     s = Tylo.accumulator(FAB_QK_ATOM,tmem + UInt32(STAGE*128))
-    a = @inbounds Tylo.tcgen05_operand(ops.q,(Int32(256STAGE),Int32(0)))
-    b = @inbounds Tylo.tcgen05_operand(ops.k,(Int32(0),Int32(512KIDX)))
+    a = @inbounds Tylo.operand(ops.q,(Int32(256STAGE),Int32(0)))
+    b = @inbounds Tylo.operand(ops.k,(Int32(0),Int32(512KIDX)))
     @inbounds Tylo.mma(FAB_QK_ATOM,s,a,b,FAB_HD,false)
     Tylo.commit_mma(bars.s_full[STAGE])
 end
@@ -116,7 +116,7 @@ end
         end
         Tylo.fence_after_thread_sync()
         a = @inbounds Tylo.window(p,(Int32(0),Int32(W*g)),(128,W))
-        b = @inbounds Tylo.tcgen05_operand(ops.v,(Int32(512VIDX + W*g),Int32(0)))
+        b = @inbounds Tylo.operand(ops.v,(Int32(512VIDX + W*g),Int32(0)))
         @inbounds Tylo.mma(FAB_PV_ATOM,o,a,b,W,!(first_accum & (g == 0)))
     end
     Tylo.commit_mma(bars.pv_done[STAGE])

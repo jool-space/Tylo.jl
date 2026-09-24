@@ -11,8 +11,8 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
        MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, mma, pack_operand_a,
        CopyAtom, copy_async!, commit_copies, wait_copies,
        TMATile, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes, tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores,
-       WGMMAAtom, wgmma_operand, mma_async, wait_mma, finish_mma,
-       Tcgen05Atom, tcgen05_operand, accumulator, commit_mma,
+       WGMMAAtom, operand, mma_async, wait_mma, finish_mma,
+       Tcgen05Atom, accumulator, commit_mma,
        reinterpret_tile, load_async, wait_load, store_async!, wait_stores,
        SoftmaxState, softmax_update, softmax_merge, softmax_normalize,
        Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU

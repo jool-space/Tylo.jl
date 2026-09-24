@@ -33,8 +33,8 @@ function tcgen05_gemm_kernel!(out,a_data,b_data,atom,variant::Val)
     base = @inbounds slot[1]
     d = accumulator(atom,base)
     if tid == Int32(0)
-        oa = @inbounds tcgen05_operand(atom,OperandA(),sa)
-        ob = @inbounds tcgen05_operand(atom,OperandB(),sb)
+        oa = @inbounds operand(atom,OperandA(),sa)
+        ob = @inbounds operand(atom,OperandB(),sb)
         @inbounds mma(atom,d,oa,ob,64,false)
         commit_mma(pointer(mbar))
     end

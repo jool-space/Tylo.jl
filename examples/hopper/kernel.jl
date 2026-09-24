@@ -42,8 +42,8 @@ function hopper_gemm_kernel!(out,a,b,plan,total_k::Int32,::Val{Stages}) where St
             parity = UInt32((i÷Int32(Stages))&Int32(1))
             while !ptx"mbarrier.try_wait.parity.shared.b64"(ready+slot*Int32(8),parity) end
             ptr = buffers+slot*Int32(bytes)
-            @inbounds ad = wgmma_operand(plan,OperandA(),shared_tile(a,ptr))
-            @inbounds bd = wgmma_operand(plan,OperandB(),shared_tile(b,ptr+transfer_bytes(a)))
+            @inbounds ad = operand(plan,OperandA(),shared_tile(a,ptr))
+            @inbounds bd = operand(plan,OperandB(),shared_tile(b,ptr+transfer_bytes(a)))
             acc = wait_mma(mma_async(plan,ad,bd,acc))
             ptx"mbarrier.arrive.shared.b64"(done+slot*Int32(8))
         end

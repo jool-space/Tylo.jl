@@ -12,7 +12,7 @@
     end
 end
 
-Base.@propagate_inbounds function wgmma_operand(p::WGMMAAtom{T,N,K},role::Role,
+Base.@propagate_inbounds function operand(p::WGMMAAtom{T,N,K},role::Role,
         t::SharedTile{T,L},origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {T,N,K,Role<:Union{OperandA,OperandB},L}
     # A/B compatibility is structural, even when bounds checks are elided.
     s = _operand_structure(L,T,Role)
