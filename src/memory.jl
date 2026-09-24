@@ -77,10 +77,17 @@ end
     window(tile, origin, shape)
 
 The `shape` sub-tile at a possibly runtime `origin`, addressing the same
-allocation. `shape` must be a constant tuple.
+allocation. `shape` must be a constant tuple. The window must lie inside
+the tile (checked unless elided with `@inbounds`), except along an axis
+with a bound (see [`bound`](@ref)), past which it may extend: its bound
+then says which of its elements exist.
 """
-Base.@constprop :aggressive Base.@propagate_inbounds window(t::MemoryTile{T,AS,L,A},o::Tuple,s::Tuple) where {T,AS,L,A} =
-    MemoryTile(t.ptr,Layouts.window(t.layout,o,s),Val(A),_shift_bounds(t.bounds,o))
+Base.@constprop :aggressive Base.@propagate_inbounds function window(t::MemoryTile{T,AS,L,A},o::Tuple,s::Tuple) where {T,AS,L,A}
+    @boundscheck _window_inside(t.bounds,size(t),o,s) || throw(BoundsError(t,(o,s)))
+    MemoryTile(t.ptr,Layouts._window_unchecked(t.layout,o,Val(map(Int,s))),Val(A),_shift_bounds(t.bounds,o))
+end
+@inline _window_inside(::Nothing,n,o,s) = all(map((n,x,w) -> 0 <= x && x <= n-w,n,o,s))
+@inline _window_inside(b::Tuple,n,o,s) = all(map((b,n,x,w) -> 0 <= x && (b !== nothing || x <= n-w),b,n,o,s))
 @inline _shift_bounds(::Nothing,o) = nothing
 @inline _shift_bounds(b::Tuple,o) = map(_shift,b,o)
 @inline _shift(::Nothing,o) = nothing
@@ -109,17 +116,19 @@ its own: the pointer advanced to that tile and a layout of the modes inside
 it. Along an axis whose mode is hierarchical, `shape` must cover whole inner
 modes; the tile then never carries into the outer modes, so no runtime
 division is needed to address it, which a `window` at an arbitrary origin
-could not promise. `shape` must be a constant.
+could not promise. `shape` must be a constant. The tile must lie inside `t` (checked unless
+elided with `@inbounds`), except along a bounded axis.
 
 A bounded parent (see [`bound`](@ref)) gives a bounded tile: the tile may
 then extend past the valid region, whose elements loads zero and stores
 skip.
 """
-Base.@constprop :aggressive @inline function Layouts.tile(t::MemoryTile{T,AS,L,A},shape::Tuple{Integer,Integer},
+Base.@constprop :aggressive Base.@propagate_inbounds function Layouts.tile(t::MemoryTile{T,AS,L,A},shape::Tuple{Integer,Integer},
         index::Tuple{Integer,Integer}) where {T,AS,L,A}
     inner, outer = _split_tile(t.layout,Val(map(Int,shape)))
     offset = _tile_offset(outer[1],index[1]) + _tile_offset(outer[2],index[2])
     origin = map((i,n) -> i*oftype(i,n),index,shape)
+    @boundscheck _window_inside(t.bounds,size(t),origin,shape) || throw(BoundsError(t,(index,shape)))
     # The parent's declaration covers the tile: runtime strides are multiples
     # of it, and the declaration narrows to the static outer strides.
     @inbounds MemoryTile(t.ptr + _widen(Val(AS),offset)*sizeof(T),inner,_tile_alignment(typeof(outer),T,Val(A)),

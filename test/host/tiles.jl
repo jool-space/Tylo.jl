@@ -136,3 +136,17 @@ end
     @test Tylo._only_thread(Ownership((8,8))) === Int32(0)
     @test_throws ArgumentError Tylo._only_thread(lane_local(4,2))
 end
+
+@testset "Windows and tiles are checked against the tile and its bounds" begin
+    t = GlobalTile(tptr(BFloat16,4096),Layout((Int32(40),static(24)),(static(1),Int32(40))),16)
+    @test_throws BoundsError window(t,(Int32(32),Int32(0)),(16,8))     # past the rows
+    @test_throws BoundsError tile(t,(16,8),(Int32(2),Int32(0)))
+    @test_throws ArgumentError window(t,(Int32(5),Int32(0)),(16,8))    # breaks the 16-byte declaration
+    @test size(window(t,(Int32(24),Int32(16)),(16,8))) == (16,8)
+    # A bounded axis may be exceeded: its bound says what exists.
+    b = bound(t,(Int32(37),nothing))
+    @test window(b,(Int32(32),Int32(0)),(16,8)).bounds == (Int32(5),nothing)
+    @test tile(b,(16,8),(Int32(2),Int32(1))).bounds == (Int32(5),nothing)
+    @test_throws BoundsError tile(b,(16,8),(Int32(0),Int32(3)))           # unbounded columns
+    @test_throws BoundsError window(b,(Int32(-8),Int32(0)),(16,8))
+end

@@ -48,26 +48,37 @@ end
     @test_throws ArgumentError TL.window(l,(0,0),(0,16))
 end
 
-@testset "Copy vector contracts" begin
+@testset "Copy vectors" begin
+    type(l) = typeof(l)
     for k in (16,32,64),axis in (1,2)
         s = axis == 1 ? (k,64) : (64,k)
         d = axis == 1 ? (1,k) : (k,1)
         plain = @Layout s d
         swiz = compose(Swizzle{trailing_zeros(k)-3,3,trailing_zeros(k)-3}(),plain)
-        src = @Layout $s $(axis == 1 ? (1,k+8) : (k+8,1))
-        plan = CopyPlan(s,128,axis)
-        @test validate_copy(plan,BFloat16,swiz,src) === nothing
-        @test validate_copy(plan,Float16,plain,src) === nothing
-        @test validate_copy(plan,BFloat16,plain,swiz) === nothing
+        # Runtime leading dimension, static unit stride: vectors are provable.
+        ld = k+8
+        src = axis == 1 ? @Layout($s,(1,$ld)) : @Layout($s,($ld,1))
+        o = distribute(s,128;vector=8,axis)
+        # One 16-byte cp.async per vector, through the swizzle and runtime strides.
+        for (dst,T) in ((swiz,BFloat16),(plain,Float16))
+            plan = Tylo.copy_plan(o,T,type(dst),16,type(src),16)
+            @test plan.width == 16 && length(plan.groups) == Tylo._register_count(o) ÷ 8
+        end
+        # A source declared element-aligned has no vectors; scalars remain.
+        @test Tylo.copy_plan(o,BFloat16,type(swiz),16,type(src),2) === nothing
+        @test Tylo.copy_plan(o,BFloat16,type(swiz),16,type(src),8).width == 8
     end
-    plan = CopyPlan((16,16),32,2)
-    l = Layout((16,16),(16,1))
-    @test_throws ArgumentError validate_copy(plan,BFloat16,l,Layout((16,16),(17,1)))
-    @test_throws ArgumentError validate_copy(plan,BFloat16,Layout((16,16),(0,1)),l)
-    @test_throws ArgumentError validate_copy(plan,BFloat16,l,Layout((16,16),(1,16)))
-    @test_throws DimensionMismatch validate_copy(plan,BFloat16,l,Layout((32,16),(16,1)))
-    @test_throws ArgumentError CopyPlan((16,16),7,2)
-    @test_throws MethodError CopyPlan((16,16),32,1.0)
+    # Contiguous along different axes: no common vector.
+    o = distribute((16,16),32;vector=8,axis=2)
+    @test Tylo.copy_plan(o,BFloat16,type(@Layout((16,16),(16,1))),16,type(@Layout((16,16),(1,16))),16) === nothing
+    # 32 vectors for 7 threads: one thread holds them all, six replicate.
+    @test Tylo.replica_mask(distribute((16,16),8;vector=8,axis=2)) == 0
+    @test Tylo._register_count(distribute((16,24),32;vector=8,axis=1)) == 24   # 48 vectors: 16 threads hold 3
+    @test Tylo.replica_mask(distribute((16,24),32;vector=8,axis=1)) == 16
+    @test_throws ArgumentError distribute((16,16),32;vector=3,axis=2)
+    @test_throws ArgumentError distribute((16,16),32;vector=8,axis=3)
+    # More threads than vectors: the rest replicate, and store once.
+    @test Tylo.replica_mask(distribute((8,64),128;vector=8,axis=2)) == 64
 end
 
 @testset "ISA ownership and typed MMA registers" begin

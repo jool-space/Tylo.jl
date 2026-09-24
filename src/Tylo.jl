@@ -5,11 +5,11 @@ using BFloat16s: BFloat16
 # The kernel-writing vocabulary is exported: layouts and ownerships, register
 # fragments, memory tiles, atoms with their operands and verbs, and the
 # per-hardware copy, MMA and completion operations.
-export Layouts, Layout, @Layout, Ownership, coordinate, compose, window,
+export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, window,
        Fragment, relayout, GlobalTile, SharedTile, TmemTile, tile, bound, load_fragment, store!,
        Atom, OperandA, OperandB, Accumulator, ScaleA, ScaleB, operand_layout,
        MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, mma, pack_operand_a,
-       CopyAtom, CopyPlan, copy_async!, commit_copies, wait_copies,
+       CopyAtom, copy_async!, commit_copies, wait_copies,
        TMATile, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes, tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores,
        WGMMAAtom, wgmma_operand, mma_async, wait_mma, finish_mma,
        Tcgen05Atom, tcgen05_operand, accumulator, commit_mma,
@@ -28,7 +28,7 @@ end
 include("tuples.jl")
 include("elements.jl")
 include("layouts/layouts.jl")
-import .Layouts: Layout, @Layout, Ownership, coordinate, compose, window, tile
+import .Layouts: Layout, @Layout, Ownership, distribute, coordinate, compose, window, tile
 include("fragments.jl")
 include("tmem.jl")
 include("memory.jl")

@@ -528,3 +528,21 @@ function vector_plan(o,::Type{T},::Type{ML},align::Int) where {T,ML}
     end
     nothing
 end
+
+"""
+    copy_plan(ownership, T, destination_type, destination_align, source_type, source_align) -> (; width, groups) or nothing
+
+The vectors of an asynchronous copy: the widest grouping of each thread's
+slots, 16, 8 or 4 bytes wide, that is contiguous and aligned in both the
+source and the destination tile with the same slots in the same order, so
+that one `cp.async` moves each group. `nothing` when none exists.
+"""
+function copy_plan(o,::Type{T},::Type{DL},da::Int,::Type{SL},sa::Int) where {T,DL,SL}
+    for width in (16,8,4)
+        d = vector_plan(o,T,DL,min(da,width))
+        s = vector_plan(o,T,SL,min(sa,width))
+        (d === nothing || s === nothing) && continue
+        d.width == s.width == width && d.groups == s.groups && return d
+    end
+    nothing
+end

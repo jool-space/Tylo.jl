@@ -37,13 +37,13 @@ function operand_load_kernel!(outa,outb,ina,inb,config)
     T = eltype(ina)
     tid = Int32(threadIdx().x)-Int32(1)
     smem = @inbounds CuDynamicSharedArray(T,2048)
-    sa = SharedTile(pointer(smem),config.sa)
-    sb = SharedTile(pointer(smem)+2048,config.sb)
-    a = GlobalTile(pointer(ina),@Layout((32, 32), (32, 1)))
-    b = GlobalTile(pointer(inb),@Layout((32, 32), (1, 32)))
+    sa = SharedTile(pointer(smem),config.sa,16)
+    sb = SharedTile(pointer(smem)+2048,config.sb,16)
+    a = GlobalTile(pointer(ina),@Layout((32, 32), (32, 1)),16)
+    b = GlobalTile(pointer(inb),@Layout((32, 32), (1, 32)),16)
     @inbounds begin
-        copy_async!(CopyPlan((32,32),32,2),sa,a,tid)
-        copy_async!(CopyPlan((32,32),32,1),sb,b,tid)
+        copy_async!(distribute((32,32),32;vector=8,axis=2),sa,a,tid)
+        copy_async!(distribute((32,32),32;vector=8,axis=1),sb,b,tid)
     end
     commit_copies()
     wait_copies(0)
@@ -96,11 +96,8 @@ function check_gemm(T,config,m,n,k;pad=0,relu=false)
     hd = fill(-12345f0,ldc,n)
     hd[1:m,:] .= NaN32
     da,db,dd = CuArray(ha),CuArray(hb),CuArray(hd)
-    # Validate the actual runtime leading dimensions before launching.
-    la = @Layout ($m, $k) ($lda, $1)
-    lb = @Layout ($k, $n) ($1, $ldb)
-    validate_copy(config.ac,T,config.sa,Tylo.Layouts.window(la,(0,0),(bm,bk)))
-    validate_copy(config.bc,T,config.sb,Tylo.Layouts.window(lb,(0,0),(bk,bn)))
+    # Full-tile launches promise 16-byte rows.
+    @assert lda % 8 == ldb % 8 == 0
     alpha = relu ? -0.75f0 : 1f0
     @cuda threads=Tylo.threads(config.plan) blocks=(m÷bm,n÷bn) shmem=shared_bytes(config,T) tiled_gemm_kernel!(
         dd,da,db,Int32(m),Int32(n),Int32(k),Int32(lda),Int32(ldb),Int32(ldc),config,alpha,Val(relu))

@@ -8,98 +8,86 @@
     nothing
 end
 
-@generated function copy_async!(p::CopyPlan{S,Threads,Axis},
-        dst::SharedTile{T},src::GlobalTile{T},tid::Integer) where {S,Threads,Axis,T}
-    v,n = _copy_vectors(CopyPlan{S,Threads,Axis}(),T)
-    copies = Expr[]
-    for pass in 0:cld(n,Threads)-1
-        push!(copies,quote
-            index = tid + oftype(tid,$(pass*Threads))
-            if index < oftype(tid,$n)
-                c = _copy_coordinate(p,index,Val($v))
-                @boundscheck begin
-                    _check_vector(dst.layout,c,$Axis,Val($v),T)
-                    _check_vector(src.layout,c,$Axis,Val($v),T)
-                end
-                ptx"cp.async.cg.shared.global"(pointer(dst,c),pointer(src,c),Val(16))
-            end
-        end)
-    end
-    quote
-        Base.@inline
-        size(dst) == size(src) == $S || throw(DimensionMismatch("copy plan/view shapes differ"))
-        @boundscheck 0 <= tid < $Threads || throw(BoundsError())
-        $(copies...)
-        nothing
-    end
-end
 @inline commit_copies() = ptx"cp.async.commit_group"()
 Base.@constprop :aggressive @inline wait_copies(n::Integer) = ptx"cp.async.wait_group"(Val(Int(n)))
 
-@generated function _scalar_copy_vector!(dst::SharedTile{T},src::GlobalTile{T},c,q,
-                                         ::Val{Axis},::Val{V}) where {T,Axis,V}
-    stores=Expr[]
-    for j in 0:V-1
-        push!(stores,quote
-            d=(c[1]+oftype(c[1],$(Axis==1 ? j : 0)),c[2]+oftype(c[2],$(Axis==2 ? j : 0)))
-            s=(q[1]+$(Axis==1 ? j : 0),q[2]+$(Axis==2 ? j : 0))
-            x=_valid_coordinate(src,s) ? unsafe_load(pointer(src,s)) : zero(T)
-            unsafe_store!(pointer(dst,d),x)
-        end)
-    end
+# One cp.async of `W` bytes: `.cg` (L2 only) for 16 bytes, `.ca` otherwise.
+# With `bytes` below `W`, only that many are read and the rest are zero.
+@inline _cp_async(dst,src,::Val{16}) = ptx"cp.async.cg.shared.global"(dst,src,Val(16))
+@inline _cp_async(dst,src,::Val{W}) where W = ptx"cp.async.ca.shared.global"(dst,src,Val(W))
+@generated function _cp_async(dst::Core.LLVMPtr{T,3},src::Core.LLVMPtr{S,1},::Val{W},bytes::UInt32) where {T,S,W}
+    W in (4,8,16) || return :(throw(ArgumentError("cp.async copies 4, 8 or 16 bytes")))
+    asm = "cp.async.$(W == 16 ? "cg" : "ca").shared.global [\$0], [\$1], $W, \$2;"
     quote
         Base.@inline
-        $(stores...)
+        PTX.@asmcall($asm,"r,l,r,~{memory}",true,Nothing,
+                     Tuple{Core.LLVMPtr{$T,3},Core.LLVMPtr{$S,1},UInt32},dst,src,bytes)
         nothing
     end
 end
-@generated function copy_async!(p::CopyPlan{S,Threads,Axis},dst::SharedTile{T},
-        src::GlobalTile{T},origin::Tuple,tid::Integer) where {S,Threads,Axis,T}
-    v,n=_copy_vectors(CopyPlan{S,Threads,Axis}(),T)
-    copies=Expr[]
-    for pass in 0:cld(n,Threads)-1
-        push!(copies,quote
-            index=tid+oftype(tid,$(pass*Threads))
-            if index < oftype(tid,$n)
-                c=_copy_coordinate(p,index,Val($v))
-                @boundscheck _check_vector(dst.layout,c,$Axis,Val($v),T)
-                # Widen before adding an origin or multiplying global strides.
-                q=(Int(origin[1])+Int(c[1]),Int(origin[2])+Int(c[2]))
-                full=_valid_coordinate(src,q) && q[$Axis] <= size(src)[$Axis]-$v
-                copied=false
-                if full && _contiguous_vector(src.layout,q,Val($Axis),Val($v))
-                    source=pointer(src,q)
-                    if reinterpret(UInt64,source)%UInt64(16)==UInt64(0)
-                        ptx"cp.async.cg.shared.global"(pointer(dst,c),source,Val(16))
-                        copied=true
-                    end
-                end
-                if !copied
-                    # A wholly invalid floating-point vector has all-zero
-                    # bits. Four word stores avoid eight BF16 address/value
-                    # predicates while preserving the scalar fallback for a
-                    # vector that straddles a boundary or another dtype.
-                    empty=q[$(3-Axis)]<0 || q[$(3-Axis)]>=size(src)[$(3-Axis)] ||
-                          q[$Axis]>=size(src)[$Axis] || q[$Axis]+$v<=0
-                    if $(T in (BFloat16,Float16,Float32)) && empty
-                        target=reinterpret(Core.LLVMPtr{UInt32,PTX.AS.Shared},pointer(dst,c))
-                        unsafe_store!(target,UInt32(0),1)
-                        unsafe_store!(target,UInt32(0),2)
-                        unsafe_store!(target,UInt32(0),3)
-                        unsafe_store!(target,UInt32(0),4)
-                    else
-                        _scalar_copy_vector!(dst,src,c,q,Val($Axis),Val($v))
-                    end
-                end
+
+"""
+    copy_async!(ownership, destination::SharedTile, source::GlobalTile, thread)
+
+Copy each thread's values of `ownership` from a global tile to a shared tile
+of the same shape and element type, without passing through registers. The
+slots group into the widest vectors, 16, 8 or 4 bytes, contiguous and
+aligned in both tiles within their declared alignments, each one
+`cp.async`; values that form no such vector are copied by ordinary loads
+and stores. A replicated value is copied once. A bounded source zero-fills
+the elements outside it, a vector at a time (see [`bound`](@ref)).
+
+Close the copies with `commit_copies()`, wait with `wait_copies(n)`, then
+synchronize the threads that read the destination: neither the copy nor the
+wait is a barrier, and ordinary stores become visible only through it.
+[`distribute`](@ref) gives the usual coalesced distribution.
+"""
+@generated function copy_async!(::O,dst::MemoryTile{T,3,DL,DA,DB},src::MemoryTile{T,1,SL,SA,SB},
+        thread::Integer) where {O,T,DL,DA,DB,SL,SA,SB}
+    o = _static_instance(O)
+    o === nothing && return :(throw(ArgumentError("copies require a static ownership")))
+    DB === Nothing || return :(throw(ArgumentError("bound the source of a copy, not its destination")))
+    bounded = SB !== Nothing
+    shape = map(Int,size(o))
+    dsplit, ssplit = _split_addresses(o,DL), _split_addresses(o,SL)
+    plan = copy_plan(o,T,DL,DA,SL,SA)
+    statements = Expr[]
+    if plan !== nothing
+        W = plan.width
+        for slots in plan.groups
+            e = slots[1]-1
+            d, s = _slot_pointer_expr(dsplit,o,e,:dst,:dbase), _slot_pointer_expr(ssplit,o,e,:src,:sbase)
+            if bounded
+                # Elements outside the source's bound are not read: the copy
+                # reads a prefix of the vector, or nothing, and zero-fills.
+                vb = _vector_bounds(o,slots,SB,:src)
+                vb.check === nothing || push!(statements,vb.check)
+                inside = vb.cut === nothing ? W : :($(_inside_expr(vb.cut,length(slots),:src))*$(sizeof(T)))
+                push!(statements,:(_cp_async($d,$s,Val($W),ifelse($(vb.valid),$inside % UInt32,UInt32(0)))))
+            else
+                push!(statements,:(_cp_async($d,$s,Val($W))))
             end
-        end)
+        end
+    else
+        for e in 0:_register_count(o)-1
+            d, s = _slot_pointer_expr(dsplit,o,e,:dst,:dbase), _slot_pointer_expr(ssplit,o,e,:src,:sbase)
+            load = :(unsafe_load($s,1,Val($(sizeof(T)))))
+            value = bounded ? :($(_valid_expr(o,e,SB,:src)) ? $load : zero($T)) : load
+            push!(statements,:(unsafe_store!($d,$value,1,Val($(sizeof(T))))))
+        end
     end
+    mask = replica_mask(o)
     quote
         Base.@inline
-        size(dst)==$S || throw(DimensionMismatch("copy destination does not match plan"))
-        length(origin)==2 || throw(ArgumentError("copy origin must have two coordinates"))
-        @boundscheck 0 <= tid < $Threads || throw(BoundsError())
-        $(copies...)
+        size(dst) == size(src) == $(Tuple(shape)) || throw(DimensionMismatch("the tiles must have the ownership's shape"))
+        @boundscheck 0 <= thread < $(_thread_count(o)) || throw(BoundsError())
+        ownership = $o
+        $(dsplit || ssplit || bounded ? :(tc = Layouts._thread_coordinate(ownership,thread)) : nothing)
+        $(dsplit ? :(dbase = pointer(dst,tc)) : nothing)
+        $(ssplit ? :(sbase = pointer(src,tc)) : nothing)
+        if $(mask == 0 ? true : :((thread & oftype(thread,$mask)) == zero(thread)))
+            $(statements...)
+        end
         nothing
     end
 end
@@ -168,21 +156,32 @@ _valid_expr(o,e,B,tile=:tile) = (c = Layouts._slot_coordinate(o,e);
     checks = [c[a] == 0 ? :(tc[$a] < $tile.bounds[$a]) : :((tc[$a] + oftype(tc[$a],$(c[a]))) < $tile.bounds[$a])
               for a in 1:2 if B.parameters[a] !== Nothing];
     isempty(checks) ? true : foldl((x,y) -> :($x && $y),checks))
-# A vector is valid or invalid as a whole: checked, a bound may not fall
-# strictly inside the coordinates it spans along any bounded axis.
-function _straddle_check(o,slots,B,tile=:tile)
-    checks = Expr[]
+# How the bounds cut a vector, from its slots in storage order. Along a
+# bounded axis its elements share one coordinate (the vector is inside or
+# outside as a whole), or take consecutive coordinates (the bound keeps a
+# prefix: `cut` names that axis and the first coordinate), or neither: then
+# the bound must not fall inside it, checked, and the first element decides.
+function _vector_bounds(o,slots,B,tile=:tile)
+    whole, cut, checks = Expr[], nothing, Expr[]
     for a in 1:2
         B.parameters[a] === Nothing && continue
         cs = [Layouts._slot_coordinate(o,e-1)[a] for e in slots]
         lo, hi = extrema(cs)
-        lo == hi && continue
-        push!(checks,:((tc[$a] + oftype(tc[$a],$hi) < $tile.bounds[$a]) | (tc[$a] + oftype(tc[$a],$lo) >= $tile.bounds[$a])))
+        if cut === nothing && lo != hi && cs == cs[1] .+ (0:length(cs)-1)
+            cut = (a,cs[1])
+            continue
+        end
+        push!(whole,_below(a,cs[1],tile))
+        lo == hi || push!(checks,:((tc[$a] + oftype(tc[$a],$hi) < $tile.bounds[$a]) | (tc[$a] + oftype(tc[$a],$lo) >= $tile.bounds[$a])))
     end
-    isempty(checks) && return nothing
-    :(@boundscheck $(foldl((x,y) -> :($x & $y),checks)) ||
-        throw(ArgumentError("a bound falls inside a vector; bound at a multiple of the vector's extent")))
+    valid = isempty(whole) ? true : foldl((x,y) -> :($x && $y),whole)
+    check = isempty(checks) ? nothing : :(@boundscheck $(foldl((x,y) -> :($x & $y),checks)) ||
+        throw(ArgumentError("a bound falls inside a vector of scattered coordinates; bound at a multiple of its extent")))
+    (; valid, cut, check)
 end
+_below(a,c,tile) = c == 0 ? :(tc[$a] < $tile.bounds[$a]) : :((tc[$a] + oftype(tc[$a],$c)) < $tile.bounds[$a])
+# Elements of a cut vector inside the bound: from none to all `k`.
+_inside_expr((a,c),k,tile) = :(clamp(Int($tile.bounds[$a]) - (Int(tc[$a]) + $c),0,$k))
 function _vector_access_exprs(plan,o,split,bounded,B,::Type{T},AS,packed::Bool,op::Symbol,data) where T
     width = plan.width
     per = packed ? _per_word(T) : 1
@@ -195,21 +194,38 @@ function _vector_access_exprs(plan,o,split,bounded,B,::Type{T},AS,packed::Bool,o
         members = packed ? [(slots[per*(j-1)+1]-1)÷per+1 for j in 1:k] : slots
         p = Symbol(:p_,g)
         push!(statements,:($p = reinterpret(Core.LLVMPtr{$V,$AS},$(_slot_pointer_expr(split,o,slots[1]-1)))))
-        valid = bounded ? _valid_expr(o,slots[1]-1,B) : true
-        check = bounded ? _straddle_check(o,slots,B) : nothing
-        check === nothing || push!(statements,check)
+        vb = bounded ? _vector_bounds(o,slots,B) : (; valid=true, cut=nothing, check=nothing)
+        vb.check === nothing || push!(statements,vb.check)
+        n = Symbol(:n_,g)
+        vb.cut === nothing || push!(statements,:($n = $(_inside_expr(vb.cut,length(slots),:tile))))
+        full = vb.cut === nothing ? vb.valid : :($(vb.valid) & ($n == $(length(slots))))
+        some = vb.cut === nothing ? false : :($(vb.valid) & ($n > 0))
+        elements = :(reinterpret(Core.LLVMPtr{$T,$AS},$p))
         if op === :load
             v = Symbol(:v_,g)
             load = :(unsafe_load($p,1,Val($width)))
             zeros = k == 1 ? :(zero($U)) : Expr(:tuple,[:(VecElement(zero($U))) for _ in 1:k]...)
-            push!(statements,bounded ? :($v = $valid ? $load : $zeros) : :($v = $load))
+            if vb.cut !== nothing
+                # The elements inside the bound one by one, the rest zero, as the vector.
+                xs = Expr(:tuple,[:($(j-1) < $n ? unsafe_load($elements,$j,Val($(sizeof(T)))) : zero($T)) for j in eachindex(slots)]...)
+                words = packed ? :(_to_storage(NTuple{$k,UInt32},$xs)) : xs
+                partial = k == 1 ? :($words[1]) : :(map(VecElement,$words))
+                push!(statements,:($v = $full ? $load : $some ? $partial : $zeros))
+            else
+                push!(statements,bounded ? :($v = $full ? $load : $zeros) : :($v = $load))
+            end
             for (j,m) in enumerate(members)
                 units[m] = k == 1 ? v : :($v[$j].value)
             end
         else
             payload = k == 1 ? :($data[$(members[1])]) : Expr(:tuple,[:(VecElement($data[$m])) for m in members]...)
             store = :(unsafe_store!($p,$payload,1,Val($width)))
-            push!(statements,bounded ? :($valid && $store) : store)
+            if vb.cut !== nothing
+                partial = Expr(:block,[:($(j-1) < $n && unsafe_store!($elements,_value(f,Val($e)),$j,Val($(sizeof(T))))) for (j,e) in enumerate(slots)]...)
+                push!(statements,:(if $full; $store; elseif $some; $partial; end))
+            else
+                push!(statements,bounded ? :($full && $store) : store)
+            end
         end
     end
     statements, [units[i] for i in sort(collect(keys(units)))]

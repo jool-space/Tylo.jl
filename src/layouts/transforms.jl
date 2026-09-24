@@ -55,18 +55,20 @@ preserving swizzle phase. Bounds are checked unless the caller uses
 Base.@constprop :aggressive Base.@propagate_inbounds window(l::AbstractLayout,o::Tuple,s::Tuple) =
     _window(l,o,Val(map(Int,s)))
 Base.@propagate_inbounds function _window(l::AbstractLayout,o::Tuple,::Val{S}) where S
-    length(S) == length(o) == length(size(l)) || throw(ArgumentError("window rank mismatch"))
-    all(n -> n isa Int && n > 0,S) || throw(ArgumentError("positive static extents required"))
     @boundscheck all(map((n,x,w) -> 0 <= x && x <= n-w,size(l),o,S)) ||
         throw(BoundsError(l,(o,S)))
+    _window_unchecked(l,o,Val(S))
+end
+# The window without its bounds check, for callers that establish validity
+# another way (a bounded memory tile may extend past its layout's extents).
+@inline function _window_unchecked(l::AbstractLayout,o::Tuple,::Val{S}) where S
+    length(S) == length(o) == length(size(l)) || throw(ArgumentError("window rank mismatch"))
+    all(n -> n isa Int && n > 0,S) || throw(ArgumentError("positive static extents required"))
     Window{S,typeof(l),typeof(o)}(l,o)
 end
-Base.@propagate_inbounds function _window(l::Window,o::Tuple,::Val{S}) where S
+@inline function _window_unchecked(l::Window,o::Tuple,::Val{S}) where S
     length(S) == length(o) == length(size(l)) || throw(ArgumentError("window rank mismatch"))
-    all(n -> n isa Int && n > 0,S) || throw(ArgumentError("positive static extents required"))
-    @boundscheck all(map((n,x,w) -> 0 <= x && x <= n-w,size(l),o,S)) ||
-        throw(BoundsError(l,(o,S)))
-    @inbounds _window(l.parent,map(+,l.origin,o),Val(S))
+    _window_unchecked(l.parent,map(+,l.origin,o),Val(S))
 end
 
 # Exact planning queries; enumerate nonlinear layouts on the host, never
@@ -108,6 +110,48 @@ replicated across a warp does. Shape and thread count must be constants.
 """
 Base.@constprop :aggressive @inline Ownership(s::Tuple{Integer,Integer};threads::Integer=1) =
     Ownership(s,Layout((static(Int(threads)),static(Int(s[1])*Int(s[2]))),(static(0),static(1))))
+"""
+    distribute((rows, cols), threads; vector=1, axis=1)
+
+The tile cut into vectors of `vector` consecutive elements along `axis`,
+dealt to `threads` threads in order: thread `t` holds vectors `t`,
+`t + threads`, `t + 2threads`, …, vectors numbered along `axis` first and
+then line by line. Its slots run through a vector's elements, then its
+vectors. When `threads` does not divide the vector count, the vectors go
+to the first `g = gcd(vectors, threads)` threads, thread `t` holding those
+of thread `t % g`: the rest are replicas, which copy and store nothing. All
+arguments must be constants.
+
+Consecutive threads take consecutive vectors, so a tile stored contiguously
+along `axis` is read and written coalesced, and a vector of 16 bytes is one
+instruction. A few cases by name:
+
+```julia
+distribute((64, 32), 128; vector=8, axis=2)  # a 64×32 BF16 copy, 16-byte vectors
+distribute((32, n), 32; vector=n, axis=2)    # lane t holds row t
+distribute((1, 32n), 32; axis=2)             # a row interleaved over a warp
+```
+"""
+Base.@constprop :aggressive @inline distribute(s::Tuple{Integer,Integer},threads::Integer;vector::Integer=1,axis::Integer=1) =
+    _distribute(Val((map(Int,s),Int(threads),Int(vector),Int(axis))))
+@generated _distribute(::Val{P}) where P = :($(_distribution(P...)))
+function _distribution((m,n),threads,vector,axis)
+    m > 0 && n > 0 && threads > 0 && vector > 0 || throw(ArgumentError("extents, threads and vector must be positive"))
+    axis in (1,2) || throw(ArgumentError("choose axis 1 or 2"))
+    (m,n)[axis] % vector == 0 || throw(ArgumentError("vectors of $vector must divide the extent $((m,n)[axis]) along axis $axis"))
+    count = m*n ÷ vector
+    s = static
+    # Vector index to the column-major index of its first element, and the
+    # step between a vector's elements.
+    lines = (m,n)[axis] ÷ vector
+    index, element = axis == 2 ? (Layout((s(lines),s(m)),(s(m*vector),s(1))),s(m)) :
+                                 (Layout((s(lines),s(n)),(s(vector),s(m))),s(1))
+    held = gcd(threads,count)
+    thread_mode = compose(index,Layout((s(held),),(s(1),)))
+    threads > held && (thread_mode = concat(thread_mode,Layout((s(threads ÷ held),),(s(0),))))
+    passes = compose(index,Layout((s(count ÷ held),),(s(held),)))
+    Ownership((m,n),concat(thread_mode,concat(Layout((s(vector),),(element,)),passes)))
+end
 Base.size(::Ownership{S}) where S = S
 Base.:(==)(a::Ownership,b::Ownership) = size(a) == size(b) && a.mapping == b.mapping
 

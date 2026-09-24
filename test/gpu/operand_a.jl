@@ -29,13 +29,14 @@ function conversion_shared_probe!(out,input,atom::MMAAtom{(16,8,16),T}) where T
 end
 function chained_mma_kernel!(out,a_data,b_data,v_data,atom::MMAAtom{(16,8,16),T}) where T
     s=CuStaticSharedArray(T,640);tid=Int32(threadIdx().x)-Int32(1)
-    sa=SharedTile(pointer(s),@Layout((16, 16), (16, 1)))
-    sb=SharedTile(pointer(s)+512,@Layout((16, 16), (1, 16)))
-    sv=SharedTile(pointer(s)+1024,@Layout((16, 8), (1, 16)))
+    sa=SharedTile(pointer(s),@Layout((16, 16), (16, 1)),16)
+    sb=SharedTile(pointer(s)+512,@Layout((16, 16), (1, 16)),16)
+    sv=SharedTile(pointer(s)+1024,@Layout((16, 8), (1, 16)),16)
     @inbounds begin
-        copy_async!(CopyPlan((16,16),32,2),sa,GlobalTile(pointer(a_data),sa.layout),tid)
-        copy_async!(CopyPlan((16,16),32,1),sb,GlobalTile(pointer(b_data),sb.layout),tid)
-        copy_async!(CopyPlan((16,8),32,1),sv,GlobalTile(pointer(v_data),sv.layout),tid)
+        copy_async!(distribute((16,16),32;vector=8,axis=2),sa,GlobalTile(pointer(a_data),sa.layout,16),tid)
+        copy_async!(distribute((16,16),32;vector=8,axis=1),sb,GlobalTile(pointer(b_data),sb.layout,16),tid)
+        # Sixteen vectors for 32 threads: the upper half-warp replicates.
+        copy_async!(distribute((16,8),32;vector=8,axis=1),sv,GlobalTile(pointer(v_data),sv.layout,16),tid)
     end
     commit_copies();wait_copies(0);sync_threads()
     @inbounds begin

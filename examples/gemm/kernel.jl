@@ -14,10 +14,10 @@ function gemm_config(::Type{T}=BFloat16; block=(64,64,32),warps=(2,2),swizzled=t
     bits = trailing_zeros(bk)-3
     sa = swizzled ? compose(Swizzle{bits,3,bits}(),a) : a
     sb = swizzled ? compose(Swizzle{bits,3,bits}(),b) : b
-    ac = CopyPlan((bm,bk),Tylo.threads(plan),2)
-    bc = CopyPlan((bk,bn),Tylo.threads(plan),1)
-    Tylo.validate_copy(ac,T,sa,a)
-    Tylo.validate_copy(bc,T,sb,b)
+    # Copies deal 16-byte vectors to the plan's threads along the contiguous K.
+    vector = 16 ÷ sizeof(T)
+    ac = distribute((bm,bk),Tylo.threads(plan);vector,axis=2)
+    bc = distribute((bk,bn),Tylo.threads(plan);vector,axis=1)
     (;plan,ac,bc,sa,sb,a_span=Val(Int(cosize(sa))),b_span=Val(Int(cosize(sb))),stages=Val(stages),bounds=Val(bounds))
 end
 shared_bytes(config,::Type{T}) where T = value(config.stages)*(value(config.a_span)+value(config.b_span))*sizeof(T)
@@ -25,49 +25,62 @@ shared_bytes(config,::Type{T}) where T = value(config.stages)*(value(config.a_sp
 @inline function shared_stage(ptr,config,stage)
     a_span,b_span = value(config.a_span),value(config.b_span)
     base = ptr + stage*oftype(stage,(a_span+b_span)*sizeof(eltype(ptr)))
-    (SharedTile(base,config.sa),SharedTile(base+a_span*sizeof(eltype(ptr)),config.sb))
+    # Dynamic shared memory starts 16-byte aligned, and so does every stage.
+    @inbounds (SharedTile(base,config.sa,16),SharedTile(base+a_span*sizeof(eltype(ptr)),config.sb,16))
 end
 
-# This example knows A/B have contiguous K. Uniform full-tile checks let
-# interior stages use the original copy loop, even in a ragged launch.
-@inline function full_vectors(t,origin,shape,axis)
-    0 <= origin[1] && 0 <= origin[2] &&
-    origin[1]+shape[1] <= size(t)[1] && origin[2]+shape[2] <= size(t)[2] &&
-    t.layout.strides[3-axis]%8 == 0 &&
-    reinterpret(UInt64,pointer(t,origin))%UInt64(16) == UInt64(0)
-end
+# Interior stages copy unbounded tiles; a stage reaching past the matrix
+# copies from bounded tiles, which zero-fill what lies outside. Both tiles
+# declare the alignment the launch established.
+@inline inside(t,origin,shape) = origin[1]+shape[1] <= size(t)[1] && origin[2]+shape[2] <= size(t)[2]
 
 @inline function prefetch_stage!(ptr,config,a,b,m,n,k,stage,tid)
     bm,bn,bk = size(config.plan)
     sa,sb = shared_stage(ptr,config,stage)
     @inbounds begin
-        if !value(config.bounds) || full_vectors(a,(m,k),(bm,bk),2)
+        if !value(config.bounds) || inside(a,(m,k),(bm,bk))
             copy_async!(config.ac,sa,window(a,(m,k),(bm,bk)),tid)
         else
-            copy_async!(config.ac,sa,a,(m,k),tid)
+            copy_async!(config.ac,sa,tile(bound(a,size(a)),(bm,bk),(m ÷ Int32(bm),k ÷ Int32(bk))),tid)
         end
-        if !value(config.bounds) || full_vectors(b,(k,n),(bk,bn),1)
+        if !value(config.bounds) || inside(b,(k,n),(bk,bn))
             copy_async!(config.bc,sb,window(b,(k,n),(bk,bn)),tid)
         else
-            copy_async!(config.bc,sb,b,(k,n),tid)
+            copy_async!(config.bc,sb,tile(bound(b,size(b)),(bk,bn),(k ÷ Int32(bk),n ÷ Int32(bn))),tid)
         end
     end
     commit_copies()
     nothing
 end
 
+# 16-byte rows: the base and every leading dimension a multiple of 16 bytes.
+@inline aligned16(p,ld) = reinterpret(UInt64,p) % UInt64(16) == 0 && (ld*Int32(sizeof(eltype(p)))) % Int32(16) == 0
+
 # This example owns the pipeline. Tylo's operations do not impose CTA roles,
 # allocation policy or buffer reuse; the two barriers have distinct purposes.
+# Full-tile launches promise 16-byte rows; a ragged launch checks, and
+# copies with whatever alignment its operands have.
 function tiled_gemm_kernel!(out,a_data,b_data,m::Int32,n::Int32,k::Int32,
-        lda::Int32,ldb::Int32,ldc::Int32,config,alpha::Float32,::Val{Relu}) where Relu
-    T = eltype(a_data)
+        lda::Int32,ldb::Int32,ldc::Int32,config,alpha::Float32,relu::Val)
+    la = @inbounds @Layout(($m, $k), ($lda, 1))
+    lb = @inbounds @Layout(($k, $n), (1, $ldb))
+    d = GlobalTile(pointer(out),@inbounds @Layout(($m, $n), (1, $ldc)))
+    pa, pb = pointer(a_data), pointer(b_data)
+    if !value(config.bounds) || (aligned16(pa,lda) && aligned16(pb,ldb))
+        @inbounds gemm_tiles!(d,GlobalTile(pa,la,16),GlobalTile(pb,lb,16),config,alpha,relu)
+    else
+        gemm_tiles!(d,GlobalTile(pa,la),GlobalTile(pb,lb),config,alpha,relu)
+    end
+    nothing
+end
+@inline function gemm_tiles!(d,a,b,config,alpha::Float32,::Val{Relu}) where Relu
+    T = eltype(a)
+    m, k = size(a)
+    n = size(b)[2]
     bm,bn,bk = size(config.plan)
     stages = value(config.stages)
     smem = @inbounds CuDynamicSharedArray(T,stages*(value(config.a_span)+value(config.b_span)))
     ptr = pointer(smem)
-    a = GlobalTile(pointer(a_data),@inbounds @Layout(($m, $k), ($lda, 1)))
-    b = GlobalTile(pointer(b_data),@inbounds @Layout(($k, $n), (1, $ldb)))
-    d = GlobalTile(pointer(out),@inbounds @Layout(($m, $n), (1, $ldc)))
     tid = Int32(threadIdx().x)-Int32(1)
     row = (Int32(blockIdx().x)-Int32(1))*Int32(bm)
     col = (Int32(blockIdx().y)-Int32(1))*Int32(bn)
@@ -92,7 +105,7 @@ function tiled_gemm_kernel!(out,a_data,b_data,m::Int32,n::Int32,k::Int32,
         end
     end
     result = map(x -> Relu ? max(alpha*x,0f0) : alpha*x,acc)
-    @inbounds if !value(config.bounds) || (eltype(out)===Float32 && row+bm<=m && col+bn<=n)
+    @inbounds if !value(config.bounds) || (eltype(d)===Float32 && row+bm<=m && col+bn<=n)
         store!(config.plan,window(d,(row,col),(bm,bn)),result,tid)
     else
         store!(config.plan,d,result,(row,col),tid)

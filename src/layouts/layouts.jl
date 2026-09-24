@@ -4,7 +4,7 @@ module Layouts
 
 using Static: StaticInt, static
 
-export Layout, @Layout, Ownership, Swizzle, compose, window, shape, cosize, static, coordinate
+export Layout, @Layout, Ownership, distribute, Swizzle, compose, window, shape, cosize, static, coordinate
 export concat, coalesce, complement, right_inverse, left_inverse,
        logical_divide, zipped_divide, tiled_divide,
        logical_product, blocked_product, raked_product,

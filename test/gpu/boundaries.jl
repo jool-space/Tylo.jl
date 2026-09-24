@@ -3,16 +3,16 @@ if !isdefined(@__MODULE__,:tiled_gemm_kernel!)
     include("../../examples/gemm/kernel.jl")
 end
 
-function boundary_copy_kernel!(out,input,dstlayout,srclayout,plan,origin,::Val{Span}) where Span
+function boundary_copy_kernel!(out,input,dstlayout,srclayout,ownership,origin,::Val{Span},::Val{Align}) where {Span,Align}
     T=eltype(input); t=Int32(threadIdx().x)-Int32(1)
     smem=@inbounds CuDynamicSharedArray(T,Span)
     for i in t+Int32(1):Int32(blockDim().x):Int32(Span)
         @inbounds smem[i]=T(99)
     end
     sync_threads()
-    dst=SharedTile(pointer(smem),dstlayout)
-    src=GlobalTile(pointer(input),srclayout)
-    @inbounds copy_async!(plan,dst,src,origin,t)
+    dst=SharedTile(pointer(smem),dstlayout,16)
+    src=bound(GlobalTile(pointer(input),srclayout,Align),size(srclayout))
+    copy_async!(ownership,dst,window(src,origin,(16,16)),t)
     commit_copies();wait_copies(0);sync_threads()
     for i in t+Int32(1):Int32(blockDim().x):Int32(Span)
         @inbounds out[i]=smem[i]
@@ -20,11 +20,15 @@ function boundary_copy_kernel!(out,input,dstlayout,srclayout,plan,origin,::Val{S
     nothing
 end
 
-function check_boundary_copy(T,axis,step,origin)
-    s=(19,23);ld=(s[axis]+3)*step
+# A 19×23 source with a runtime leading dimension `ld`: contiguous along
+# `axis` with a static unit stride (cp.async vectors, as wide as `ld`
+# allows, cut where the bound falls), or every `step`-th element (scalars).
+function check_boundary_copy(T,axis,step,ld,origin)
+    s=(19,23)
     strides=axis==1 ? (step,ld) : (ld,step)
-    src=@Layout $s $strides
-    host=fill(T(NaN32),Int(cosize(src)))
+    src=step==1 ? (axis==1 ? @Layout(($(s[1]),$(s[2])),(1,$ld)) : @Layout(($(s[1]),$(s[2])),($ld,1))) : @Layout $s $strides
+    align=step==1 ? min(16,1 << trailing_zeros(ld*sizeof(T))) : sizeof(T)
+    host=fill(T(NaN32),Int(cosize(Layout(s,strides))))
     logical=T===Float32 ? reshape(Float32.(1:prod(s)),s) :
         reshape(reinterpret(T,UInt16.(0x3800:0x3800+prod(s)-1)),s)
     for r in 0:s[1]-1,c in 0:s[2]-1
@@ -34,19 +38,17 @@ function check_boundary_copy(T,axis,step,origin)
                      @Layout((32, 64), (64, 1))
     start=axis==1 ? (8,3) : (3,8)
     dst=Tylo.Layouts.window(compose(Swizzle{3,3,3}(),parent),map(Int32,start),(16,16))
-    p=CopyPlan((16,16),32,axis)
-    # Validate destination contiguity independently from the bounded source.
-    validate_copy(p,T,dst,dst)
+    o=distribute((16,16),32;vector=16÷sizeof(T),axis)
     span=Int(cosize(parent));expected=fill(T(99),span)
     for r in 0:15,c in 0:15
         i,j=r+origin[1],c+origin[2]
-        x=0<=i<s[1] && 0<=j<s[2] ? logical[i+1,j+1] : zero(T)
+        x=i<s[1] && j<s[2] ? logical[i+1,j+1] : zero(T)
         raw=axis==1 ? (r+8)+64*(c+3) : 64*(r+3)+(c+8)
         offset=xor(raw,(raw>>3)&56)
         expected[offset+1]=x
     end
     input=CuArray(host);out=CuArray{T}(undef,span)
-    @cuda threads=32 shmem=span*sizeof(T) boundary_copy_kernel!(out,input,dst,src,p,map(Int32,origin),Val(span))
+    @cuda threads=32 shmem=span*sizeof(T) boundary_copy_kernel!(out,input,dst,src,o,map(Int32,origin),Val(span),Val(align))
     @test Array(out) == expected
 end
 
@@ -84,9 +86,12 @@ begin # assembly checks
 end
 end
 if runtime_supported(@__FILE__)
-@testset "Predication and nonzero swizzle origins" begin
-    for T in (BFloat16,Float16,Float32),axis in (1,2),step in (1,2),origin in ((0,0),(-3,5),(7,-1),(5,13),(40,40))
-        check_boundary_copy(T,axis,step,origin)
+@testset "Bounded copies and nonzero swizzle origins" begin
+    # Origins along the contiguous axis keep vectors aligned; the bounds at
+    # 19 and 23 fall inside vectors, which copy a prefix and zero the rest.
+    for T in (BFloat16,Float16,Float32),axis in (1,2),(step,ld) in ((1,32),(1,26),(1,25),(2,50)),
+            origin in (axis == 1 ? ((0,0),(8,13),(16,1),(40,40)) : ((0,0),(13,8),(1,16),(40,40)))
+        check_boundary_copy(T,axis,step,ld,origin)
     end
 end
 @testset "Ragged GEMM, zero fill and masked stores" begin

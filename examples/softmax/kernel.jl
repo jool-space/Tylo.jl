@@ -68,8 +68,9 @@ function mma_softmax_kernel!(output,a_data,b_data,mask,config)
     tid=Int32(threadIdx().x)-Int32(1)
     smem=@inbounds CuDynamicSharedArray(T,value(config.a_span)+value(config.b_span))
     sa,sb=shared_stage(pointer(smem),config,Int32(0))
-    a=GlobalTile(pointer(a_data),@Layout((m, k), (k, 1)))
-    b=GlobalTile(pointer(b_data),@Layout((k, n), (1, k)))
+    # Device arrays start 256-byte aligned; these rows are 16-byte multiples.
+    a=@inbounds GlobalTile(pointer(a_data),@Layout((m, k), (k, 1)),16)
+    b=@inbounds GlobalTile(pointer(b_data),@Layout((k, n), (1, k)),16)
     @inbounds begin
         copy_async!(config.ac,sa,a,tid)
         copy_async!(config.bc,sb,b,tid)
