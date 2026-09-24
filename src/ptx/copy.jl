@@ -155,19 +155,34 @@ _vector_type(::Type{T},k) where T = k == 1 ? T : NTuple{k,VecElement{T}}
 # The address of slot `e`: the thread's base plus the slot's constant offset
 # when the tile's offsets split that way (`base` must be bound), the full
 # coordinate otherwise.
-_slot_pointer_expr(split::Bool,o,e) = split ?
-    :(_slot_address(tile,base,$(Layouts._slot_coordinate(o,e)))) :
-    :(pointer(tile,Layouts._coordinate(ownership,thread,Val($e))))
+_slot_pointer_expr(split::Bool,o,e,tile=:tile,base=:base) = split ?
+    :(_slot_address($tile,$base,$(Layouts._slot_coordinate(o,e)))) :
+    :(pointer($tile,Layouts._coordinate(ownership,thread,Val($e))))
 _split_addresses(o,ML) = !(ML <: Layouts.Composition) && tile_offsets(o,ML) !== nothing
-_prologue(split::Bool,bounded::Bool) = quote
+_prologue(split::Bool,bounded::Bool,tile=:tile,base=:base) = quote
     $(split || bounded ? :(tc = Layouts._thread_coordinate(ownership,thread)) : nothing)
-    $(split ? :(base = pointer(tile,tc)) : nothing)
+    $(split ? :($base = pointer($tile,tc)) : nothing)
 end
 # A bounded tile's slot is valid when its coordinate lies inside the extents.
-_valid_expr(o,e,B) = (c = Layouts._slot_coordinate(o,e);
-    checks = [c[a] == 0 ? :(tc[$a] < tile.bounds[$a]) : :((tc[$a] + oftype(tc[$a],$(c[a]))) < tile.bounds[$a])
+_valid_expr(o,e,B,tile=:tile) = (c = Layouts._slot_coordinate(o,e);
+    checks = [c[a] == 0 ? :(tc[$a] < $tile.bounds[$a]) : :((tc[$a] + oftype(tc[$a],$(c[a]))) < $tile.bounds[$a])
               for a in 1:2 if B.parameters[a] !== Nothing];
     isempty(checks) ? true : foldl((x,y) -> :($x && $y),checks))
+# A vector is valid or invalid as a whole: checked, a bound may not fall
+# strictly inside the coordinates it spans along any bounded axis.
+function _straddle_check(o,slots,B,tile=:tile)
+    checks = Expr[]
+    for a in 1:2
+        B.parameters[a] === Nothing && continue
+        cs = [Layouts._slot_coordinate(o,e-1)[a] for e in slots]
+        lo, hi = extrema(cs)
+        lo == hi && continue
+        push!(checks,:((tc[$a] + oftype(tc[$a],$hi) < $tile.bounds[$a]) | (tc[$a] + oftype(tc[$a],$lo) >= $tile.bounds[$a])))
+    end
+    isempty(checks) && return nothing
+    :(@boundscheck $(foldl((x,y) -> :($x & $y),checks)) ||
+        throw(ArgumentError("a bound falls inside a vector; bound at a multiple of the vector's extent")))
+end
 function _vector_access_exprs(plan,o,split,bounded,B,::Type{T},AS,packed::Bool,op::Symbol,data) where T
     width = plan.width
     per = packed ? _per_word(T) : 1
@@ -181,6 +196,8 @@ function _vector_access_exprs(plan,o,split,bounded,B,::Type{T},AS,packed::Bool,o
         p = Symbol(:p_,g)
         push!(statements,:($p = reinterpret(Core.LLVMPtr{$V,$AS},$(_slot_pointer_expr(split,o,slots[1]-1)))))
         valid = bounded ? _valid_expr(o,slots[1]-1,B) : true
+        check = bounded ? _straddle_check(o,slots,B) : nothing
+        check === nothing || push!(statements,check)
         if op === :load
             v = Symbol(:v_,g)
             load = :(unsafe_load($p,1,Val($width)))

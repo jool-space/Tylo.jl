@@ -57,3 +57,27 @@ if runtime_supported(@__FILE__)
         end
     end
 end
+
+# A bound along the axis vectors run on must not fall inside a vector:
+# checked, a straddling bound is an error rather than a read past it.
+const COLUMN = Ownership((8,1))
+function straddle_kernel!(y,x,rows)
+    t = bound(GlobalTile(x,16),(rows,nothing))
+    store!(GlobalTile(y,16),load_fragment(COLUMN,t))
+    nothing
+end
+function straddle_unchecked_kernel!(y,x,rows)
+    t = @inbounds bound(GlobalTile(x,16),(rows,nothing))
+    @inbounds store!(GlobalTile(y,16),load_fragment(COLUMN,t))
+    nothing
+end
+
+@testset "Bounds inside a vector" begin
+    tt = Tuple{CuDeviceMatrix{BFloat16,1},CuDeviceMatrix{BFloat16,1},Int32}
+    checked = entry_body(compile_kernel(straddle_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32).ptx)
+    unchecked = entry_body(compile_kernel(straddle_unchecked_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32).ptx)
+    wide = r"ld\.global\.(v4\.b32|v2\.b64)"
+    @test count(wide,checked) == count(wide,unchecked) == 1
+    @test occursin("trap",checked) || occursin(r"\bcall",checked)
+    @test !occursin("trap",unchecked) && !occursin(r"\bcall",unchecked)
+end

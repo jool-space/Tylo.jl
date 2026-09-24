@@ -122,7 +122,7 @@ drops only when its extent is statically one and merges only when the
 strides deciding it are static, so the structure of the result depends on
 types alone.
 """
-@generated coalesce(l::L) where L<:Layout = _layout_expr(_coalesce(_leaves(L,:l)))
+@generated Base.coalesce(l::L) where L<:Layout = _layout_expr(_coalesce(_leaves(L,:l)))
 
 # ── Composition ─────────────────────────────────────────────────────────
 _compose(ls,ld,node::Vector,checks) = map(n -> _unwrap(_compose(ls,ld,n,checks)),node)
@@ -175,13 +175,17 @@ checked, at generation time for static leaves and at run time otherwise: a
 mode of `b` must either start on a multiple of an `a` mode or step evenly
 inside it, and where a mode of `b` runs past an `a` mode it must do so a
 whole number of times. The last mode of `a` is unbounded, as in
-`coalesce`, so `b` may exceed `a`'s extent there. Violations throw an
-`ArgumentError`. A mode of `b` with a static zero stride passes through.
+`coalesce`, so `b` may exceed `a`'s extent there. A third condition makes
+the modes of `b` add: their offsets must not carry across a mode boundary
+of `a`, which holds for injective `b` and is checked for static leaves.
+Violations throw an `ArgumentError`. A mode of `b` with a static zero
+stride passes through.
 """
 @generated function compose(a::A,b::B) where {A<:Layout,B<:Layout}
     _generate() do
         checks = Expr[]
         flat = _coalesce_x(_leaves(A,:a))
+        _check_carries(map(first,flat),_leaves(B,:b))
         result = _compose(map(first,flat),map(last,flat),_tree(B,:b),checks)
         quote
             $(checks...)
@@ -190,6 +194,26 @@ whole number of times. The last mode of `a` is unbounded, as in
     end
 end
 compose(c::Composition,b::Layout) = Composition(c.outer,compose(c.inner,b))
+# Composition threads every leaf of `b` through `a` separately and adds the
+# results, which is `a(b(c))` only if the leaves' offsets never carry across
+# a mode boundary of `a` when added: at every boundary `P` (a product of
+# leading extents of `a`), the largest residues modulo `P` of the leaves
+# must sum to less than `P`. Injective tilers and ownerships satisfy it;
+# overlapping modes may not. Checked for static leaves.
+function _check_carries(extents,leaves)
+    prefix = 1
+    for e in extents[1:end-1]
+        e isa Int || return
+        prefix *= e
+        total = 0
+        for (s,d) in leaves
+            _sis(d,0) && continue
+            s isa Int && d isa Int || return
+            total += maximum((d*i) % prefix for i in 0:s-1)
+        end
+        total < prefix || throw(Inexact("composition is not exact: modes of the inner layout carry across a boundary of $prefix elements of the outer layout"))
+    end
+end
 
 # ── Complement and inverses ─────────────────────────────────────────────
 """

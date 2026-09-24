@@ -31,15 +31,13 @@ Logical coordinate of every `(thread, slot)` pair, zero-based, as a matrix
 indexed by `(thread+1, slot+1)`, enumerated from the device `coordinate`
 method. This is the oracle for `mapping`, not an input to the derivations.
 """
-const _TABLES = Dict{Any,Matrix{Tuple{Int,Int}}}()
-const _TABLE_LOCK = ReentrantLock()
-function ownership_table(o)
-    lock(_TABLE_LOCK) do
-        get!(_TABLES,o) do
-            threads, slots = _thread_count(o), _register_count(o)
-            [map(Int,Layouts._coordinate(o,t,Val(e))) for t in 0:threads-1, e in 0:slots-1]
-        end
-    end
+ownership_table(o) = [map(Int,Layouts._coordinate(o,t,Val(e))) for t in 0:_thread_count(o)-1, e in 0:_register_count(o)-1]
+# The same table from the mapping, for derivations. Generators call this;
+# it is a pure function of the ownership, with no cache or lock.
+function _mapped_table(o)
+    m = Int(size(o)[1])
+    index(t,e) = Int(mapping(o)((t,e)))
+    [(index(t,e) % m, index(t,e) ÷ m) for t in 0:_thread_count(o)-1, e in 0:_register_count(o)-1]
 end
 
 "The ownership instance of a singleton ownership type, or `nothing`."
@@ -115,23 +113,33 @@ function reduction_plan(o, axis::Int)
     Kvn = filter_zeros(Kv)
     Layouts.is_injective(Kvn) || return nothing
     Layouts.is_injective(concat(filter_zeros(Kt),Kvn)) || return nothing
+    # A slot repeating another slot's value in the same thread is not
+    # combined with it, so sums count every logical value once.
     slots = Int(length(Kv))
     groups = Vector{Int}[]
     keys = Int[]
+    seen = Set{Int}()
     for e in 0:slots-1
+        Int(_slots(o)(e)) in seen && continue
+        push!(seen,Int(_slots(o)(e)))
         k = Int(Kv(e))
         g = findfirst(==(k),keys)
         g === nothing ? (push!(groups,[e+1]); push!(keys,k)) : push!(groups[g],e+1)
     end
-    # Shuffles exchange values within a warp only: bits 0:4 of the thread
-    # index. A replicating mode above them spans warps and has no recipe.
+    # Thread bits whose flip keeps the kept coordinate but changes the value
+    # are combined by xor shuffles, within a warp only: bits 0:4 of the
+    # thread index. Bits along which the ownership replicates every value
+    # hold copies already and are never combined, even across warps.
+    replicas = replica_mask(o)
     bits = Int[]
     prefix = 1
     for (s,d) in _pairs(Kt)
         if d == 0 && s > 1
-            low, high = trailing_zeros(prefix), trailing_zeros(prefix*s)
-            high <= 5 || return nothing
-            append!(bits,low:high-1)
+            for b in trailing_zeros(prefix):trailing_zeros(prefix*s)-1
+                replicas & (1 << b) == 0 || continue
+                b <= 4 || return nothing
+                push!(bits,b)
+            end
         end
         prefix *= s
     end
@@ -199,7 +207,7 @@ function selection_plan(from, to)
     _thread_count(from) == _thread_count(to) || return nothing
     sf, st = map(Int,size(from)), map(Int,size(to))
     all(map((a,b) -> a == b || a == 1,sf,st)) || return nothing
-    tf, tt = ownership_table(from), ownership_table(to)
+    tf, tt = _mapped_table(from), _mapped_table(to)
     project(c) = (sf[1] == 1 ? 0 : c[1], sf[2] == 1 ? 0 : c[2])
     plan = Vector{Vector{Tuple{Tuple{Int,Int},Int}}}()
     for e in axes(tt,2)
@@ -463,7 +471,7 @@ and slots occupy different digits. Offsets are `(static, runtime multiples)`.
 function tile_offsets(o,::Type{ML}) where ML
     leaves = _local_leaves(ML,map(Int,size(o)))
     leaves === nothing && return nothing
-    table = ownership_table(o)
+    table = _mapped_table(o)
     slots = [Layouts._slot_coordinate(o,e) for e in 0:_register_count(o)-1]
     so = [_local_offset(leaves,c) for c in slots]
     to = [_local_offset(leaves,table[t,1] .- slots[1]) for t in axes(table,1)]

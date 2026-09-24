@@ -91,9 +91,10 @@ Base.@constprop :aggressive Base.@propagate_inbounds window(t::MemoryTile{T,AS,L
 
 The same tile, valid only below `extents` along each axis (`nothing` leaves
 an axis unchecked). Loads through a bounded tile zero the elements outside
-and stores skip them; a vector counts as valid when its first element is, so
-along the axis vectors run the extent must be a multiple of the vector
-length. Coordinates are non-negative, so only the upper bounds are checked.
+and stores skip them, a vector at a time: a bound falling inside a vector is
+an error, checked unless elided with `@inbounds`, so along the axis vectors
+run the extent must be a multiple of the vector length. Coordinates are
+non-negative, so only the upper bounds are checked.
 Sub-tiles from `window` and `tile` inherit the bounds, shifted to their
 origin.
 """
