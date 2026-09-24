@@ -1,4 +1,7 @@
-using Tylo.Layouts: @Layout, coordinate, LocalOwnership, StripedOwnership, Ownership
+# Derivations from ownership layouts, checked against the enumeration
+# oracle: every ownership's `mapping` must reproduce the device `coordinate`
+# table, and every derived plan must match the independently known recipe.
+using Tylo.Layouts: @Layout, Layout, coordinate, LocalOwnership, StripedOwnership, Ownership, static
 
 # Independent ISA figures for the m16n8k16 warp MMA and the 64×N WGMMA
 # accumulator. These do not go through Tylo's coordinate methods.
@@ -7,8 +10,26 @@ isa_b(t,e) = (2*(t%4) + e%2 + 8*(e÷2), t÷4)
 isa_c(t,e) = (t÷4 + 8*(e÷2), 2*(t%4) + e%2)
 isa_wgmma_c(t,e) = (16*(t÷32) + (t%32)÷4 + 8*((e%4)÷2), 2*(t%4) + e%2 + 8*(e÷4))
 
-@testset "Ownership tables" begin
-    atom = MMAAtom((16,8,16),BFloat16)
+# The table an ownership's mapping describes, for comparison with the
+# table its coordinate method produces.
+function mapped_table(o)
+    m = Tylo.mapping(o)
+    M = Int(size(o)[1])
+    [(Int(m((t,e))) % M, Int(m((t,e))) ÷ M) for t in 0:Tylo._thread_count(o)-1, e in 0:Tylo._register_count(o)-1]
+end
+atom = MMAAtom((16,8,16),BFloat16)
+tiled(w,r) = Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val(w),Val(r),Val(16))))
+ownerships = Any[operand_layout(atom,OperandA()),operand_layout(atom,OperandB()),operand_layout(atom,Accumulator()),
+    operand_layout(MMAAtom((16,8,32),Float8E4M3),OperandA()),operand_layout(MMAAtom((16,8,8),Float32),OperandB()),
+    LocalOwnership{3,2}(),LocalOwnership{4,1}(),StripedOwnership{2,1}(),StripedOwnership{5,2}(),
+    Tylo.TmemTransfer{(32,4),2}(),Tylo.TmemTransfer{(8,32),1}(),
+    Tylo.WGMMAOwnership{8}(),Tylo.WGMMAOwnership{24}(),Tylo.WGMMAOwnership{64}(),
+    tiled((1,1),(1,2)),tiled((2,2),(2,3)),tiled((1,2),(1,1)),tiled((2,1),(3,1)),
+    Tylo.PermutedOwnership(LocalOwnership{3,2}()),Tylo.PermutedOwnership(operand_layout(atom,Accumulator())),
+    Tylo.PermutedOwnership(tiled((2,2),(2,2))),
+    [operand_layout(a,r) for a in copy_atoms() for r in (Registers(),Addresses())]...]
+
+@testset "Mappings reproduce the coordinate tables" begin
     @test Tylo.ownership_table(operand_layout(atom,OperandA())) == [isa_a(t,e) for t in 0:31, e in 0:7]
     @test Tylo.ownership_table(operand_layout(atom,OperandB())) == [isa_b(t,e) for t in 0:31, e in 0:3]
     @test Tylo.ownership_table(operand_layout(atom,Accumulator())) == [isa_c(t,e) for t in 0:31, e in 0:3]
@@ -19,42 +40,38 @@ isa_wgmma_c(t,e) = (16*(t÷32) + (t%32)÷4 + 8*((e%4)÷2), 2*(t%4) + e%2 + 8*(e�
     @test Tylo.ownership_table(StripedOwnership{2,1}()) == [(t+32e,0) for t in 0:31, e in 0:1]
     @test Tylo.ownership_table(Tylo.TmemTransfer{(32,4),2}()) == [(t,e) for t in 0:31, e in 0:3]
     @test Tylo.ownership_table(Tylo.PermutedOwnership(LocalOwnership{3,2}())) == [(e,t) for t in 0:31, e in 0:2]
-    for o in (operand_layout(atom,OperandA()),operand_layout(atom,Accumulator()),
-              LocalOwnership{4,2}(),StripedOwnership{2,2}(),Tylo.WGMMAOwnership{16}(),
-              Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val((2,2)),Val((2,3)),Val(16)))))
-        @test Tylo.is_complete(o)
-        @test Tylo.is_injective(o)
+    for o in ownerships
+        @test mapped_table(o) == Tylo.ownership_table(o)
+        @test Tylo.Layouts._isstatic(Tylo.mapping(o))
         @test Tylo.same_distribution(o,o)
     end
+    for o in (operand_layout(atom,OperandA()),operand_layout(atom,Accumulator()),
+              LocalOwnership{4,2}(),StripedOwnership{2,2}(),Tylo.WGMMAOwnership{16}(),tiled((2,2),(2,3)))
+        @test Tylo.is_complete(o)
+        @test Tylo.is_injective(o)
+    end
     @test !Tylo.is_injective(Tylo.reduction_plan(StripedOwnership{2,2}(),2).result)
+end
+
+@testset "Distribution equality agrees with the oracle" begin
+    for a in ownerships, b in ownerships
+        expected = size(a) == size(b) && Tylo._thread_count(a) == Tylo._thread_count(b) &&
+            Tylo._register_count(a) == Tylo._register_count(b) && Tylo.ownership_table(a) == Tylo.ownership_table(b)
+        @test Tylo.same_distribution(a,b) == expected
+    end
     @test Tylo.same_distribution(LocalOwnership{4,2}(),Tylo.TmemTransfer{(32,4),2}())
     @test !Tylo.same_distribution(LocalOwnership{4,2}(),LocalOwnership{4,1}())
     @test Tylo.same_distribution(Tylo.PermutedOwnership(LocalOwnership{4,2}()),LocalOwnership{4,1}())
-end
-
-@testset "Affine ownership fits" begin
-    atom = MMAAtom((16,8,16),BFloat16)
-    for o in (operand_layout(atom,OperandA()),operand_layout(atom,OperandB()),
-              operand_layout(atom,Accumulator()),LocalOwnership{4,2}(),LocalOwnership{3,1}(),
-              StripedOwnership{2,2}(),Tylo.WGMMAOwnership{24}(),
-              Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val((2,2)),Val((2,2)),Val(16)))))
-        fitted = Tylo.fit_ownership(Tylo.ownership_table(o),map(Int,size(o)))
-        @test fitted !== nothing
-        @test fitted isa Ownership
-        @test isbitstype(typeof(fitted))
-        @test Tylo.same_distribution(fitted,o)
-    end
-    # A table that is not affine in the thread bits has no fit.
-    table = [(t == 5 ? 6 : t, e) for t in 0:31, e in 0:1]
-    @test Tylo.fit_ownership(table,(32,2)) === nothing
+    @test Tylo.simplify_ownership(Tylo.TmemTransfer{(32,4),2}()) === LocalOwnership{4,2}()
+    @test Tylo.simplify_ownership(operand_layout(atom,OperandA())) === operand_layout(atom,OperandA())
 end
 
 @testset "Derived reduction plans match the implemented recipes" begin
-    atom = MMAAtom((16,8,16),BFloat16)
     plan = Tylo.reduction_plan(operand_layout(atom,Accumulator()),2)
     @test plan.groups == [[1,2],[3,4]]
     @test plan.bits == [0,1]
     @test Tylo.ownership_table(plan.result) == [(t÷4+8e,0) for t in 0:31, e in 0:1]
+    @test plan.result isa Ownership && isbitstype(typeof(plan.result))
 
     local_plan = Tylo.reduction_plan(LocalOwnership{5,2}(),2)
     @test local_plan.groups == [collect(1:5)]
@@ -73,8 +90,7 @@ end
     @test Tylo.ownership_table(striped.result) == [(0,0) for t in 0:31, e in 0:0]
 
     for wm in (1,2), rm in (1,2), rn in (1,3)
-        tiled = Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val((wm,1)),Val((rm,rn)),Val(16))))
-        p = Tylo.reduction_plan(tiled,2)
+        p = Tylo.reduction_plan(tiled((wm,1),(rm,rn)),2)
         @test p !== nothing
         @test length(p.groups) == 2rm
         @test all(==(2rn),length.(p.groups))
@@ -83,7 +99,7 @@ end
               [(16rm*(t÷32)+(t%32)÷4+8*(e%2)+16*(e÷2),0) for t in 0:32wm-1, e in 0:2rm-1]
     end
     # Two N warps hold disjoint columns; no shuffle recipe reaches them.
-    @test Tylo.reduction_plan(Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val((1,2)),Val((1,1)),Val(16)))),2) === nothing
+    @test Tylo.reduction_plan(tiled((1,2),(1,1)),2) === nothing
 
     for n in (8,16,32)
         w = Tylo.reduction_plan(Tylo.WGMMAOwnership{n}(),2)
@@ -104,9 +120,22 @@ end
     @test_throws ArgumentError Tylo.reduction_plan(LocalOwnership{2,2}(),3)
 end
 
+@testset "Broadcast slot maps" begin
+    acc = operand_layout(atom,Accumulator())
+    rows = Tylo.reduction_plan(acc,2).result
+    @test Tylo.broadcast_slots(rows,acc) == [1,1,2,2]
+    cols = Tylo.reduction_plan(acc,1).result
+    @test Tylo.broadcast_slots(cols,acc) == [1,2,1,2]
+    @test Tylo.broadcast_slots(acc,acc) == [1,2,3,4]
+    @test Tylo.broadcast_slots(rows,LocalOwnership{8,2}()) === nothing
+    local_rows = Tylo.reduction_plan(LocalOwnership{5,2}(),2).result
+    @test Tylo.broadcast_slots(local_rows,LocalOwnership{5,2}()) == [1,1,1,1,1]
+    @test Tylo.broadcast_slots(Tylo.reduction_plan(Tylo.WGMMAOwnership{16}(),2).result,Tylo.WGMMAOwnership{16}()) ==
+          [1+((e-1)%4)÷2 for e in 1:8]
+end
+
 @testset "In-lane relayout and windows" begin
-    atom = MMAAtom((16,8,16),BFloat16)
-    pair = Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val((1,1)),Val((1,2)),Val(16))))
+    pair = tiled((1,1),(1,2))
     permutation = Tylo.relayout_permutation(pair,operand_layout(atom,OperandA()))
     # pack_operand_a pairs (c1,c2),(c3,c4) of the left atom then the right atom.
     @test permutation == [1,2,3,4,5,6,7,8]
@@ -123,4 +152,15 @@ end
     @test Tylo.same_distribution(t.ownership,Tylo.TmemTransfer{(4,32),1}())
     c = Tylo.window_plan(operand_layout(atom,Accumulator()),(8,0),(8,8))
     @test c.slots == [3,4]
+    @test Tylo.ownership_table(c.ownership) == [isa_c(t,e) for t in 0:31, e in 0:1]
+    # A window of a tiled accumulator selects atoms; a window cutting an atom has no plan.
+    big = tiled((2,2),(2,2))
+    quarter = Tylo.window_plan(big,(32,16),(32,16))
+    @test quarter === nothing   # the second warp row and column: other threads, not other slots
+    atoms = Tylo.window_plan(big,(0,0),(32,32))
+    @test atoms === nothing     # 32 rows span two warps in M
+    right = Tylo.window_plan(tiled((1,1),(2,2)),(0,8),(32,8))
+    @test right.slots == [9,10,11,12,13,14,15,16]
+    @test Tylo.ownership_table(right.ownership) == Tylo.ownership_table(tiled((1,1),(2,1)))
+    @test Tylo.window_plan(tiled((1,1),(2,2)),(4,0),(8,16)) === nothing
 end

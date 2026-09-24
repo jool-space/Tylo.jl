@@ -36,7 +36,7 @@ include("online.jl")
 include("tma.jl")
 include("wgmma.jl")
 include("tcgen05.jl")
-include("enumerate.jl")
+include("derive.jl")
 
 # GPU implementations load with PTX.jl. CPU layout/fragment operations have
 # no dependency on a CUDA compiler, device, or instruction implementation.

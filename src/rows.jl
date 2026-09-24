@@ -1,4 +1,4 @@
-# Collective reductions derived from ownership enumeration. Device shuffles
+# Collective reductions derived from ownership layouts. Device shuffles
 # live in the PTX extension; the recipe itself is chosen while generating.
 
 # Balanced local tree with static tuple access.

@@ -141,7 +141,7 @@ future extraction of shared mathematics, not a prerequisite for this codebase.
   ways. Their contracts are useful; a coherent convenience layer is unfinished.
 - **Atoms as data.** A warp `MMAAtom` contributes only its operand ownerships;
   fragments, generic loads and stores, reductions, tiling and same-lane
-  conversion derive from them by enumeration. WGMMA and TMEM transfers still
+  conversion derive from them by layout algebra. WGMMA and TMEM transfers still
   carry their own plan types and completion contracts; folding them into the
   same atom description is planned, not done.
 - **Collective scope.** Tylo has no single counterpart to TK's `group<N>` yet.

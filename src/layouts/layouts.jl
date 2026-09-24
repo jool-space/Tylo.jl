@@ -5,10 +5,15 @@ module Layouts
 using Static: StaticInt, static
 
 export Layout, @Layout, Swizzle, compose, window, shape, cosize, static, coordinate
+export concat, coalesce, complement, right_inverse, left_inverse,
+       logical_divide, zipped_divide, tiled_divide,
+       logical_product, blocked_product, raked_product,
+       agree, is_injective, is_compact
 
 include("affine.jl")
 include("notation.jl")
 include("transforms.jl")
+include("algebra.jl")
 
 function layout end
 

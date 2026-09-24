@@ -66,37 +66,14 @@ cosize(l::Layout) = 1 + _span(shape(l),strides(l))
 
 Factor each flat mode into `(within_tile, tile_index)`, first component fastest.
 For example a 16×32 matrix tiled by 8×16 has shape `((8,2),(16,2))`.
-This algebraic operation changes coordinates, not storage or ownership.
+This is [`logical_divide`](@ref) by static contiguous tiles, one per mode:
+it changes coordinates, not storage or ownership.
 """
 function tile(l::Layout,::Val{T}) where T
-    s,d = shape(l),strides(l)
+    s = shape(l)
     length(s) == length(T) || throw(ArgumentError("tile rank mismatch"))
     all(x -> x isa IntLike,s) || throw(ArgumentError("tile expects flat modes"))
     all(map((n,t) -> t isa Int && t > 0 && n % t == 0,s,T)) ||
         throw(ArgumentError("tile extents must divide the shape"))
-    Layout(map((n,t) -> (static(t),n ÷ static(t)),s,T),
-           map((stride,t) -> (stride,stride*static(t)),d,T))
+    logical_divide(l,map(static,T))
 end
-
-"Drop hierarchy and merge adjacent modes when their strides are contiguous."
-function coalesce(l::Layout)
-    pairs = _pairs(shape(l),strides(l))
-    dims = Tuple{Int,Int}[]
-    # This is host-side algebra. Preserve the dynamic representation unless
-    # every leaf was static; never turn a runtime stride into specialization.
-    fixed = all(p -> p[1] isa StaticInt && p[2] isa StaticInt,pairs)
-    for (s,d) in pairs
-        s == 1 && continue
-        if !isempty(dims) && d == prod(dims[end])
-            n,stride = pop!(dims)
-            push!(dims,(n*Int(s),stride))
-        else
-            push!(dims,(Int(s),Int(d)))
-        end
-    end
-    isempty(dims) && push!(dims,(1,0))
-    cast = fixed ? static : identity
-    Layout(Tuple(cast(s) for (s,_) in dims),Tuple(cast(d) for (_,d) in dims))
-end
-_pairs(s::IntLike,d::IntLike) = ((s,d),)
-_pairs(s::Tuple,d::Tuple) = Tuple(p for ps in map(_pairs,s,d) for p in ps)

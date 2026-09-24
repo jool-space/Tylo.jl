@@ -1,6 +1,6 @@
 # Array spelling over register values and explicit thread/value ownership.
 # Instruction operands retain their packing/role-specific representations.
-# Distribution questions are answered by enumerating ownerships while
+# Distribution questions are answered from ownership layouts while
 # generating code, so every ownership with a static description participates.
 const BroadcastFragment = Fragment
 
@@ -58,9 +58,9 @@ Base.broadcastable(f::BroadcastFragment) = f
 @inline Base.Broadcast.instantiate(bc::Base.Broadcast.Broadcasted{FragmentStyle}) = bc
 
 # Distribution queries resolve while generating. Two ownerships are the same
-# distribution when their enumerated tables agree; a broadcast source with a
+# distribution when their coalesced mappings agree; a broadcast source with a
 # singleton axis supplies each anchor slot through a thread-uniform slot map.
-# Ownerships with runtime leaves cannot be enumerated while generating; two
+# Ownerships with runtime leaves have no static mapping while generating; two
 # such values of one type compare at run time and never broadcast across axes.
 @generated function _same_distribution(a::A,b::B) where {A,B}
     x, y = _static_instance(A), _static_instance(B)

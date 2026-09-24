@@ -9,7 +9,7 @@ results do not automatically validate later changes.
 
 | Area | Implemented scope | Evidence available | Main limit |
 |:--|:--|:--|:--|
-| Layout mathematics | Hierarchical affine shapes/strides, static/runtime leaves, composition, XOR swizzles, factorization, windows, two-axis permutation | Host tests; selected device arithmetic on GB10 | No general inverse/complement solver or symbolic simplifier |
+| Layout mathematics | Hierarchical affine shapes/strides, static/runtime leaves, symbolic composition, complements, right and left inverses, logical/zipped/tiled division, logical/blocked/raked products, slicing, XOR swizzles, windows, two-axis permutation; ownership plans derived from this algebra | Host tests against the enumeration oracle; selected device arithmetic on GB10; machine code of every prior kernel unchanged | Complements and inverses need static strides; windows do not compose symbolically |
 | Register arithmetic and memory access | Generic `Fragment` values, scalar broadcast, conversions and axis permutation; loads and stores derived from ownership: `ldmatrix`/`stmatrix` blocks, then vectors within a tile's declared alignment, then scalars | Host and GB10 tests; machine code of every prior kernel unchanged | Not a full array interface; bounded stores stay scalar |
 | Reductions/windows | Selected lane-local, warp-striped, warp-MMA, WGMMA and TMEM ownership recipes | Independent coordinate/numerical references, assembly, GB10 | Arbitrary ownership does not imply a supported collective or slice |
 | Warp MMA | 24 `mma.sync` atoms (16-bit, TF32, FP8, INT8) as ownership tables; derived `ldmatrix`/`stmatrix` operand copies; `TiledMMA` GEMM with full/bounded copies and stores, one/two copy stages | SM80/89/90a/100a/121a assembly; GB10 runtime oracle for every atom | No claim of a tuned GEMM library; no split-K/autotuning |
@@ -24,6 +24,32 @@ online `SoftmaxState(f; dims)` uses reduced fragments on either implemented
 logical axis. It does not synthesize collectives for arbitrary ownership.
 
 ## Most recent checks
+
+### Layout algebra and algebraic derivations (2026-09-16)
+
+`Tylo.Layouts` gained a symbolic algebra (`src/layouts/algebra.jl`): exact
+composition of layouts, coalescing, complements, right and left inverses,
+logical, zipped and tiled division, logical, blocked and raked products, and
+slicing. Structural operations are generated from the layout types, so
+static inputs give static results and mixed inputs keep one type; inexact
+cases throw instead of rounding. `tile` is now `logical_divide` by static
+tiles. The ownership derivations moved from enumerated tables to this
+algebra (`src/derive.jl`): every ownership has a `mapping` layout, and
+reductions, broadcast slot maps, windows, in-lane relayouts, matrix copy
+plans and vector plans are projections, compositions, divisions and
+inverses of it. `ownership_table` remains as the oracle.
+
+- Host: `test/host/algebra.jl` checks every operation pointwise against
+  enumeration and `@inferred` for static inputs; `test/host/derive.jl`
+  checks every ownership's mapping against its coordinate table, distribution
+  equality against table equality over all pairs, and the derived plans
+  against the previously hand-written recipes.
+- GB10 (Julia 1.13.0, CUDACore 6.4, CUDA compiler 13.4): the full suite
+  passes **86,313 checks** with three expected hardware skips. All 325 saved
+  kernels have byte-identical PTX to the tree before this change; 321 cubins
+  are byte-identical and the remaining four (two-stage Hopper WGMMA kernels)
+  are identical up to ptxas register numbering.
+- Docs: the layout doctests build.
 
 ### B200 execution (2026-09-14)
 
@@ -200,7 +226,7 @@ contracts.
 
 Reductions, broadcast slot maps, register windows and the same-lane C-to-A
 conversion are now derived from enumerated ownership tables at generation
-time (`src/enumerate.jl`), replacing the per-ownership recipe methods. The
+time (then `src/enumerate.jl`, now `src/derive.jl`), replacing the per-ownership recipe methods. The
 gate for this change is the kernel snapshot in `test/gpu/snapshots/`, taken
 on the dirty working tree of 2026-09-14 with Julia 1.13.0, CUDACore 6.4.0,
 CUDA compiler 13.4.59 and PTX `ae2362f`.
@@ -288,7 +314,7 @@ The `ldmatrix` and `stmatrix` instructions are now data, like the warp
 MMA instructions. `CopyAtom{:load|:store,Trans}` holds the two ownerships
 of one 8×8 matrix copy in `src/copyatoms.jl`: the 16-byte row each lane
 addresses and the two 16-bit units each lane holds. `matrix_copy_plan` in
-`src/enumerate.jl` covers any 32-lane ownership with those blocks along the
+`src/derive.jl` covers any 32-lane ownership with those blocks along the
 shared layout's static unit-stride axis, choosing the transposed instruction
 when the register pattern requires it, grouping consecutive blocks into
 `.x1`/`.x2`/`.x4` instructions and permuting the words into the fragment's
@@ -369,7 +395,7 @@ alignment; windows keep it only at aligned origins, and a swizzle limits the
 claim to the bytes it leaves in place. Bounds checks verify the declaration
 structurally and are elided with `@inbounds`. The default is the element
 size, so every existing kernel compiles unchanged. `vector_plan` in
-`src/enumerate.jl` groups a thread's slots into 16-, 8- or 4-byte vectors
+`src/derive.jl` groups a thread's slots into 16-, 8- or 4-byte vectors
 that are contiguous along the tile's unit-stride axis and start aligned on
 every thread; `load_fragment` and `store!` use them after the `ldmatrix`
 and `stmatrix` paths, as whole words for packed element types, through

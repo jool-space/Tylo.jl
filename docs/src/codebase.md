@@ -15,7 +15,8 @@ bindings.
 | `src/layouts/layouts.jl`, `src/layouts/` | Affine coordinate maps, static notation, composition, swizzles and windows | `test/host/layouts.jl`, `test/host/layout_macro.jl` |
 | `src/memory.jl` | Typed global/shared pointers plus storage layout and a declared alignment; address-unit conversion | `test/host/memory.jl`, `test/gpu/vectors.jl`, `test/gpu/gemm.jl` |
 | `src/fragments.jl`, `src/arrayops.jl` | Local values plus ownership, generic scalar broadcast, axis views and supported reductions/windows | `test/host/arrayops.jl`, `test/gpu/arrayops.jl` |
-| `src/enumerate.jl` | Host enumeration of ownership tables: reduction plans, broadcast slot maps, affine fits, windows, in-lane relayouts, matrix copy and vector plans | `test/host/enumerate.jl`, `test/host/copy.jl`, `test/host/memory.jl` |
+| `src/layouts/algebra.jl` | Symbolic layout algebra: composition, coalescing, complements, inverses, division, products, slicing, and the enumeration oracle | `test/host/algebra.jl` |
+| `src/derive.jl` | Ownership mappings and the plans derived from them by algebra: reductions, broadcast slot maps, windows, in-lane relayouts, matrix copy and vector plans | `test/host/derive.jl`, `test/host/copy.jl`, `test/host/memory.jl` |
 | `src/rows.jl`, `src/ptx/rows.jl` | Generated reductions from derived plans; warp shuffle bindings | `test/host/rows.jl`, `test/gpu/rows.jl` |
 | `src/copy.jl`, `src/ptx/copy.jl` | Vector copy assignment, structural validation, full and bounded copies; derived `ldmatrix`/`stmatrix` loads and stores of fragments | `test/gpu/boundaries.jl`, `test/gpu/atoms.jl` |
 | `src/copyatoms.jl` | `CopyAtom` register and address ownerships of the 8×8 matrix copy instructions | `test/host/copy.jl` |
@@ -60,11 +61,12 @@ heap array. A custom scalar PTX operation uses this same path.
 
 For `sum(f; dims=2)`, follow `_fragment_reduce` to the generated functions
 `_reduce_values` and `_reduced_ownership` in `src/rows.jl`. While generating,
-they call `reduction_plan` in `src/enumerate.jl`, which enumerates the
-ownership table and derives the local slot groups, the xor-shuffle lane bits
-and the fitted result ownership. `broadcast_slots` derives from the same
-tables which result slot each input slot reads when a reduction is broadcast
-back. Ownerships whose values span warps yield no plan and raise an error.
+they call `reduction_plan` in `src/derive.jl`, which projects the ownership's
+mapping onto the kept axis and reads the local slot groups, the xor-shuffle
+lane bits and the replicated result ownership off that layout. `broadcast_slots`
+composes the inverse of one slot layout with another to find which result slot
+each input slot reads when a reduction is broadcast back. Ownerships whose
+values span warps yield no plan and raise an error.
 
 ## Internal tuple construction
 

@@ -175,13 +175,14 @@ separate representations and completion requirements.
 ## Collective implementations and participation
 
 A reduction recipe is derived from the ownership rather than written per
-ownership type. While generating code, Tylo enumerates the ownership's
-`(thread, slot) → coordinate` table and finds, for the requested axis, the
-slots of a thread that share a kept coordinate and the lane-index bits whose
-flip preserves it. The recipe is a local tree over those slots followed by
-one xor shuffle per such bit. The result ownership, with its replication
-across lanes, is fitted from the same table. For the ownerships used so far
-this reproduces the hand-written recipes exactly:
+ownership type. While generating code, Tylo projects the ownership's
+`(thread, slot) → index` layout onto the kept axis. Slot modes with zero
+stride in that projection are the slots of a thread that share a kept
+coordinate; thread modes with zero stride are the lane-index bits whose flip
+preserves it. The recipe is a local tree over those slots followed by one xor
+shuffle per such bit, and the projection itself, with its zero strides, is the
+result ownership. For the ownerships used so far this reproduces the
+hand-written recipes exactly:
 
 | Ownership | Derived communication | Result per thread |
 |:--|:--|:--|

@@ -51,14 +51,13 @@ intact. The logical index can also be a nested tuple, such as the `(within,
 outer)` coordinates produced by `tile` in the preceding example.
 
 An integer coordinate decomposes first-mode-fastest. `tile` factors flat
-modes into within-tile and tile-index components. `coalesce` removes unit
-modes and merges contiguous modes without changing the function on that
-linearized domain. Coalescing is host-side planning; mixed layouts retain
-runtime representation, while wholly static inputs stay static.
+modes into within-tile and tile-index components; it is one use of
+[the algebra](@ref "The algebra") below, which composes, divides, multiplies
+and inverts layouts symbolically.
 
-`compose(f, l)` represents `f(l(c))`. It supports nonlinear offset
-permutations without pretending they are affine strides. There is no
-arbitrary symbolic composition simplifier or inverse solver yet.
+`compose(f, l)` represents `f(l(c))` for any callable `f`. When `f` is itself
+a layout the result is a new layout; when it is a swizzle, the composition
+stays a `Composition`, without pretending the permutation is affine.
 
 ## Static layout notation
 
@@ -197,13 +196,79 @@ before that buffer can be overwritten. Arithmetic on an accumulator returns
 another value with the same ownership. Scaling and activation can therefore
 be composed into an epilogue without a separate kernel.
 
+## The algebra
+
+Layouts compose. `compose(a, b)` is the layout of `a(b(c))` on `b`'s domain,
+worked out symbolically from the two stride trees, so a tile of a tile or a
+thread's view of a tile is one layout with plain strides, evaluated by a
+few multiplies. `b` addresses `a`'s linearized domain, first mode fastest,
+which is why the tile below has stride 16 along columns. The result is exact or it throws: a mode of `b` has to step
+evenly inside a mode of `a` or start on a multiple of it, and where it runs
+past a mode it has to do so a whole number of times. Nothing is rounded.
+
+```jldoctest algebra
+julia> using Tylo.Layouts: @Layout, shape, compose, complement, concat, logical_divide, zipped_divide, static;
+
+julia> l = @Layout (16, 32) (32, 1);            # row-major 16×32
+
+julia> t = compose(l, @Layout (8, 8) (1, 16));   # the top-left 8×8 in l's own coordinates
+
+julia> strides(t)
+(static(32), static(1))
+
+julia> t((3, 5)) == l((3, 5))
+true
+```
+
+`complement(t, n)` is the layout of everything `t` leaves out of `[0, n)`:
+the positions of a tile. Concatenating the two gives an injective layout
+covering the whole extent, which is how `logical_divide` splits a layout
+into `((within tile), (tile index))`, one tile per mode, and how
+`zipped_divide` regroups that as `((tiles...), (indices...))`.
+
+```jldoctest algebra
+julia> c = complement(@Layout((8,), (1,)), static(32));   # the four positions of an 8-tile in 32
+
+julia> shape(c), strides(c)
+((static(4),), (static(8),))
+
+julia> z = zipped_divide(l, (static(8), static(16)));
+
+julia> shape(z), strides(z)
+(((static(8), static(16)), (static(2), static(2))), ((static(32), static(1)), (static(256), static(16))))
+
+julia> z(((3, 5), (1, 1))) == l((3 + 8, 5 + 16))
+true
+```
+
+Products go the other way: `logical_product(block, tile)` repeats a block at
+the positions a tile enumerates, and `blocked_product` and `raked_product`
+interleave the two mode by mode. `right_inverse` and `left_inverse` invert a
+static layout on its image; `compose(l, right_inverse(l))` is the identity
+on the contiguous run of offsets `l` reaches.
+
+Two rules make the algebra predictable. Staticness is decided leaf by leaf:
+arithmetic between static leaves stays static, and a runtime leaf keeps its
+integer type, so a global tile with an `Int32` leading dimension composed
+with a static tile has an `Int32` stride where the runtime value enters and
+static leaves elsewhere. Structure is decided by types alone: which modes
+merge, drop or split never depends on a runtime value, so a layout
+expression has one type for every value of its runtime leaves. The
+structural operations are generated functions that read the types once and
+emit straight-line code.
+
+The oracle for all of this is enumeration. `agree(a, b)` compares two
+layouts pointwise over their domain, and `is_injective` and `is_compact`
+decide the properties the algebra does not. The host suite checks every
+operation against that oracle, including that inexact cases throw.
+
 ## Limits of the algebra
 
-The implementation provides affine evaluation, hierarchical factorization,
-composition, swizzles, windows and selected axis permutations. `coalesce` and
-nonlinear `cosize` are host planning operations. It does not provide arbitrary
-symbolic simplification, inversion, complements, automatic vectorization or
-register redistribution.
+Windows are affine, not linear, so they compose with callables but not
+symbolically with layouts; slice or window the composed layout instead.
+Complements and inverses need static strides, as their structure is a
+sorting of strides. The algebra does not vectorize or redistribute registers
+on its own; those derivations live with the instructions that need them.
 
 Describing a map is separate from binding it to an instruction. For example,
 TMA accepts a canonical descriptor-compatible layout, not every layout that can
