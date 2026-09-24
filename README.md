@@ -3,105 +3,81 @@
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://docs.jool.space/Tylo.jl/dev/)
 [![Build Status](https://github.com/jool-space/Tylo.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/jool-space/Tylo.jl/actions/workflows/CI.yml)
 
-Composable tile programming for NVIDIA GPUs in Julia.
+Tile programming for NVIDIA GPUs in Julia, at no cost over writing the
+instructions by hand.
 
-Tylo provides logical memory views, distributed register values, and specific
-copy and matrix operations that connect them. PTX.jl supplies instruction
-bindings. The kernel author controls the launch, work assignment, allocation
-and pipeline. The API is experimental.
-
-## Read the design and code
-
-Start with the [manual](docs/src/index.md). For a focused reading path:
-
-1. [Design and boundaries](docs/src/design.md): storage, ownership, operation
-   plans, completion, and the tradeoffs still worth challenging.
-2. [Layouts](docs/src/layouts.md) and [fragments](docs/src/rows.md): static
-   notation, logical axes, register distribution, scalar broadcast and reductions.
-3. [Walk through GEMM](docs/src/gemm.md): one complete consumer from host planning
-   through shared copies and matrix instructions to the epilogue.
-4. [Read the implementation](docs/src/codebase.md): source files, specialization,
-   dispatch paths and the tests that establish their contracts.
-5. [Current status](docs/src/validation.md): supported combinations, hardware
-   coverage and performance limits.
-
-The [API reference](docs/src/api.md) and [dated validation history](docs/src/validation-history.md)
-are separate from the conceptual explanation. Build this working tree's manual
-with the instructions below; the published documentation follows deployed commits.
-
-## The core distinction
-
-`Fragment(values, ownership)` separates each thread's local values from their
-logical coordinates. Memory layouts separately map those coordinates to storage.
-A thread's values can form a row, a scattered patch, or part of an MMA result.
-
-Inside a kernel, ready register fragments support ordinary scalar composition:
+A kernel describes **where** a tile lives (a memory tile: a pointer and a
+layout), **who** holds each value (an `Ownership`, and a `Fragment` of
+values in it) and **what** the hardware does (an `Atom`). Everything else,
+from vector widths and `ldmatrix` groupings to reduction shuffles, `cp.async`
+zero-fill and descriptors, is derived from their layouts while the kernel
+compiles.
 
 ```julia
-m = maximum(f; dims=2)  # requires a supported collective for this ownership
-w = exp.(f .- m)       # generic scalar broadcast, for finite input here
-y = w ./ sum(w; dims=2)
-z = ptx"fma.rn.f32".(y, 2f0, 1f0)
+using Tylo, CUDACore, BFloat16s
+
+# Lane t holds 8 consecutive values of a 256-wide row: one 16-byte load.
+const ROW = distribute((1, 256), 32; vector=8, axis=2)
+# A column-major 256×n device matrix as n contiguous rows (device arrays are 16-byte aligned).
+@inline rows(a) = @inbounds permutedims(GlobalTile(a, 16))
+
+function softmax_rows!(y, x)
+    lane, row = Int32(threadIdx().x) - Int32(1), Int32(blockIdx().x) - Int32(1)
+    @inbounds begin                                 # one warp per row, by the launch
+        f = Float32.(load_fragment(ROW, tile(rows(x), (1, 256), (row, 0)), lane))
+        w = exp.(f .- maximum(f; dims=2))           # a butterfly across the warp
+        store!(tile(rows(y), (1, 256), (row, 0)), Fragment{BFloat16}(w ./ sum(w; dims=2)), lane)
+    end
+    return
+end
+
+x = CuArray(BFloat16.(randn(Float32, 256, 1000)))
+y = similar(x)
+@cuda threads=32 blocks=size(x, 2) softmax_rows!(y, x)
 ```
 
-Elementwise operations preserve ownership. Reductions need an implemented
-communication recipe. Logical `permutedims` changes coordinates; producing a
-different instruction's register arrangement may require an explicit conversion.
-Memory tiles and pending results are not implicitly loaded or waited on by
-broadcast. See [the fragment support table](docs/src/rows.md).
+That kernel compiles to one 16-byte load, two five-step shuffle butterflies,
+paired conversions and one 16-byte store per lane. Without `@inbounds`,
+every access is checked: tile extents, alignment, thread indices.
 
-## Worked consumers
+Tylo leaves the launch, work assignment, allocation, pipelining and every
+barrier to the kernel, so the same primitives serve standalone kernels and
+[Megakernels](https://github.com/jool-space/Megakernels.jl)' task bodies.
+The API is experimental.
 
-- [Complete warp-MMA GEMM](examples/gemm/README.md): BF16/FP16 inputs,
-  shared layouts, asynchronous copies, bounded tiles and composed epilogues.
-- [Softmax](examples/softmax/README.md): lane-local, warp-striped and MMA
-  reductions, with explicit masking and fully masked-group behavior.
-- [Streaming attention](examples/streaming_attention/README.md): a complete
-  D=64 BF16 forward kernel with online statistics and chained warp MMA on GB10.
-- [TMA/WGMMA GEMM](examples/hopper/README.md): producer/consumer pipeline and
-  the primitives also used by Megakernels' `HopperProjection`.
-- [Datacenter FlashAttention experiment](examples/flash_attention/README.md):
-  TMEM correction and epilogue replacements in a raw PTX kernel.
+## What's there
 
-Warp GEMM, TMA and register operations have GB10 runtime coverage. TMEM
-transfers and the datacenter attention comparison have run on a B200. WGMMA
-has assembly coverage and prepared hardware tests; H100/H200 execution remains
-unvalidated. The library does not yet have general CuTe/ThunderKittens
-coverage, including tcgen05 MMA, arbitrary redistribution or allocation
-management.
+- Layout algebra (compose, divide, product, complement, inverses, swizzles)
+  over mixed static and runtime extents.
+- Loads, stores and `cp.async` copies derived from ownership and layout:
+  `ldmatrix`/`stmatrix`, vectors, zero-filling bounded tiles.
+- Fragment broadcasting, reductions across lanes, coordinates for masking,
+  conversions to BF16/FP16/FP8.
+- Warp MMA (16-bit, TF32, FP8, INT8, block-scaled MXFP8), TMA, Hopper WGMMA,
+  Blackwell tcgen05 and tensor memory.
 
-`Tylo.Layouts` contains the pure coordinate mathematics. Megakernels consumes
-Tylo operations while owning task scheduling and buffer reuse. Standalone
-kernels use Tylo without Megakernels; cuTile uses a separate compiler-driven
-approach. The [design](docs/src/design.md) explains those boundaries.
+See the [documentation](docs/src/index.md) and the [status page](docs/src/status.md)
+for what has run on which hardware. The [examples](examples/) include a
+complete GEMM, softmax, streaming attention, a TMA/WGMMA pipeline and
+datacenter FlashAttention pieces.
 
 ## Development
 
 The test project is a workspace member, so one instantiate covers the
-package, its tests and its docs (Julia 1.10+; CUDACore and PTX are pulled in
-by the test project):
+package, its tests and its docs (Julia 1.10+):
 
 ```sh
 julia --project=. -e 'using Pkg; Pkg.instantiate(; workspace=true)'
 julia --project=test test/runtests.jl --jobs=4        # host and GPU tiers
 julia --project=test test/runtests.jl host            # host only
-julia --project=test test/runtests.jl gpu/gemm gpu/atoms
 julia --project=test examples/gemm/run.jl 65 97 73
 ```
 
-Tests run in parallel with `ParallelTestRunner`. `host/` needs no GPU.
-`gpu/` files need the CUDA compiler; their assembly checks always run and
-their runtime sections run when the device satisfies the file's
-`# TEST_TARGET: cc>=8.0`-style banner (`test/targets.jl`). Set
-`TYLO_REQUIRE_GPU_RUNTIME=true` to fail instead of skipping without a GPU
-and `TYLO_EVIDENCE=<dir>` to save PTX and cubins.
-
-Build the manual locally, including its host doctests:
+`gpu/` test files always check their kernels' assembly and run them when the
+device allows. `TYLO_EVIDENCE=<dir>` saves every test kernel's PTX and cubin,
+to compare machine code before and after a change.
 
 ```sh
 julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
-julia --project=docs docs/make.jl
+julia --project=docs docs/make.jl                     # builds docs/build and runs the doctests
 ```
-
-Open `docs/build/index.html`. GPU excerpts in the manual identify their required
-surrounding setup; the complete programs live in `examples/`.

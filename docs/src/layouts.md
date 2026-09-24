@@ -1,290 +1,109 @@
 ```@meta
 CurrentModule = Tylo
-DocTestSetup = :(using Tylo)
+DocTestSetup = :(using Tylo; using Tylo.Layouts: logical_divide, complement, left_inverse, static)
 ```
 
-# Layouts, storage and ownership
+# Layouts and ownership
 
-Tylo's layout algebra describes coordinate maps used by the instruction
-implementations. Start with [Design and boundaries](design.md) for how storage
-maps differ from register ownership. This page explains the mathematics and
-notation; [the GEMM walkthrough](gemm.md) shows a complete consumer.
+## Layouts
 
-## A layout is a function
+A [`Layout`](@ref Layouts.Layout) maps zero-based coordinates to offsets: a
+tree of extents (its shape) and a matching tree of strides. Every leaf is
+either static, a `StaticInt` known to the compiler, or an ordinary integer
+known only at run time, and the two mix freely. `@Layout` writes static leaves by default and takes `$` for runtime
+ones; layouts print the same way.
 
-`Layout(shape, strides)` maps zero-based logical coordinates to offsets.
-A memory view supplies the unit: elements for global/shared storage, and typed
-TMEM slots for the TMEM adapter. Shapes and strides may be hierarchical. Staticness belongs to each
-leaf: use `static(n)` for a compile-time constant and an ordinary integer
-for a runtime dimension or leading stride. Runtime strides do not become
-new type parameters.
+```jldoctest layouts
+julia> l = @Layout (4, 8) (8, 1)   # a row-major 4×8 matrix
+@Layout (4, 8) (8, 1)
 
-```jldoctest
-julia> using Tylo.Layouts: @Layout;
+julia> l((1, 2)), l(9)             # a coordinate, or a linear index, first mode fastest
+(10, 10)
 
-julia> l = @Layout (16, 32) (32, 1);
-
-julia> l((Int32(3), Int32(7)))
-103
-
-julia> Tylo.Layouts.tile(l, (8, 16))(((3, 1), (7, 1))) == l((11, 23))
-true
+julia> n = 100; @Layout (4, $n) (1, 4)
+@Layout (4, $100) (1, 4)
 ```
 
-For a matrix shape `(16,32)`, strides `(32,1)` make the second axis contiguous:
-this is row-major storage. Strides `(1,16)` make the first axis contiguous:
-ordinary column-major storage. `Layout` accepts either. There is no automatic
-choice of major order in the constructor or `@Layout`.
+What the compiler can see decides what the code costs: a static stride of
+one proves that elements are contiguous, which is what lets a load become
+one 16-byte instruction; a runtime stride of one proves nothing. Matrix
+dimensions and leading dimensions are usually runtime, tile shapes and
+unit strides static.
 
-```jldoctest
-julia> using Tylo.Layouts: @Layout;
+### The algebra
 
-julia> l = @Layout (16, 32) (32, 1);
+`Tylo.Layouts` implements the layout algebra of CuTe, exactly and
+symbolically: static inputs give static results, and each operation either
+represents its result as a layout or throws.
 
-julia> permutedims(l)((7, 3)) == l((3, 7))
-true
+```jldoctest layouts
+julia> compose(@Layout((16,), (2,)), @Layout((4, 2), (2, 1)))   # a(b(c))
+@Layout (4, 2) (4, 2)
+
+julia> logical_divide(@Layout((16, 32), (32, 1)), (static(8), static(16)))   # (within tile, tile index) per mode
+@Layout ((8, 2), (16, 2)) ((32, 256), (1, 16))
+
+julia> complement(@Layout((4,), (2,)), static(16))   # the positions a layout leaves out
+@Layout (2, 2) (1, 8)
+
+julia> left_inverse(@Layout((4, 8), (8, 1)))
+@Layout (8, 4) (4, 1)
+
+julia> compose(@Layout((4, 4), (1, 8)), @Layout((3,), (2,)))
+ERROR: ArgumentError: composition is not exact: extent 3 does not split evenly at the mode boundary 2
+[...]
 ```
 
-Permutation reverses the top-level shape and stride modes together. Its matching
-coordinate is reversed too. With nested modes, their internal structure remains
-intact. The logical index can also be a nested tuple, such as the `(within,
-outer)` coordinates produced by `tile` in the preceding example.
+The full set is `compose`, `coalesce`, `complement`, `left_inverse`,
+`right_inverse`, `logical_divide`, `zipped_divide`, `tiled_divide`,
+`logical_product`, `blocked_product`, `raked_product` and `slice`; their
+docstrings state the exact conditions. A [`Swizzle`](@ref Layouts.Swizzle)
+composed with a layout XORs bit fields of its offsets, the bank-conflict
+patterns of shared memory, and [`window`](@ref Layouts.window) selects a
+static-size sub-layout at a runtime origin.
 
-An integer coordinate decomposes first-mode-fastest. `tile` factors flat
-modes into within-tile and tile-index components; it is one use of
-[the algebra](@ref "The algebra") below, which composes, divides, multiplies
-and inverts layouts symbolically.
+## Ownership
 
-`compose(f, l)` represents `f(l(c))` for any callable `f`. When `f` is itself
-a layout the result is a new layout; when it is a swizzle, the composition
-stays a `Composition`, without pretending the permutation is affine.
+An [`Ownership`](@ref Layouts.Ownership) says which thread holds which
+element of a logical `rows × cols` tile. It is a layout with two modes,
+threads then slots, from `(thread, slot)` to the column-major index of the
+element held there. It says nothing about memory: the same ownership can be
+loaded from row-major or column-major storage, swizzled or not.
 
-## Static layout notation
+```jldoctest layouts
+julia> o = distribute((64, 32), 128; vector=8, axis=2)   # 16-byte BF16 vectors along rows
+Ownership((64, 32), @Layout ((4, 32), (8, 2)) ((512, 1), (64, 32)))
 
-`@Layout` defaults to static shape and stride values. Use `$` to preserve a
-value's existing type: ordinary integers stay ordinary integers, while
-already-static values stay static. The explicit `Layout` constructor keeps
-its existing behavior.
+julia> coordinate(o, 5, 9)   # thread 5, slot 9: its second vector's second element
+(33, 9)
 
-```jldoctest
-julia> using Tylo.Layouts: @Layout, shape, static;
-
-julia> l = @Layout (16, 32) (32, 1);
-
-julia> shape(l) === (static(16), static(32))
-true
-
-julia> n, ld = Int32(5), Int32(128);
-
-julia> l = @Layout ((8, 4), $n) ((1, 8), $ld);
-
-julia> shape(l) === ((static(8), static(4)), n)
-true
-
-julia> strides(l) === ((static(1), static(8)), ld)
-true
-
-julia> l(((Int32(3), Int32(2)), Int32(1)))
-147
+julia> Ownership((1, 8); threads=32)   # every lane holds the whole row
+Ownership((1, 8), @Layout (32, 8) (0, 1))
 ```
 
-Tuple syntax is traversed recursively, preserving its structure. An unmarked
-variable such as `subshape` becomes `static(subshape)`; `static` recursively
-converts tuple values too. `$subshape` instead preserves the complete subtree,
-including any mixture of static and ordinary integers. It inserts one mode,
-without splicing the tuple's contents. Whole shape/stride tuples can also be
-passed as `@Layout $shape_value $stride_value`.
+The constructors:
 
-Unmarked expressions are evaluated normally and passed to `static`, once per
-occurrence. Thus a type-derived `K` works as `@Layout (64, K) (K, 1)`, but an
-unknown runtime integer does not become known to inference merely because it
-is unmarked. Interpolate a whole ordinary expression as `$(2*n)`.
+| Constructor | Distribution |
+|:--|:--|
+| `Ownership((m, n))` | one thread holds the whole tile, column-major slots |
+| `Ownership((m, n); threads=k)` | each of `k` threads holds all of it |
+| `distribute((m, n), threads; vector, axis)` | vectors along `axis` dealt to threads in order: copies, lane-per-row, warp-striped rows |
+| `operand_layout(atom, role)` | what an instruction prescribes for an operand |
+| `Ownership((m, n), mapping)` | anything else, as a layout |
 
-Both arguments are required. Tuple splatting and automatic stride generation
-are outside this notation; shape and stride trees obey the same constructor
-checks as explicit layouts.
+and the transformations `permutedims(o)` (the transposed tile, the same
+registers), `repeat(o, m, n)` (every thread holds its values of an `m × n`
+grid of copies) and, on fragments, `window` and `relayout`.
 
-When generating Julia code, an enclosing quote consumes `$` before the layout
-macro sees it. Insert a dollar expression explicitly to preserve the marker:
+An ownership may replicate: a zero-stride thread mode means several threads
+hold the same values. Reductions never combine a value with its copies, a
+store writes each value once, and a copy issues it once.
 
-```julia
-n_marker = Expr(:$, :n)
-ld_marker = Expr(:$, :ld)
-expr = :(@Layout (64, $n_marker) ($ld_marker, 1))
-# Constructs the syntax: @Layout (64, $n) ($ld, 1)
-```
+The constructor stores the mapping in a canonical form, so two ownerships
+with the same distribution have the same type, whichever way they were
+written, and transposing twice gives back the original.
 
-The names `n` and `ld` are resolved when the generated code executes. Emitting
-the explicit `Layout` constructor is also a straightforward choice for code
-generators.
-
-## Swizzle phase belongs to the allocation
-
-`Swizzle{B,M,S}` XORs two disjoint bit fields, preserving the low M bits.
-The disjoint-field check is essential: overlapping fields can destroy
-information instead of permuting addresses.
-
-```jldoctest
-julia> using Tylo.Layouts: @Layout, Swizzle, compose;
-
-julia> l = compose(Swizzle{2,3,2}(), @Layout((32, 32), (32, 1)));
-
-julia> w = Tylo.Layouts.window(l, (1, 8), (16, 16));
-
-julia> w((2, 3)) == l((3, 11))
-true
-```
-
-The window retains its parent's mapping and origin. Advancing a pointer
-and restarting the swizzle at zero would generally describe different
-storage. Nested windows combine logical origins while preserving the
-allocation base. `cosize` counts storage through the largest offset,
-including holes and any prefix retained by a window. For nonlinear layouts
-it enumerates on the host; compute allocation sizes before launching.
-
-Layout evaluation assumes valid coordinates. Constructors and windows check
-their domains; a kernel may use `@inbounds` once its caller has validated
-dimensions and its launch grid.
-
-## Three representations, three addressing rules
-
-- `GlobalTile` and `SharedTile` borrow typed LLVM pointers. Their layouts
-  count elements; pointer access converts to bytes. Global coordinates are
-  widened before offset arithmetic to support allocations larger than 4 GiB.
-  A third argument, `align`, declares that the pointer and every
-  non-unit stride are multiples of `align` bytes; fragment loads and stores
-  then vectorize up to that width, and windows keep the declaration only at
-  aligned origins. The default is the element size.
-- `Fragment` holds immutable logical values and explicit ownership. It is
-  not an addressable local array; register indexing stays static.
-- `TmemTile` maps logical coordinates to TMEM storage; `TmemTransfer` binds
-  register ownership to a supported hardware access. See [TMEM tiles and transfers](@ref).
-  Generic byte-pointer slicing is never applied to TMEM.
-
-The MMA atom's ownership layout maps `(lane, logical_value)` to a matrix
-coordinate. It is independent of the physical memory layout. A and B use
-packed UInt32 registers; C uses FP32 registers. Their register counts come
-from the instruction's operand roles, with no generic tile-area/32 rule.
-B uses mathematical `(K,N)` coordinates throughout.
-
-## Plans describe work, callers establish readiness
-
-`CopyPlan` distributes 16-byte vectors among threads. `validate_copy` checks
-both layouts for vector contiguity and alignment and checks destination
-injectivity. The caller must also provide aligned pointers and keep the
-allocations alive. Copy groups are per thread; `wait_copies` is not a CTA
-barrier and is not a readiness proof for an independently owned object.
-
-`MMAAtom` describes an instruction by its operand ownerships. `CopyAtom`
-describes the 8×8 `ldmatrix`/`stmatrix` matrix copies the same way, by the
-row each lane addresses and the two units each lane holds. `load_fragment`
-and `store!` derive the copy of any 32-lane ownership from those tables:
-blocks along the shared layout's static unit-stride axis, plain or
-transposed, grouped into `.x1`/`.x2`/`.x4` instructions, with the words
-permuted into the fragment's slot order; `validate_copy(ownership, T,
-layout)` checks the addressed rows on the host. `load_fragment(atom, role,
-tile, thread)` is that load with the atom's operand ownership.
-`ScaledMMAAtom` is the block-scaled `mma.sync` of consumer Blackwell
-(`.kind::mxf8f6f4`): `D = (A .* scale_A) * (B .* scale_B) + C` with FP8
-operands and one `Float8_E8M0FNU` power-of-two scale per row of A and per
-column of B. With K = 32 one instruction multiplies one microscaling block,
-so a K loop over MXFP8 operands accumulates the product without
-dequantizing anything. A, B and the accumulator keep the dense atom's
-ownerships. The scales are two more operands, `ScaleA` (16×4) and `ScaleB`
-(4×8): a lane's register holds the four scales of its row or column for four
-consecutive K blocks, and the `block` argument of `mma` selects one. These
-ownerships replicate (lane bit 1 of a row scale and both lane bits of a column
-scale have zero stride), which is what the instruction's thread selectors
-permit; they were measured on a GB10 by giving every thread and byte its own
-exponent.
-
-`TiledMMA` repeats this atom over a warp arrangement and a per-warp grid.
-It reuses A/B operands across those repetitions. All participating lanes
-must execute collectively with compatible views; types do not prove that
-control-flow property. Shared memory must already be ready for consumption.
-
-The GEMM example owns its one- or two-buffer pipeline. It synchronizes after
-copy completion, and again after every warp has finished reading a buffer
-before that buffer can be overwritten. Arithmetic on an accumulator returns
-another value with the same ownership. Scaling and activation can therefore
-be composed into an epilogue without a separate kernel.
-
-## The algebra
-
-Layouts compose. `compose(a, b)` is the layout of `a(b(c))` on `b`'s domain,
-worked out symbolically from the two stride trees, so a tile of a tile or a
-thread's view of a tile is one layout with plain strides, evaluated by a
-few multiplies. `b` addresses `a`'s linearized domain, first mode fastest,
-which is why the tile below has stride 16 along columns. The result is exact or it throws: a mode of `b` has to step
-evenly inside a mode of `a` or start on a multiple of it, and where it runs
-past a mode it has to do so a whole number of times. Nothing is rounded.
-
-```jldoctest algebra
-julia> using Tylo.Layouts: @Layout, shape, compose, complement, concat, logical_divide, zipped_divide, static;
-
-julia> l = @Layout (16, 32) (32, 1);            # row-major 16×32
-
-julia> t = compose(l, @Layout (8, 8) (1, 16));   # the top-left 8×8 in l's own coordinates
-
-julia> strides(t)
-(static(32), static(1))
-
-julia> t((3, 5)) == l((3, 5))
-true
-```
-
-`complement(t, n)` is the layout of everything `t` leaves out of `[0, n)`:
-the positions of a tile. Concatenating the two gives an injective layout
-covering the whole extent, which is how `logical_divide` splits a layout
-into `((within tile), (tile index))`, one tile per mode, and how
-`zipped_divide` regroups that as `((tiles...), (indices...))`.
-
-```jldoctest algebra
-julia> c = complement(@Layout((8,), (1,)), static(32));   # the four positions of an 8-tile in 32
-
-julia> shape(c), strides(c)
-((static(4),), (static(8),))
-
-julia> z = zipped_divide(l, (static(8), static(16)));
-
-julia> shape(z), strides(z)
-(((static(8), static(16)), (static(2), static(2))), ((static(32), static(1)), (static(256), static(16))))
-
-julia> z(((3, 5), (1, 1))) == l((3 + 8, 5 + 16))
-true
-```
-
-Products go the other way: `logical_product(block, tile)` repeats a block at
-the positions a tile enumerates, and `blocked_product` and `raked_product`
-interleave the two mode by mode. `right_inverse` and `left_inverse` invert a
-static layout on its image; `compose(l, right_inverse(l))` is the identity
-on the contiguous run of offsets `l` reaches.
-
-Two rules make the algebra predictable. Staticness is decided leaf by leaf:
-arithmetic between static leaves stays static, and a runtime leaf keeps its
-integer type, so a global tile with an `Int32` leading dimension composed
-with a static tile has an `Int32` stride where the runtime value enters and
-static leaves elsewhere. Structure is decided by types alone: which modes
-merge, drop or split never depends on a runtime value, so a layout
-expression has one type for every value of its runtime leaves. The
-structural operations are generated functions that read the types once and
-emit straight-line code.
-
-The oracle for all of this is enumeration. `agree(a, b)` compares two
-layouts pointwise over their domain, and `is_injective` and `is_compact`
-decide the properties the algebra does not. The host suite checks every
-operation against that oracle, including that inexact cases throw.
-
-## Limits of the algebra
-
-Windows are affine, not linear, so they compose with callables but not
-symbolically with layouts; slice or window the composed layout instead.
-Complements and inverses need static strides, as their structure is a
-sorting of strides. The algebra does not vectorize or redistribute registers
-on its own; those derivations live with the instructions that need them.
-
-Describing a map is separate from binding it to an instruction. For example,
-TMA accepts a canonical descriptor-compatible layout, not every layout that can
-be written here. A scalar fragment operation can support a new ownership before
-that ownership has a reduction implementation. See [Current status](validation.md)
-and [the design decisions](design.md#Decisions-still-worth-challenging).
+Every plan Tylo derives, which slots form a vector, which lanes a
+reduction shuffles with, which `ldmatrix` covers a fragment, starts from
+this mapping. The tests check each derivation against an enumeration of
+every `(thread, slot)` pair, for the atoms' ownerships and for random ones.

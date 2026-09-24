@@ -5,15 +5,15 @@ global path using Tylo. It uses `cp.async` and `mma.sync.m16n8k16`, so it can
 execute on compute capability 8.0 and later, including GB10. It does not use
 Hopper WGMMA or datacenter Blackwell tcgen05 MMA.
 
-The reusable pieces are memory layouts/views, copy plans, MMA atoms,
-per-warp/CTA ownership, and accumulator arithmetic. The example owns the
+The reusable pieces are memory tiles, ownerships (the copies' and the
+accumulator's), MMA atoms, and accumulator arithmetic. The example owns the
 launch grid, shared allocation and copy pipeline. No reference kernel is
 imported and no pre-existing GEMM implementation is called.
 
 The central operations are:
 
 ```julia
-copy_async!(config.ac, shared_a, global_a_window, tid)
+copy_async!(config.ac, shared_a, global_a_window, tid)   # config.ac = distribute(...)
 copy_async!(config.bc, shared_b, global_b_window, tid)
 commit_copies()
 wait_copies(1) # for a two-stage pipeline with the next stage still pending
@@ -21,7 +21,7 @@ sync_threads()
 acc = mma(config.plan, shared_a, shared_b, acc, tid)
 sync_threads()    # release shared storage for reuse
 result = map(x -> max(alpha*x, 0f0), acc)
-store!(config.plan, output_window, result, tid)
+store!(output_window, result, tid)
 ```
 
 The actual loop drains the last copy group with `wait_copies(0)`.
@@ -61,6 +61,7 @@ measurement order alternates after six warmup rounds. Compare configurations onl
 
 Run `julia --project=test examples/gemm/run.jl 65 97 73` for a ragged case.
 The demo selects bounded copies and stores automatically. Direct kernel callers
-use `gemm_config(...; bounds=true)` and ceiling-divided launch dimensions.
-See [the bounds contract](../../docs/src/boundaries.md) for partial vectors,
-zero-fill, shared-memory synchronization, and compact/padded timing comparisons.
+use `gemm_config(...; bounds=true)` and ceiling-divided launch dimensions. An
+edge stage copies from a bounded tile, which zero-fills past the matrix (a
+ragged K cuts a vector where it ends), and an edge tile stores through the
+bounds; see [Memory tiles](../../docs/src/tiles.md).

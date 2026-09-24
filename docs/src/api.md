@@ -4,19 +4,16 @@ CurrentModule = Tylo
 
 # API reference
 
-For the conceptual model, start with [Design and boundaries](design.md). These
-are the documented bindings, including qualified inspection helpers. Their
-presence here is not a promise of a stable API; Tylo is experimental. The
-[support table](validation.md) and [fragment table](rows.md) describe which
-combinations have implementations.
+Every documented name, exported or public. Tylo is experimental; the
+[Status](status.md) page says what has run where.
 
-## Layout mathematics
+## Layouts and ownership
 
 ```@autodocs
 Modules = [Tylo.Layouts]
 ```
 
-## Tiles and operations
+## Tiles, fragments and operations
 
 ```@autodocs
 Modules = [Tylo]
