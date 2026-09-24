@@ -5,9 +5,9 @@ using Tylo.Layouts: @Layout
 # One 128x128 BF16 tile is two 128-row by 64-column B128 stripes, which is
 # Tylo's canonical TMA storage. The reference kernel passes the raw descriptor
 # pointer; the plan carries no runtime state, so binding it here costs nothing.
-const FAB_TMA_PLAN = Tylo.TMALoad(BFloat16,Val((128,64)),Val(2))
+const FAB_TMA_PLAN = Tylo.TMATile(BFloat16,(128,64),2)
 @inline function fab_load_tile(dst_ptr, byteoff::Int, tma, row::UInt32, mbar)
-    binding = Tylo.DeviceTMA(FAB_TMA_PLAN,tma)
+    binding = Tylo.TMABinding(FAB_TMA_PLAN,tma)
     for stripe in 0:1
         tile = Tylo.shared_tile(binding,dst_ptr+byteoff+stripe*FAB_STRIPE_BYTES)
         @inbounds Tylo.tma_load!(tile,binding,(reinterpret(Int32,row),Int32(64stripe)),mbar)
@@ -27,8 +27,8 @@ end
         Tylo.fence_after_thread_sync()
         output = Tylo.TmemTile(Float32,o_addr,@Layout((32,128),(1,128)))
         for half in 0:1
-            chunk = @inbounds Tylo.partition(Tylo.TmemTransfer{(32,64),2}(),
-                Tylo.window(output,(UInt32(0),UInt32(64half)),Val((32,64))))
+            chunk = @inbounds Tylo.partition(Tylo.TmemTransfer((32,64),2),
+                Tylo.window(output,(UInt32(0),UInt32(64half)),(32,64)))
             values = Tylo.wait_load(Tylo.load_async(chunk))
             Tylo.store_async!(chunk,values .* alpha)
         end
@@ -50,8 +50,8 @@ end
     output = Tylo.TmemTile(Float32,o_addr,@Layout((32,128),(1,128)))
 
     for half in 0:1
-        chunk = @inbounds Tylo.partition(Tylo.TmemTransfer{(32,64),2}(),
-                Tylo.window(output,(UInt32(0),UInt32(64half)),Val((32,64))))
+        chunk = @inbounds Tylo.partition(Tylo.TmemTransfer((32,64),2),
+                Tylo.window(output,(UInt32(0),UInt32(64half)),(32,64)))
         values = Tylo.wait_load(Tylo.load_async(chunk))
         if STAGE == 1 && half == 1
             # Release immediately after the final TMEM read; the next item's
@@ -62,8 +62,8 @@ end
             barrier_arrive(bars.o_resc[1,0])
         end
         @unroll for quarter in 0:1
-            part = Tylo.window(values,Val((0,32quarter)),Val((32,32)))
-            packed = Tylo.pack(Tylo.BFloat16,part .* inv_sum)
+            part = Tylo.window(values,(0,32quarter),(32,32))
+            packed = Tylo.Fragment{Tylo.BFloat16}(part .* inv_sum)
             Tylo.store!(dst + 128half + 64quarter,packed)
         end
     end
@@ -77,8 +77,8 @@ end
 # [256t, 256t+128) and its second column stripe sits 128 rows later. The
 # layouts say exactly that; origins select the stage, the K/V slot and the
 # K range of each publish group, and every offset folds to a constant.
-const FAB_QK_ATOM = Tylo.Tcgen05MMA((128,FAB_BN,16),BFloat16)
-const FAB_PV_ATOM = Tylo.Tcgen05MMA((128,FAB_HD,16),BFloat16)
+const FAB_QK_ATOM = Tylo.Tcgen05Atom((128,FAB_BN,16),BFloat16)
+const FAB_PV_ATOM = Tylo.Tcgen05Atom((128,FAB_HD,16),BFloat16)
 const FAB_ROWS_LAYOUT = Tylo.Layouts.compose(Tylo.Layouts.Swizzle{3,3,3}(),
     @Layout((512,(64,2)),(64,(1,8192))))                  # (rows, columns): Q stages, V slots
 const FAB_ROWS_T_LAYOUT = Tylo.Layouts.compose(Tylo.Layouts.Swizzle{3,3,3}(),
@@ -97,7 +97,7 @@ end
     s = Tylo.accumulator(FAB_QK_ATOM,tmem + UInt32(STAGE*128))
     a = @inbounds Tylo.tcgen05_operand(ops.q,(Int32(256STAGE),Int32(0)))
     b = @inbounds Tylo.tcgen05_operand(ops.k,(Int32(0),Int32(512KIDX)))
-    @inbounds Tylo.mma(FAB_QK_ATOM,s,a,b,Val(FAB_HD),false)
+    @inbounds Tylo.mma(FAB_QK_ATOM,s,a,b,FAB_HD,false)
     Tylo.commit_mma(bars.s_full[STAGE])
 end
 
@@ -115,9 +115,9 @@ end
             ph_or = fab_wait(dbg, bars.o_resc[STAGE, PAR], ph_or, Val(6))
         end
         Tylo.fence_after_thread_sync()
-        a = @inbounds Tylo.window(p,(Int32(0),Int32(W*g)),Val((128,W)))
+        a = @inbounds Tylo.window(p,(Int32(0),Int32(W*g)),(128,W))
         b = @inbounds Tylo.tcgen05_operand(ops.v,(Int32(512VIDX + W*g),Int32(0)))
-        @inbounds Tylo.mma(FAB_PV_ATOM,o,a,b,Val(W),!(first_accum & (g == 0)))
+        @inbounds Tylo.mma(FAB_PV_ATOM,o,a,b,W,!(first_accum & (g == 0)))
     end
     Tylo.commit_mma(bars.pv_done[STAGE])
     return ph_pq ⊻ UInt32(1), ph_or

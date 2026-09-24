@@ -12,7 +12,7 @@
     end
 end
 
-Base.@propagate_inbounds function wgmma_operand(p::WGMMA64{T,N,K},role::Role,
+Base.@propagate_inbounds function wgmma_operand(p::WGMMAAtom{T,N,K},role::Role,
         t::SharedTile{T,L},origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {T,N,K,Role<:Union{OperandA,OperandB},L}
     # A/B compatibility is structural, even when bounds checks are elided.
     s = _operand_structure(L,T,Role)
@@ -30,10 +30,10 @@ Base.@propagate_inbounds function wgmma_operand(p::WGMMA64{T,N,K},role::Role,
     WGMMAOperand{typeof(p),Role}(desc)
 end
 
-@generated function mma_async(p::WGMMA64{T,N,K,P},
-        a::WGMMAOperand{WGMMA64{T,N,K,P},OperandA},
-        b::WGMMAOperand{WGMMA64{T,N,K,P},OperandB},
-        c::WGMMAAccumulator{WGMMA64{T,N,K,P},R}) where {T,N,K,P,R}
+@generated function mma_async(p::WGMMAAtom{T,N,K,P},
+        a::WGMMAOperand{WGMMAAtom{T,N,K,P},OperandA},
+        b::WGMMAOperand{WGMMAAtom{T,N,K,P},OperandB},
+        c::WGMMAAccumulator{WGMMAAtom{T,N,K,P},R}) where {T,N,K,P,R}
     dtype = T === BFloat16 ? "bf16" : "f16"
     instruction = ptx"wgmma.mma_async.sync.aligned.m64n$(N)k16.f32.$dtype.$dtype"
     init = [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
@@ -55,4 +55,4 @@ end
     WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val(:wait),c.data))
 end
 # Reconstitute an isbits static plan, including validated constructor semantics.
-_plan(::Type{WGMMA64{T,N,K,P}}) where {T,N,K,P} = WGMMA64(T,Val(N),Val(K),Val(P))
+_plan(::Type{WGMMAAtom{T,N,K,P}}) where {T,N,K,P} = WGMMAAtom{T,N,K,P}()

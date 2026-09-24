@@ -1,112 +1,101 @@
 """
     Fragment(values::NTuple, ownership)
 
-This thread's immutable share of a logical tile. The ownership layout maps
-`(thread, value_slot)` to logical coordinates; it does not describe memory
-strides, and the values need not form a row or be contiguous. Arithmetic
-preserves ownership. Collective support depends on that ownership layout.
+This thread's immutable share of a logical tile: its values and the
+[`Ownership`](@ref Layouts.Ownership) that says which logical coordinate
+each value holds. `f.data` is always the tuple of logical values, whatever
+their width. Internally, 8- and 16-bit values live packed in the 32-bit
+register words instructions consume, adjacent slots lowest first, so loads
+produce and instructions consume them without repacking, and a fragment
+carried through a loop stays in its words. Arithmetic preserves ownership.
 """
-struct Fragment{T,N,L}
-    data::NTuple{N,T}
+struct Fragment{T,N,L,D}
+    storage::D
     ownership::L
-    function Fragment(data::NTuple{N,T},ownership::L) where {N,T,L}
-        N > 0 || throw(ArgumentError("a fragment must contain values"))
+    function Fragment{T,N,L,D}(storage::D,ownership::L) where {T,N,L,D}
+        N isa Int && N > 0 || throw(ArgumentError("a fragment must contain values"))
         isbitstype(T) && isbitstype(L) || throw(ArgumentError("register values and ownership must be isbits"))
         N == _register_count(ownership) || throw(DimensionMismatch("value count differs from ownership"))
-        new{T,N,L}(data,ownership)
+        new{T,N,L,D}(storage,ownership)
     end
 end
-_register_count(::Union{Layouts.LocalOwnership{N},Layouts.StripedOwnership{N}}) where N = N
 _register_count(l::Layouts.Ownership) = Int(size(l.mapping)[2])
-Layouts.layout(f::Fragment) = f.ownership
+Layouts.layout(f::Fragment) = getfield(f,:ownership)
+Base.eltype(::Type{<:Fragment{T}}) where T = T
+Base.eltype(f::Fragment) = eltype(typeof(f))
 
-"""
-    PackedFragment(T, words::NTuple{W,UInt32}, ownership)
-
-Register representation of logical 8- or 16-bit elements of type `T`. Each
-word holds `32 ÷ bits` elements, lowest element first. Ownership counts
-logical elements, not words. This constructor interprets bits; `pack(T, f)`
-numerically converts values and `unpack(p)` exposes ordinary typed values.
-"""
-struct PackedFragment{T,W,L}
-    data::NTuple{W,UInt32}
-    ownership::L
-    function PackedFragment(::Type{T}, data::NTuple{W,UInt32}, ownership::L) where {T,W,L}
-        _element_bits(T) in (8,16) || throw(ArgumentError("packing supports 8- and 16-bit element types"))
-        W > 0 || throw(ArgumentError("a packed fragment must contain values"))
-        isbitstype(L) && _register_count(ownership) == W * (32 ÷ _element_bits(T)) ||
-            throw(DimensionMismatch("packed payload differs from ownership"))
-        new{T,W,L}(data, ownership)
-    end
-end
+# Register words: `32 ÷ bits` consecutive values per 32-bit word, lowest
+# first, as instructions consume 8- and 16-bit operands. A fragment of such
+# values in complete words is stored as its words.
 _per_word(::Type{T}) where T = 32 ÷ _element_bits(T)
-Layouts.layout(f::PackedFragment) = f.ownership
-Base.eltype(::Type{<:PackedFragment{T}}) where T = T
-Base.eltype(f::PackedFragment) = eltype(typeof(f))
+_packed(::Type{T},N) where T = _element_bits(T) in (8,16) && N % _per_word(T) == 0
+_storage_type(::Type{T},N) where T = _packed(T,N) ? NTuple{N÷_per_word(T),UInt32} : NTuple{N,T}
 
-"""
-    pack(T, fragment)
-    pack(fragment)
-
-Convert logical values to `T` and pack adjacent local slots into register words.
-The one-argument form preserves the element type and all bits. Neither form
-moves data between threads or changes logical ownership. Supported element
-types are 8- and 16-bit: `BFloat16`, `Float16`, `Float8_E4M3FN`, `Float8_E5M2`,
-`Int8` and `UInt8`. A fragment must hold complete words.
-
-Conversion follows [`convert_element`](@ref). Microfloat destinations convert
-all lanes in one call of Microfloats' vector funnel, which a kernel lowers to
-one native `cvt` instruction per two lanes where the target has it, from
-`Float32`, `Float16` and `BFloat16` values alike.
-"""
-@inline function pack(::Type{T}, f::Fragment) where T
-    pack(map(Base.Fix1(convert_element,T), f))
+@inline function Fragment(data::NTuple{N,T},ownership::L) where {N,T,L}
+    D = _storage_type(T,N)
+    Fragment{T,N,L,D}(_to_storage(D,data),ownership)
 end
-@inline pack(::Type{T}, f::Fragment{T}) where T<:Microfloat = pack(f)
-@inline function pack(::Type{T}, f::Fragment{S,N}) where {T<:Microfloat,S,N}
-    lanes = Microfloats.cvt(Microfloats.SVector{N,T}, f.data, RoundNearest, SAT)
-    pack(Fragment(Tuple(lanes), Layouts.layout(f)))
-end
-@generated function pack(f::Fragment{T,N}) where {T,N}
-    _element_bits(T) in (8,16) || return :(throw(ArgumentError("packing supports 8- and 16-bit element types")))
-    per = 32 ÷ _element_bits(T)
-    N % per == 0 || return :(throw(ArgumentError("packing requires complete words")))
-    U = _carrier(T)
-    words = [foldl((acc,j) -> :($acc | (UInt32(reinterpret($U, f.data[$(per*(i-1)+j)])) << $(_element_bits(T)*(j-1)))),
-                   2:per; init=:(UInt32(reinterpret($U, f.data[$(per*(i-1)+1)])))) for i in 1:N÷per]
+@generated function _to_storage(::Type{D},data::NTuple{N,T}) where {D,N,T}
+    D === NTuple{N,T} && return :data
+    W = N ÷ _per_word(T); bits = _element_bits(T); per = 32 ÷ bits; U = _carrier(T)
+    words = [foldl((acc,j) -> :($acc | (UInt32(reinterpret($U, data[$(per*(i-1)+j)])) << $(bits*(j-1)))),
+                   2:per; init=:(UInt32(reinterpret($U, data[$(per*(i-1)+1)])))) for i in 1:W]
     quote
         Base.@inline
-        PackedFragment(T, ($(words...),), Layouts.layout(f))
+        ($(words...),)
     end
 end
-
-"""
-    unpack(packed)
-    unpack(F, packed)
-
-Expose the logical typed values of a packed fragment without numerical
-conversion. With a wide floating-point type `F` (`Float16`, `BFloat16`,
-`Float32`, `Float64`), numerically widen packed Microfloat elements to `F`
-instead: exact, and one native `cvt` instruction per two lanes in a kernel
-whose target has it.
-"""
-@inline function unpack(::Type{F}, f::PackedFragment{T}) where {F<:Microfloats.WideFloat,T<:Microfloat}
-    lanes = unpack(f)
-    Fragment(Tuple(Microfloats.cvt(Microfloats.SVector{length(lanes.data),F}, lanes.data)), Layouts.layout(f))
-end
-@generated function unpack(f::PackedFragment{T,W}) where {T,W}
-    per = 32 ÷ _element_bits(T)
-    U = _carrier(T)
-    values = [:(reinterpret(T, (f.data[$(i÷per+1)] >> $(_element_bits(T)*(i%per))) % $U)) for i in 0:per*W-1]
+@generated function _values(f::Fragment{T,N,L,D}) where {T,N,L,D}
+    D === NTuple{N,T} && return :(getfield(f,:storage))
+    bits = _element_bits(T); per = 32 ÷ bits; U = _carrier(T)
+    values = [:(reinterpret($T,(w[$(i÷per+1)] >> $(bits*(i%per))) % $U)) for i in 0:N-1]
     quote
         Base.@inline
-        Fragment(($(values...),), Layouts.layout(f))
+        w = getfield(f,:storage)
+        ($(values...),)
     end
+end
+@inline Base.getproperty(f::Fragment,s::Symbol) = s === :data ? _values(f) : getfield(f,s)
+Base.propertynames(::Fragment) = (:data,:ownership)
+
+"The register words of a fragment: its storage for 8- and 16-bit values, reinterpreted 32-bit values otherwise."
+@generated function _pack_words(f::Fragment{T,N,L,D}) where {T,N,L,D}
+    D <: NTuple{<:Any,UInt32} && _packed(T,N) && return :(getfield(f,:storage))
+    _element_bits(T) == 32 && return :(($([:(reinterpret(UInt32,getfield(f,:storage)[$i])) for i in 1:N]...),))
+    :(throw(ArgumentError("register words require complete groups of 8- or 16-bit values, or 32-bit values")))
+end
+"A fragment of `T` values from register words, without conversion."
+@generated function _from_words(::Type{T},words::NTuple{W,UInt32},ownership::L) where {T,W,L}
+    bits = _element_bits(T)
+    bits == 32 && return :(Fragment(($([:(reinterpret($T,words[$i])) for i in 1:W]...),),ownership))
+    N = W*(32 ÷ bits)
+    :(Fragment{$T,$N,L,NTuple{$W,UInt32}}(words,ownership))
+end
+"The same storage under another ownership with as many slots."
+@inline _with_ownership(f::Fragment{T,N,L,D},o) where {T,N,L,D} = Fragment{T,N,typeof(o),D}(getfield(f,:storage),o)
+
+"""
+    Fragment{T}(fragment)
+
+Convert every value to `T`, preserving ownership. Conversion follows
+[`convert_element`](@ref): Microfloat destinations round to nearest even and
+saturate. Conversions between Microfloats and wide floats go through
+Microfloats' vector funnel, and FP32 to BF16/FP16 through paired
+conversions, so a kernel gets one native `cvt` per two values where its
+target has the instruction.
+"""
+@inline Fragment{T}(f::Fragment) where T = _convert_fragment(T,f)
+@inline _convert_fragment(::Type{T},f::Fragment{T}) where T = f
+@inline _convert_fragment(::Type{T},f::Fragment) where T = map(Base.Fix1(convert_element,T),f)
+@inline _convert_fragment(::Type{T},f::Fragment{T}) where T<:Microfloat = f
+@inline function _convert_fragment(::Type{T},f::Fragment{S,N}) where {T<:Microfloat,S,N}
+    Fragment(Tuple(Microfloats.cvt(Microfloats.SVector{N,T},f.data,RoundNearest,SAT)),Layouts.layout(f))
+end
+@inline function _convert_fragment(::Type{F},f::Fragment{T,N}) where {F<:Microfloats.WideFloat,T<:Microfloat,N}
+    Fragment(Tuple(Microfloats.cvt(Microfloats.SVector{N,F},f.data)),Layouts.layout(f))
 end
 
 @inline function Base.map(op::F, f::Fragment{T,N}) where {F,T,N}
     Fragment(@rtuple(i -> op(f.data[i]), 1:N), Layouts.layout(f))
 end
 
-"Multiply every register value by a scalar, preserving ownership."
-@inline scale(f::Fragment, a) = map(Base.Fix2(*, a), f)

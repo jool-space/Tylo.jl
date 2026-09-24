@@ -17,9 +17,9 @@ julia> using Tylo.Layouts: @Layout
 
 julia> tile = TmemTile(Float32, UInt32(0), @Layout((128, 128), (1, 128)));
 
-julia> view = window(tile, (64, 32), Val((32, 64)));
+julia> view = window(tile, (64, 32), (32, 64));
 
-julia> transfer = TmemTransfer{(32, 64), 2}();
+julia> transfer = TmemTransfer((32, 64), 2);
 
 julia> access = partition(transfer, view);
 
@@ -32,7 +32,7 @@ julia> size(swapped), swapped.address == access.address
 ((64, 32), true)
 ```
 
-`TmemTransfer{(32,64),2}()` assigns 64 values along logical axis 2 to each
+`TmemTransfer((32,64),2)` assigns 64 values along logical axis 2 to each
 participating thread. The other logical axis identifies the 32 threads. Its
 permutation assigns those same values along axis 1. Both partitions issue the
 same physical `.32x32b.x64` transfer: the permutation only changes coordinates.
@@ -100,14 +100,14 @@ julia> Tuple(Int.(size(rotated)))
 Reinterpretation changes the element representation of the same storage. It
 requires an explicit logical axis, a flat affine view, and complete aligned
 pairs when converting a BF16/FP16 view back to FP32. It does not convert values or
-make data ready. By contrast, `pack(BFloat16,f)` numerically converts FP32 registers
-and retains their ownership. FP16 conversion uses `pack(Float16, f)`.
-A BF16/FP16 TMEM load returns a `PackedFragment{T}` after `wait_load`; call
-`unpack` for ordinary typed scalar arithmetic. These transfers read the two
-16-bit values already sharing each word. They do not use the ISA's distinct
+make data ready. By contrast, `Fragment{BFloat16}(f)` numerically converts FP32
+registers and retains their ownership; `Fragment{Float16}(f)` likewise.
+A BF16/FP16 TMEM load returns a `Fragment{T}` of logical values after
+`wait_load`. These transfers read the two 16-bit values already sharing each
+word. They do not use the ISA's distinct
 `.pack::16b` mode, which gathers halfwords from separate TMEM columns.
 
-A register slice uses `window(f, Val(origin), Val(shape))`. The current
+A register slice uses `window(f, origin, shape)`. The current
 implementation can slice the local-value axis of lane-local and TMEM-transfer
 fragments in either orientation; it must retain every participating thread.
 Packed windows require complete element pairs. Both origin and shape are static,

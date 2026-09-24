@@ -36,7 +36,7 @@ end
 end
 
 @inline function wait_load(p::PendingLoad{T,N}) where {T<:Union{BFloat16,Float16},N}
-    PackedFragment(T, _wait_words(p.words), p.ownership)
+    _from_words(T, _wait_words(p.words), p.ownership)
 end
 
 for N in (1,2,4,8,16,32,64,128)
@@ -51,30 +51,41 @@ for N in (1,2,4,8,16,32,64,128)
             $st(t.address,@rtuple(i -> reinterpret(UInt32,f.data[i]), 1:$N))
             nothing
         end
-        @inline function store_async!(t::TmemPartition{T,$N}, f::PackedFragment{T,$N}) where {T<:Union{BFloat16,Float16}}
+        @inline function store_async!(t::TmemPartition{T,$N}, f::Fragment{T,$(2N)}) where {T<:Union{BFloat16,Float16}}
             _check_tmem_store(t,f)
-            $st(t.address,f.data)
+            $st(t.address,_pack_words(f))
             nothing
         end
     end
 end
 
 
+"""
+    store!(pointer, fragment)
+
+Write this thread's BF16/FP16 values contiguously, packed two per word, to a
+global typed BF16/FP16 pointer or a UInt16 bit pointer, with 16-, 8- or
+4-byte stores for groups of four, two and one word. The pointer must be
+aligned to the widest store used, and each thread's region must be its own.
+"""
 @generated function store!(ptr::Core.LLVMPtr{U,PTX.AS.Global},
-                                    f::PackedFragment{T,W}) where {U,T,W}
-    U in (T,UInt16) || return :(throw(ArgumentError("packed store element type differs from pointer")))
+                                    f::Fragment{T,N}) where {U,T<:Union{BFloat16,Float16},N}
+    U in (T,UInt16) || return :(throw(ArgumentError("store element type differs from pointer")))
+    iseven(N) || return :(throw(ArgumentError("the store writes complete words")))
+    W = N÷2
     stores = [:(ptx"st.global.v4.b32"(ptr + $(16i),
-                   ($( [:(f.data[$j]) for j in 4i+1:4i+4]... ),))) for i in 0:W÷4-1]
+                   ($( [:(words[$j]) for j in 4i+1:4i+4]... ),))) for i in 0:W÷4-1]
     offset = 4*(W÷4)
     if W % 4 >= 2
-        push!(stores,:(ptx"st.global.v2.b32"(ptr+$(4offset),(f.data[$(offset+1)],f.data[$(offset+2)]))))
+        push!(stores,:(ptx"st.global.v2.b32"(ptr+$(4offset),(words[$(offset+1)],words[$(offset+2)]))))
         offset += 2
     end
     if isodd(W)
-        push!(stores,:(ptx"st.global.b32"(ptr+$(4offset),f.data[$(offset+1)])))
+        push!(stores,:(ptx"st.global.b32"(ptr+$(4offset),words[$(offset+1)])))
     end
     quote
         Base.@inline
+        words = _pack_words(f)
         $(stores...)
         nothing
     end

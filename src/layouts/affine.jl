@@ -62,14 +62,15 @@ cosize(l::Layout) = 1 + _span(shape(l),strides(l))
 # Explicit factorization preserves the function while exposing tile/outer
 # coordinates. A non-divisible dimension is rejected, not silently padded.
 """
-    tile(l::Layout, Val((m, n, ...)))
+    tile(l::Layout, (m, n, ...))
 
 Factor each flat mode into `(within_tile, tile_index)`, first component fastest.
 For example a 16×32 matrix tiled by 8×16 has shape `((8,2),(16,2))`.
 This is [`logical_divide`](@ref) by static contiguous tiles, one per mode:
 it changes coordinates, not storage or ownership.
 """
-function tile(l::Layout,::Val{T}) where T
+Base.@constprop :aggressive @inline tile(l::Layout,t::Tuple) = _tile(l,Val(map(Int,t)))
+function _tile(l::Layout,::Val{T}) where T
     s = shape(l)
     length(s) == length(T) || throw(ArgumentError("tile rank mismatch"))
     all(x -> x isa IntLike,s) || throw(ArgumentError("tile expects flat modes"))

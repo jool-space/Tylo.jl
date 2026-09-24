@@ -54,6 +54,10 @@ end
 init_code = quote
     using Tylo, PTX, CUDACore, BFloat16s, Random, Test, TOML
     using Tylo.Layouts: @Layout, Layout, Swizzle, compose, coordinate, cosize, shape, static
+    using Tylo: Registers, Addresses, instruction_atoms, copy_atoms, validate_copy, TMABinding,
+        swizzled_structure, validate_wgmma, Tcgen05Operand,
+        tmem_allocate!, tmem_deallocate!, tmem_relinquish_permit,
+        fence_after_thread_sync, fence_before_thread_sync, softmax_logsumexp
     include($(joinpath(@__DIR__, "setup.jl")))
 end
 runtests(Tylo, args; testsuite, init_code)

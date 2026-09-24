@@ -27,7 +27,7 @@ Base.eltype(t::TmemTile) = eltype(typeof(t))
 _tmem_packing(::Type{Float32}) = 1
 _tmem_packing(::Type{BFloat16}) = 2
 _tmem_packing(::Type{Float16}) = 2
-Base.@propagate_inbounds window(t::TmemTile,o::Tuple,s::Val) =
+Base.@constprop :aggressive Base.@propagate_inbounds window(t::TmemTile,o::Tuple,s::Tuple) =
     TmemTile(eltype(t),t.address,Layouts.window(t.layout,o,s))
 @inline Base.permutedims(t::TmemTile,perm=(2,1)) =
     TmemTile(eltype(t),t.address,permutedims(t.layout,perm))
@@ -78,12 +78,13 @@ function _tmem_affine(l::Layouts.Window)
 end
 
 """
-    TmemTransfer{Shape,Axis}()
+    TmemTransfer((rows, cols), axis)
 
-A warp-collective TMEM/register transfer using the `.32x32b` instruction.
-`Shape` is the logical partition shape. Each thread holds values along
-logical `Axis`; the other axis has extent 32. This plan also describes the
-resulting register ownership. `permutedims(plan)` exchanges its logical axes.
+A warp-collective TMEM/register transfer using the `.32x32b` instruction,
+over a logical partition of the given shape. Each thread holds values along
+logical `axis`; the other axis has extent 32. Both arguments must be
+constants. `Tylo.Layouts.layout(plan)` is the resulting register ownership;
+`permutedims(plan)` exchanges its logical axes.
 
 Bind it to a storage view with `partition(plan, tile)`. Supported payloads
 are powers of two from 1 through 128 words per thread: FP32 and packed
@@ -98,18 +99,18 @@ struct TmemTransfer{S,Axis}
         new{S,Axis}()
     end
 end
+Base.@constprop :aggressive @inline TmemTransfer(shape::Tuple{Integer,Integer},axis::Integer) =
+    TmemTransfer{map(Int,shape),Int(axis)}()
 Base.size(::TmemTransfer{S}) where S = S
-Layouts.layout(p::TmemTransfer) = p
-_register_count(::TmemTransfer{S,A}) where {S,A} = S[A]
-@inline function Layouts.coordinate(::TmemTransfer{S,A},t::Integer,::Val{E}) where {S,A,E}
-    E isa Int && 0 <= E < S[A] || throw(BoundsError())
-    A == 2 ? (t,oftype(t,E)) : (oftype(t,E),t)
+# Lane t holds the values of logical line t along the other axis.
+function _transfer_ownership(::TmemTransfer{S,A}) where {S,A}
+    L, s = Layouts.Layout, Layouts.static
+    Layouts.Ownership(S,A == 2 ? L((s(32),s(S[2])),(s(1),s(32))) : L((s(32),s(S[1])),(s(S[1]),s(1))))
 end
+@generated Layouts.layout(p::P) where P<:TmemTransfer = :($(_transfer_ownership(P())))
 @inline function Base.permutedims(p::TmemTransfer{S,A},perm=(2,1)) where {S,A}
-    perm isa Tuple{Integer,Integer} || throw(ArgumentError("expected a two-axis permutation tuple"))
-    perm == (1,2) && return p
-    perm == (2,1) || throw(ArgumentError("expected a permutation of (1,2)"))
-    TmemTransfer{reverse(S),3-A}()
+    Layouts._check_permutation(perm)
+    perm == (1,2) ? p : TmemTransfer{reverse(S),3-A}()
 end
 
 struct TmemPartition{T,Words,P}
@@ -118,7 +119,7 @@ struct TmemPartition{T,Words,P}
 end
 Base.eltype(::Type{<:TmemPartition{T}}) where T = T
 Base.eltype(p::TmemPartition) = eltype(typeof(p))
-Layouts.layout(p::TmemPartition) = p.transfer
+Layouts.layout(p::TmemPartition) = Layouts.layout(p.transfer)
 Base.size(p::TmemPartition) = size(p.transfer)
 @inline Base.permutedims(p::TmemPartition{T,W},perm=(2,1)) where {T,W} =
     TmemPartition{T,W,typeof(permutedims(p.transfer,perm))}(p.address,permutedims(p.transfer,perm))

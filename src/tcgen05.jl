@@ -1,6 +1,6 @@
 """
-    Tcgen05MMA{(m,n,k),TA,TB,TC}()
-    Tcgen05MMA((m,n,k), TA, TC=Float32)
+    Tcgen05Atom{(m,n,k),TA,TB,TC}()
+    Tcgen05Atom((m,n,k), TA, TC=Float32)
 
 A single-thread `tcgen05.mma.cta_group::1` instruction described by its
 shape and element types: `.kind::f16` for BF16/FP16, `.kind::tf32` for
@@ -19,21 +19,21 @@ along K through their layouts, so K-major and MN-major storage share one
 path. Completion is asynchronous: [`commit_mma`](@ref) arrives on an
 mbarrier once every prior instruction of this thread has finished.
 """
-struct Tcgen05MMA{S,TA,TB,TC}
-    function Tcgen05MMA{S,TA,TB,TC}() where {S,TA,TB,TC}
+struct Tcgen05Atom{S,TA,TB,TC} <: Atom
+    function Tcgen05Atom{S,TA,TB,TC}() where {S,TA,TB,TC}
         _check_tcgen05(S,TA,TB,TC)
         new{S,TA,TB,TC}()
     end
 end
-Base.@constprop :aggressive @inline Tcgen05MMA(shape::NTuple{3,Int},::Type{TA},::Type{TC}=_default_accumulator(TA)) where {TA,TC} =
-    Tcgen05MMA{shape,TA,TA,TC}()
-Base.@constprop :aggressive @inline Tcgen05MMA(shape::NTuple{3,Int},::Type{TA},::Type{TB},::Type{TC}) where {TA,TB,TC} =
-    Tcgen05MMA{shape,TA,TB,TC}()
-Base.size(::Tcgen05MMA{S}) where S = S
-threads(::Tcgen05MMA) = 1
-Base.eltype(::Tcgen05MMA{S,TA,TB,TC},::OperandA) where {S,TA,TB,TC} = TA
-Base.eltype(::Tcgen05MMA{S,TA,TB,TC},::OperandB) where {S,TA,TB,TC} = TB
-Base.eltype(::Tcgen05MMA{S,TA,TB,TC},::Accumulator) where {S,TA,TB,TC} = TC
+Base.@constprop :aggressive @inline Tcgen05Atom(shape::NTuple{3,Int},::Type{TA},::Type{TC}=_default_accumulator(TA)) where {TA,TC} =
+    Tcgen05Atom{shape,TA,TA,TC}()
+Base.@constprop :aggressive @inline Tcgen05Atom(shape::NTuple{3,Int},::Type{TA},::Type{TB},::Type{TC}) where {TA,TB,TC} =
+    Tcgen05Atom{shape,TA,TB,TC}()
+Base.size(::Tcgen05Atom{S}) where S = S
+threads(::Tcgen05Atom) = 1
+Base.eltype(::Tcgen05Atom{S,TA,TB,TC},::OperandA) where {S,TA,TB,TC} = TA
+Base.eltype(::Tcgen05Atom{S,TA,TB,TC},::OperandB) where {S,TA,TB,TC} = TB
+Base.eltype(::Tcgen05Atom{S,TA,TB,TC},::Accumulator) where {S,TA,TB,TC} = TC
 _tcgen05_kind(::Type{T}) where T = (f = _input_family(T); f === :fp16 ? :f16 : f === :tf32 ? :tf32 : f === :fp8 ? :f8f6f4 : f === :int8 ? :i8 : :none)
 @inline function _check_tcgen05(S,TA,TB,TC)
     S isa NTuple{3,Int} || throw(ArgumentError("MMA shape must be an (m,n,k) tuple"))
@@ -52,7 +52,7 @@ end
 
 # The accumulator: TMEM lane m holds row m, column n holds column n.
 _accumulator_layout(m,n) = Layouts.Layout((Layouts.static(m),Layouts.static(n)),(Layouts.static(1),Layouts.static(128)))
-@generated operand_layout(::A,::Accumulator) where {A<:Tcgen05MMA} = :($(_accumulator_layout(size(A())[1],size(A())[2])))
+@generated operand_layout(::A,::Accumulator) where {A<:Tcgen05Atom} = :($(_accumulator_layout(size(A())[1],size(A())[2])))
 """
     accumulator(atom, address::UInt32)
 
@@ -60,7 +60,7 @@ The atom's accumulator as a `TmemTile` at a TMEM address: lane `m` holds
 row `m`, column `n` holds column `n`. The caller owns the allocation; the
 first `mma` with `accumulate=false` initializes it.
 """
-@inline accumulator(a::Tcgen05MMA,address::UInt32) = TmemTile(eltype(a,Accumulator()),address,operand_layout(a,Accumulator()))
+@inline accumulator(a::Tcgen05Atom,address::UInt32) = TmemTile(eltype(a,Accumulator()),address,operand_layout(a,Accumulator()))
 
 _tcgen05_dtype(::Type{BFloat16}) = :bf16
 _tcgen05_dtype(::Type{Float16}) = :f16
@@ -76,7 +76,7 @@ The `tcgen05.mma` instruction descriptor of an atom for the given operand
 majorness: a pure function of the atom's shape and element types, as
 `mma` derives it from its operands' encodings.
 """
-function instruction_descriptor(a::Tcgen05MMA{S,TA,TB,TC};a_major::Symbol=:K,b_major::Symbol=:K) where {S,TA,TB,TC}
+function instruction_descriptor(a::Tcgen05Atom{S,TA,TB,TC};a_major::Symbol=:K,b_major::Symbol=:K) where {S,TA,TB,TC}
     m,n,k = S
     kind = _tcgen05_kind(TA)
     if kind === :f16 || kind === :tf32
@@ -102,7 +102,7 @@ _k_axis(::Type{OperandB}) = 1
 """
     Tcgen05Operand
 
-A shared-memory A or B operand of a [`Tcgen05MMA`](@ref): the descriptor of
+A shared-memory A or B operand of a [`Tcgen05Atom`](@ref): the descriptor of
 the tile's base, the tile's layout and the logical origin. `mma` derives each
 K step's descriptor from the layout, so the same operand serves K-major and
 MN-major storage. Construct with [`tcgen05_operand`](@ref).
@@ -133,8 +133,8 @@ by this thread have completed. Single thread; no wait is implied.
 """
 function commit_mma end
 """
-    tmem_allocate!(slot, Val(columns))
-    tmem_deallocate!(address, Val(columns))
+    tmem_allocate!(slot, columns)
+    tmem_deallocate!(address, columns)
     tmem_relinquish_permit()
 
 Warp-collective TMEM management. `tmem_allocate!` writes the base address of

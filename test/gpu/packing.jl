@@ -3,20 +3,19 @@
 # GPUs. Typed destinations deliberately retain BF16/FP16 as their element type.
 function packing_kernel!(out,back,input,::Type{T},::Val{W}) where {T,W}
     t = Int32(threadIdx().x)-Int32(1)
-    f = Fragment(ntuple(i -> @inbounds(input[2W*t+i]),Val(2W)),Tylo.Layouts.LocalOwnership{2W,2}())
-    packed = pack(T,f)
+    f = Fragment(ntuple(i -> @inbounds(input[2W*t+i]),Val(2W)),lane_local(2W,2))
+    packed = Fragment{T}(f)
     # Every thread receives a 16-byte aligned destination, including short tails.
     store!(pointer(out)+Int(t)*cld(4W,16)*16,packed)
-    decoded = unpack(packed)
     Tylo.@rtuple(1:2W) do i
-        @inbounds back[2W*t+i] = Float32(decoded.data[i])
+        @inbounds back[2W*t+i] = Float32(packed.data[i])
     end
     nothing
 end
 function packed_bits_kernel!(out,input,::Type{T}) where T
     t = Int32(threadIdx().x)-Int32(1)
-    f = Fragment(ntuple(i -> @inbounds(input[8t+i]),Val(8)),Tylo.Layouts.LocalOwnership{8,2}())
-    g = unpack(pack(f))
+    f = Fragment(ntuple(i -> @inbounds(input[8t+i]),Val(8)),lane_local(8,2))
+    g = Tylo._from_words(T,Tylo._pack_words(f),Tylo.Layouts.layout(f))
     Tylo.@rtuple(1:8) do i
         @inbounds out[8t+i] = g.data[i]
     end
@@ -65,12 +64,13 @@ end
 # run the same generic code as the host. Either way the bits match the host.
 function fp8_packing_kernel!(words,wide,back,input,::Type{T},::Val{W}) where {T,W}
     t = Int32(threadIdx().x)-Int32(1)
-    f = Fragment(ntuple(i -> @inbounds(input[4W*t+i]),Val(4W)),Tylo.Layouts.LocalOwnership{4W,2}())
-    packed = pack(T,f)
-    a = unpack(eltype(wide),packed)
-    b = unpack(Float32,packed)
+    f = Fragment(ntuple(i -> @inbounds(input[4W*t+i]),Val(4W)),lane_local(4W,2))
+    packed = Fragment{T}(f)
+    a = Fragment{eltype(wide)}(packed)
+    b = Fragment{Float32}(packed)
+    packed_words = Tylo._pack_words(packed)
     Tylo.@rtuple(1:W) do i
-        @inbounds words[W*t+i] = packed.data[i]
+        @inbounds words[W*t+i] = packed_words[i]
     end
     Tylo.@rtuple(1:4W) do i
         @inbounds wide[4W*t+i] = a.data[i]
@@ -123,16 +123,16 @@ function typed_tmem_kernel!(out,input,::Val{W},::Val{A}) where {W,A}
     n = W*(4÷sizeof(T))
     shape = A == 2 ? (32,n) : (n,32)
     tile = TmemTile(T,base,@Layout((128,n),(1,128)))
-    band = @inbounds window(tile,(UInt32(32)*warp,UInt32(0)),Val((32,n)))
+    band = @inbounds window(tile,(UInt32(32)*warp,UInt32(0)),(32,n))
     band = A == 2 ? band : permutedims(band)
-    plan = TmemTransfer{shape,A}()
+    plan = TmemTransfer(shape,A)
     access = @inbounds partition(plan,band)
-    f = Fragment(ntuple(i -> @inbounds(input[Int(tid)*n+i]),Val(n)),plan)
-    store_async!(access,T === Float32 ? f : pack(f))
+    f = Fragment(ntuple(i -> @inbounds(input[Int(tid)*n+i]),Val(n)),Tylo.Layouts.layout(plan))
+    store_async!(access,f)
     wait_stores()
     pending = load_async(access)
     ready = wait_load(pending)
-    values = T === Float32 ? ready : unpack(ready)
+    values = ready
     Tylo.@rtuple(1:n) do i
         @inbounds out[Int(tid)*n+i] = values.data[i]
     end

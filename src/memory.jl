@@ -1,6 +1,6 @@
 """
-    GlobalTile(pointer, layout, Val(align)=Val(sizeof(T)))
-    SharedTile(pointer, layout, Val(align)=Val(sizeof(T)))
+    GlobalTile(pointer, layout, align=sizeof(T))
+    SharedTile(pointer, layout, align=sizeof(T))
 
 Borrow typed global (address space 1) or shared (address space 3) memory.
 The layout maps logical coordinates to element offsets from the allocation
@@ -10,10 +10,10 @@ The caller owns allocation, lifetime, alignment and synchronization.
 `align` declares, in bytes, that the pointer and every stride of the
 layout other than the unit stride are multiples of `align`, so that any
 element whose coordinate along the unit-stride axis is a multiple of
-`align ÷ sizeof(T)` has an `align`-aligned address. Loads and stores of
-fragments vectorize up to that width. A window's origin along the
-unit-stride axis must keep the declaration. Bounds checks verify the
-pointer, the strides and window origins unless elided with `@inbounds`.
+`align ÷ sizeof(T)` has an `align`-aligned address. It must be a constant.
+Loads and stores of fragments vectorize up to that width. A window's origin
+along the unit-stride axis must keep the declaration. Bounds checks verify
+the pointer, the strides and window origins unless elided with `@inbounds`.
 """
 struct MemoryTile{T,AS,L<:Layouts.AbstractLayout,A}
     ptr::Core.LLVMPtr{T,AS}
@@ -27,8 +27,10 @@ struct MemoryTile{T,AS,L<:Layouts.AbstractLayout,A}
 end
 const GlobalTile{T,L,A} = MemoryTile{T,1,L,A}
 const SharedTile{T,L,A} = MemoryTile{T,3,L,A}
-Base.@propagate_inbounds GlobalTile(p::Core.LLVMPtr{T,1},l::Layouts.AbstractLayout,a::Val=Val(sizeof(T))) where T = MemoryTile(p,l,a)
-Base.@propagate_inbounds SharedTile(p::Core.LLVMPtr{T,3},l::Layouts.AbstractLayout,a::Val=Val(sizeof(T))) where T = MemoryTile(p,l,a)
+Base.@constprop :aggressive Base.@propagate_inbounds GlobalTile(p::Core.LLVMPtr{T,1},l::Layouts.AbstractLayout,
+    align::Integer=sizeof(T)) where T = MemoryTile(p,l,Val(Int(align)))
+Base.@constprop :aggressive Base.@propagate_inbounds SharedTile(p::Core.LLVMPtr{T,3},l::Layouts.AbstractLayout,
+    align::Integer=sizeof(T)) where T = MemoryTile(p,l,Val(Int(align)))
 Layouts.layout(t::MemoryTile) = t.layout
 Base.size(t::MemoryTile) = size(t.layout)
 Base.eltype(::Type{<:MemoryTile{T}}) where T = T
@@ -38,7 +40,13 @@ alignment(::Type{<:MemoryTile{T,AS,L,A}}) where {T,AS,L,A} = A
 @inline function Base.pointer(t::MemoryTile{T,AS},c::Tuple) where {T,AS}
     t.ptr + _byte_offset(Val(AS),T,t.layout,c)
 end
-Base.@propagate_inbounds window(t::MemoryTile{T,AS,L,A},o::Tuple,s::Val) where {T,AS,L,A} =
+"""
+    window(tile, origin, shape)
+
+The `shape` sub-tile at a possibly runtime `origin`, addressing the same
+allocation. `shape` must be a constant tuple.
+"""
+Base.@constprop :aggressive Base.@propagate_inbounds window(t::MemoryTile{T,AS,L,A},o::Tuple,s::Tuple) where {T,AS,L,A} =
     MemoryTile(t.ptr,Layouts.window(t.layout,o,s),Val(A))
 
 # Global products may exceed 32-bit element or byte offsets even when each
@@ -73,3 +81,17 @@ end
 @inline _unit_axis(d::Tuple,i) = _has_unit(first(d)) ? i : _unit_axis(Base.tail(d),i+1)
 @inline _has_unit(d::Tuple) = any(map(_has_unit,d))
 @inline _has_unit(d) = Int(d) == 1
+
+# Affine tiles, a flat layout or a window of one, address linearly: the
+# address of `a + b` is the address of `a` plus the offset of `b`. Loads and
+# stores of an ownership then form one base pointer per thread and add each
+# slot's constant offset, which the backend folds into the instruction.
+_affine(::Type) = false
+_affine(::Type{Layouts.Layout{S,D}}) where {S,D} = !any(p -> p <: Tuple,S.parameters) && !any(p -> p <: Tuple,D.parameters)
+_affine(::Type{Layouts.Window{S,L,O}}) where {S,L,O} = _affine(L)
+@inline _linear(l::Layouts.Layout) = l
+@inline _linear(l::Layouts.Window) = l.parent
+"The address of slot `e` of `ownership` in an affine tile, from the thread's base address."
+@inline _slot_address(t::MemoryTile{T},base,c::Tuple{Int,Int}) where T =
+    base + _linear(t.layout)(c)*sizeof(T)
+

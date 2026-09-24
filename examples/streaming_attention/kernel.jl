@@ -12,11 +12,11 @@ using Tylo.Layouts: @Layout, Swizzle, compose, coordinate
 # issues its MMAs, the other runs its softmax.
 function configuration()
     atom=MMAAtom((16,8,16),BFloat16)
-    scores=TiledMMA(atom,Val((4,1)),Val((1,8)),Val(64))
-    output=TiledMMA(atom,Val((4,1)),Val((1,8)),Val(64))
-    q=TMATile(BFloat16,Val((64,64)),Val(2)) # (rows, dims), dims contiguous
-    k=TMATile(BFloat16,Val((64,64)),Val(1)) # (dims, keys), dims contiguous
-    v=TMATile(BFloat16,Val((64,64)),Val(1)) # (keys, dims), keys contiguous
+    scores=TiledMMA(atom,(4,1),(1,8),64)
+    output=TiledMMA(atom,(4,1),(1,8),64)
+    q=TMATile(BFloat16,(64,64),2) # (rows, dims), dims contiguous
+    k=TMATile(BFloat16,(64,64),1) # (dims, keys), dims contiguous
+    v=TMATile(BFloat16,(64,64),1) # (keys, dims), keys contiguous
     (;scores,output,q,k,v)
 end
 const TILE_BYTES=Int32(8192) # one 64×64 BF16 tile; pointer offsets are bytes
@@ -32,7 +32,7 @@ shared_bytes(::Any)=64+1024+(2+2STAGES)*Int(TILE_BYTES)
 @inline _mask_bit(mask,kc,qr,m,n)=@inbounds mask[min(kc,n-1)+1,min(qr,m-1)+1]
 @generated function mask_scores(a::Fragment{Float32,N},mask,tid,row,key,m,n,::Val{Causal}) where {N,Causal}
     values=[quote
-        r,c=coordinate(Tylo.Layouts.layout(a),tid,Val($(e-1)))
+        r,c=coordinate(Tylo.Layouts.layout(a),tid,$(e-1))
         qr,kc=Int(row)+Int(r),Int(key)+Int(c)
         valid=(qr<m) & (kc<n) & ($(!Causal) | (kc<=qr)) & _mask_bit(mask,kc,qr,m,n)
         ifelse(valid,a.data[$e]*0.125f0,-Inf32)
@@ -49,18 +49,17 @@ end
 const B_PAIR=Tylo._ownership((16,16),((4,2),(8,16)),((2,1),(2,8),(2,128)))
 @inline function load_b_pair(atom,tile,lane)
     pair=@inbounds load_fragment(B_PAIR,tile,lane)
-    layout=operand_layout(atom,OperandB())
-    (PackedFragment(BFloat16,(pair.data[1],pair.data[2]),layout),PackedFragment(BFloat16,(pair.data[3],pair.data[4]),layout))
+    (window(pair,(0,0),(16,8)),window(pair,(0,8),(16,8)))
 end
 
 # Q·Kᵀ for one warp's 16 rows against a 64-key tile, with Q's four K-step
 # operands already in registers.
-@generated function scores(plan::TiledMMA{A,W,R,K},q::NTuple{4,PackedFragment},keys::SharedTile,lane) where {A,W,R,K}
+@generated function scores(plan::TiledMMA{A,W,R,K},q::NTuple{4,Fragment},keys::SharedTile,lane) where {A,W,R,K}
     W==(4,1) && R==(1,8) && K==64 || error("this worked kernel uses a fixed QK tile")
     cs=[Symbol(:c,j) for j in 1:8]
     statements=[:($(cs[j])=zero_accumulator(plan.atom)) for j in 1:8]
     for k in 0:3, j in 1:2:8
-        push!(statements,:((b0,b1)=load_b_pair(plan.atom,window(keys,(Int32($(16k)),Int32($(8(j-1)))),Val((16,16))),lane)))
+        push!(statements,:((b0,b1)=load_b_pair(plan.atom,window(keys,(Int32($(16k)),Int32($(8(j-1)))),(16,16)),lane)))
         push!(statements,:($(cs[j])=mma(plan.atom,q[$(k+1)],b0,$(cs[j]))))
         push!(statements,:($(cs[j+1])=mma(plan.atom,q[$(k+1)],b1,$(cs[j+1]))))
     end
@@ -76,15 +75,15 @@ end
 # The bridge between the two accumulators with identical row ownership:
 # each adjacent pair of score atoms becomes one BF16 A operand over 16 keys,
 # packed right after the softmax so only 16 registers carry the weights.
-@inline packed_weights(atom,weights)=(pack_operand_a(atom,weights,Val(0),Val(0)),pack_operand_a(atom,weights,Val(0),Val(1)),
-                                      pack_operand_a(atom,weights,Val(0),Val(2)),pack_operand_a(atom,weights,Val(0),Val(3)))
-@generated function weighted_values(plan::TiledMMA{A,W,R,K},weights::NTuple{4,PackedFragment},
+@inline packed_weights(plan,weights)=(pack_operand_a(plan,weights,0,0),pack_operand_a(plan,weights,0,1),
+                                      pack_operand_a(plan,weights,0,2),pack_operand_a(plan,weights,0,3))
+@generated function weighted_values(plan::TiledMMA{A,W,R,K},weights::NTuple{4,Fragment},
                                     values::SharedTile,out::Fragment,lane) where {A,W,R,K}
     W==(4,1) && R==(1,8) && K==64 || error("this worked kernel uses a fixed PV tile")
     cs=[Symbol(:c,i) for i in 1:8]
-    statements=[:($(cs[j])=Tylo._atom_accumulator(out,Val($j))) for j in 1:8]
+    statements=[:($(cs[j])=Tylo._atom_accumulator(plan,out,Val($j))) for j in 1:8]
     for k in 0:3, j in 1:2:8
-        push!(statements,:((b0,b1)=load_b_pair(plan.atom,window(values,(Int32($(16k)),Int32($(8(j-1)))),Val((16,16))),lane)))
+        push!(statements,:((b0,b1)=load_b_pair(plan.atom,window(values,(Int32($(16k)),Int32($(8(j-1)))),(16,16)),lane)))
         push!(statements,:($(cs[j])=mma(plan.atom,weights[$(k+1)],b0,$(cs[j]))))
         push!(statements,:($(cs[j+1])=mma(plan.atom,weights[$(k+1)],b1,$(cs[j+1]))))
     end
@@ -100,8 +99,8 @@ end
 # One warp's Q rows as the four K-step A operands, held for the whole stream.
 Base.@propagate_inbounds function q_fragments(atom,sq,warp,lane)
     r=warp*Int32(16)
-    (load_a(atom,window(sq,(r,Int32(0)),Val((16,16))),lane),load_a(atom,window(sq,(r,Int32(16)),Val((16,16))),lane),
-     load_a(atom,window(sq,(r,Int32(32)),Val((16,16))),lane),load_a(atom,window(sq,(r,Int32(48)),Val((16,16))),lane))
+    (load_fragment(atom,OperandA(),window(sq,(r,Int32(0)),(16,16)),lane),load_fragment(atom,OperandA(),window(sq,(r,Int32(16)),(16,16)),lane),
+     load_fragment(atom,OperandA(),window(sq,(r,Int32(32)),(16,16)),lane),load_fragment(atom,OperandA(),window(sq,(r,Int32(48)),(16,16)),lane))
 end
 @inline _head_pointer(a,head)=pointer(a)+Int(head)*(size(a,1)*size(a,2))*sizeof(eltype(a))
 
@@ -166,7 +165,7 @@ function attention_kernel!(output,qb,kb,vb,mask,m::Int32,n::Int32,config,::Val{C
     qf=@inbounds q_fragments(atom,sq,warp,lane)
     state=SoftmaxState(zero_accumulator(config.scores))
     out=zero_accumulator(config.output)
-    w=packed_weights(atom,zero_accumulator(config.scores))
+    w=packed_weights(config.scores,zero_accumulator(config.scores))
     # Block b of a group issues PV of tile b-1 and QK of tile b; the groups
     # take turns (barrier 1 admits group 0, barrier 2 group 1), so one
     # group's softmax overlaps the other's MMAs. Each barrier counts both
@@ -188,17 +187,17 @@ function attention_kernel!(output,qb,kb,vb,mask,m::Int32,n::Int32,config,::Val{C
         s=plain ? s .* 0.125f0 : mask_scores(s,mask,wtid,row,key,m,n,Val(Causal))
         update=softmax_update(state,s)
         out=out .* update.rescale
-        w=packed_weights(atom,update.weights)
+        w=packed_weights(config.scores,update.weights)
         state=update.state
     end
     # The last block: PV of the last tile; group 0 admits group 1 once more.
     (g==Int32(1) || tiles>Int32(0)) && ptx"bar.sync"(Int32(1)+g,Int32(256))
     tiles>Int32(0) && (out=weighted_values(config.output,w,shared_tile(vb,v_pointer(base,tiles-Int32(1))),out,lane))
     g==Int32(0) && ptx"bar.arrive"(Int32(2),Int32(256))
-    dst=@inbounds GlobalTile(_head_pointer(output,head),@Layout(($m, 64), (64, 1)),Val(16))
+    dst=@inbounds GlobalTile(_head_pointer(output,head),@Layout(($m, 64), (64, 1)),16)
     result=softmax_normalize(out,state)
     @inbounds if row+Int32(64)<=m
-        store!(config.output,window(dst,(row,Int32(0)),Val((64,64))),result,wtid)
+        store!(config.output,window(dst,(row,Int32(0)),(64,64)),result,wtid)
     else
         store!(config.output,dst,result,(row,Int32(0)),wtid)
     end

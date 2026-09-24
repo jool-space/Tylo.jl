@@ -50,8 +50,8 @@ function tma_store_kernel!(src,binding,origin)
     if tid == 0
         @inbounds tma_store!(binding,tile,origin)
         commit_tma_stores()
-        wait_tma_reads(Val(0))
-        wait_tma_stores(Val(0))
+        wait_tma_reads(0)
+        wait_tma_stores(0)
     end
     nothing
 end
@@ -61,7 +61,7 @@ if runtime_supported(@__FILE__)
     for T in (UInt8,BFloat16,Float16,Float32), W in (32,64,128), axis in (1,2), rows in (8,64,128)
         row = W ÷ sizeof(T)
         shape = axis == 2 ? (rows,row) : (row,rows)
-        plan = TMATile(T,Val(shape),Val(axis),Val(W))
+        plan = TMATile(T,shape,axis,W)
         host = T.(reshape(mod.(0:128*77-1,113),128,77))
         binding = prepare_tma(plan,CuArray(host))
         @test isbitstype(typeof(CUDACore.cudaconvert(binding)))
@@ -85,7 +85,7 @@ if runtime_supported(@__FILE__)
     # must still register both allocations with CUDA's stream tracking.
     producer,consumer = CuStream(),CuStream()
     binding = CUDACore.stream!(producer) do
-        prepare_tma(TMALoad(BFloat16,Val((64,64)),Val(2)),CuArray(ones(BFloat16,64,64)))
+        prepare_tma(TMATile(BFloat16,(64,64),2),CuArray(ones(BFloat16,64,64)))
     end
     out = CuArray{BFloat16}(undef,64,64)
     for value in (2,3,5)
@@ -98,10 +98,10 @@ if runtime_supported(@__FILE__)
         end
         @test all(==(BFloat16(value)),Array(out))
     end
-    @test_throws ArgumentError prepare_tma(TMALoad(BFloat16,Val((64,64)),Val(2)),CuArray(zeros(BFloat16,65,64)))
+    @test_throws ArgumentError prepare_tma(TMATile(BFloat16,(64,64),2),CuArray(zeros(BFloat16,65,64)))
     # A batch of matrices: the third origin coordinate selects one, each
     # bounded separately; `bounds` shrinks a padded array's logical extents.
-    plan=TMATile(BFloat16,Val((64,64)),Val(1))
+    plan=TMATile(BFloat16,(64,64),1)
     host=BFloat16.(reshape(mod.(0:80*100*3-1,113),80,100,3))
     binding=prepare_tma(plan,CuArray(host);bounds=(70,100,3))
     out=CuArray{BFloat16}(undef,64,64)
@@ -123,7 +123,7 @@ end
     for T in (UInt8,BFloat16,Float32), W in (32,64,128), axis in (1,2), rows in (8,64,128)
         row = W ÷ sizeof(T)
         shape = axis == 2 ? (rows,row) : (row,rows)
-        plan = TMATile(T,Val(shape),Val(axis),Val(W))
+        plan = TMATile(T,shape,axis,W)
         src = T.(reshape(mod.(0:prod(shape)-1,97),shape))
         for (k,r) in ((0,0),(64,64),(112,72))
             origin = axis == 2 ? (Int32(r),Int32(k)) : (Int32(k),Int32(r))
@@ -141,7 +141,7 @@ end
         end
     end
     # The store path: one tensor store, one commit, both waits, no calls.
-    plan = TMATile(BFloat16,Val((64,32)),Val(2),Val(64))
+    plan = TMATile(BFloat16,(64,32),2,64)
     binding = prepare_tma(plan,CuArray(zeros(BFloat16,64,64)))
     src = CuArray(zeros(BFloat16,64,32))
     code = compile_kernel(tma_store_kernel!,Tuple{typeof(CUDACore.cudaconvert(src)),typeof(CUDACore.cudaconvert(binding)),Tuple{Int32,Int32}};
@@ -154,7 +154,7 @@ end
     @test count("fence.proxy.async.shared::cta",body) == 1
     @test !occursin(r"\bcall",body)
     # Stores into one matrix of a batch skip the padding beyond its bounds.
-    plan=TMATile(Float32,Val((32,64)),Val(1))
+    plan=TMATile(Float32,(32,64),1)
     dst=CuArray(fill(111f0,40,64,2))
     binding=prepare_tma(plan,dst;bounds=(36,64,2))
     src=CuArray(Float32.(reshape(1:32*64,32,64)))

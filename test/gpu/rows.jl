@@ -35,7 +35,7 @@ if runtime_supported(@__FILE__)
     append!(cases,[(Val(:warp),n,64) for n in (1,3,17)])
     push!(cases,(MMAAtom((16,8,16),BFloat16),4,32))
     for wm in (1,2),rm in (1,2),rn in (1,3)
-        push!(cases,(TiledMMA(MMAAtom((16,8,16),BFloat16),Val((wm,1)),Val((rm,rn)),Val(16)),4rm*rn,32wm))
+        push!(cases,(TiledMMA(MMAAtom((16,8,16),BFloat16),(wm,1),(rm,rn),16),4rm*rn,32wm))
     end
     for (kind,n,threads) in cases
         values=randn(MersenneTwister(4n+threads),Float32,n,threads)

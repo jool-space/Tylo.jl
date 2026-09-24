@@ -33,7 +33,7 @@ end
 
 begin # assembly checks
 @testset "Fragment broadcast and permutation assembly" begin
-    patch=Tylo.Layouts.Ownership(Val((16,8)),@Layout(((8,4),(2,2)),((2,32),(1,16))))
+    patch=Tylo.Layouts.Ownership((16,8),@Layout(((8,4),(2,2)),((2,32),(1,16))))
     for permute in (false,true)
         tt=Tuple{CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},typeof(patch),Val{4},Val{permute}}
         code=compile_kernel(array_pointwise!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
@@ -66,7 +66,7 @@ if runtime_supported(@__FILE__)
     atom=MMAAtom((16,8,16),BFloat16)
     cases=Any[(Val(:local),3,32),(Val(:warp),3,64),(atom,4,32)]
     for wm in (1,2),rm in (1,2),rn in (1,3)
-        push!(cases,(TiledMMA(atom,Val((wm,1)),Val((rm,rn)),Val(16)),4rm*rn,32wm))
+        push!(cases,(TiledMMA(atom,(wm,1),(rm,rn),16),4rm*rn,32wm))
     end
     for (kind,n,threads) in cases
         values=randn(MersenneTwister(17n+threads),Float32,n,threads)
@@ -103,7 +103,7 @@ if runtime_supported(@__FILE__)
         end
         @test results[1] == results[2]
     end
-    patch=Tylo.Layouts.Ownership(Val((16,8)),@Layout(((8,4),(2,2)),((2,32),(1,16))))
+    patch=Tylo.Layouts.Ownership((16,8),@Layout(((8,4),(2,2)),((2,32),(1,16))))
     values=randn(MersenneTwister(7),Float32,128)
     input=CuArray(values);output=similar(input)
     for permute in (false,true)

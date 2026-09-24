@@ -20,31 +20,6 @@ coordinate that thread holds in that slot, over `size(ownership)`. Mode 1
 is the thread tree, mode 2 the slot tree. Every derivation below starts here.
 """
 mapping(o::Ownership) = o.mapping
-mapping(::Layouts.LocalOwnership{N,2}) where N = Layout((static(32),static(N)),(static(1),static(32)))
-mapping(::Layouts.LocalOwnership{N,1}) where N = Layout((static(32),static(N)),(static(N),static(1)))
-mapping(::Layouts.StripedOwnership{N}) where N = Layout((static(32),static(N)),(static(1),static(32)))
-mapping(::TmemTransfer{S,2}) where S = Layout((static(32),static(S[2])),(static(1),static(32)))
-mapping(::TmemTransfer{S,1}) where S = Layout((static(32),static(S[1])),(static(S[1]),static(1)))
-# PTX ISA wgmma accumulator figure: lane groups t%4 select column pairs,
-# (t%32)÷4 the row, warps 16-row bands; slots alternate column, row half, 8-column block.
-mapping(::WGMMAOwnership{N}) where N =
-    Layout(((static(4),static(8),static(4)),(static(2),static(2),static(N÷8))),
-           ((static(128),static(1),static(16)),(static(64),static(8),static(512))))
-function mapping(o::PermutedOwnership)
-    m, n = map(Int,size(o.parent))
-    compose(Layout((static(m),static(n)),(static(n),static(1))),mapping(o.parent))
-end
-# The tiled accumulator is the atom's ownership embedded in the CTA tile,
-# then repeated: warps M-fastest across the tile, atoms M-fastest within a warp.
-function mapping(::TiledMMAOwnership{TiledMMA{A,W,R,K}}) where {A,W,R,K}
-    atom = operand_layout(A(),Accumulator())
-    m, n = size(atom)
-    M = m*W[1]*R[1]
-    embedded = compose(Layout((static(m),static(n)),(static(1),static(M))),mapping(atom))
-    threads = concat(mode(embedded,1),Layout((static(W[1]),static(W[2])),(static(m*R[1]),static(n*R[2]*M))))
-    values = concat(mode(embedded,2),Layout((static(R[1]),static(R[2])),(static(m),static(n*M))))
-    concat(threads,values)
-end
 _thread_count(o) = Int(length(mode(mapping(o),1)))
 _threads(o) = mode(mapping(o),1)
 _slots(o) = mode(mapping(o),2)
@@ -62,7 +37,7 @@ function ownership_table(o)
     lock(_TABLE_LOCK) do
         get!(_TABLES,o) do
             threads, slots = _thread_count(o), _register_count(o)
-            [map(Int,Layouts.coordinate(o,t,Val(e))) for t in 0:threads-1, e in 0:slots-1]
+            [map(Int,Layouts._coordinate(o,t,Val(e))) for t in 0:threads-1, e in 0:slots-1]
         end
     end
 end
@@ -161,7 +136,7 @@ function reduction_plan(o, axis::Int)
         prefix *= s
     end
     shape = axis == 2 ? (Int(size(o)[1]),1) : (1,Int(size(o)[2]))
-    ReductionPlan(groups,bits,Ownership(Val(shape),concat(Kt,Kvn)))
+    ReductionPlan(groups,bits,Ownership(shape,concat(Kt,Kvn)))
 end
 
 """
@@ -192,22 +167,6 @@ function _slot_map(from,to)
     slots === nothing && return nothing
     agree(compose(from,slots),to) || return nothing
     [Int(slots(e))+1 for e in 0:Int(length(to))-1]
-end
-
-"""
-    simplify_ownership(ownership)
-
-The lane-local or warp-striped ownership with the same distribution, when
-one exists; otherwise the ownership itself.
-"""
-function simplify_ownership(o)
-    _thread_count(o) == 32 || return o
-    n = _register_count(o)
-    for candidate in (Layouts.LocalOwnership{n,2}(),Layouts.LocalOwnership{n,1}(),
-                      Layouts.StripedOwnership{n,2}(),Layouts.StripedOwnership{n,1}())
-        size(candidate) == map(Int,size(o)) && same_distribution(candidate,o) && return candidate
-    end
-    o
 end
 
 """
@@ -253,7 +212,7 @@ function window_plan(o, origin::Tuple{Int,Int}, shape::Tuple{Int,Int})
     Int(reindexed((0,slots[1]))) == origin[1] + shape[1]*origin[2] || return nothing
     values = _compose(mode(reindexed,2),selection)
     values === nothing && return nothing
-    (; slots=slots .+ 1, ownership=Ownership(Val(shape),concat(mode(reindexed,1),values)))
+    (; slots=slots .+ 1, ownership=Ownership(shape,concat(mode(reindexed,1),values)))
 end
 # The layout selecting `chosen` slots as a box of digit ranges over flat
 # slot modes with the given `(extent, stride)` pairs, or `nothing`.
@@ -349,7 +308,7 @@ function matrix_copy_plan(o,::Type{T},axis::Int) where T
     inverse = _left_inverse(index)
     inverse === nothing && return nothing
     for trans in (false,true)
-        atom = mapping(operand_layout(CopyAtom{:load,trans}(),Registers()))
+        atom = mapping(_operand_layout(CopyAtom{:load,trans}(),Registers()))
         _same_layout(mode(within,1),mode(atom,1)) && _same_layout(mode(within,2),mode(atom,2)) || continue
         return MatrixCopyPlan(trans,axis,per,grid,[Int(inverse(b))+1 for b in 0:prod(grid)-1])
     end

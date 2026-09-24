@@ -51,8 +51,8 @@
     @test_throws MethodError softmax_merge(empty,SoftmaxState(striped_fragment((0f0,))))
     for rm in (1,2),wm in (1,2)
         a=MMAAtom((16,8,16),BFloat16)
-        scores=zero_accumulator(TiledMMA(a,Val((wm,1)),Val((rm,2)),Val(16)))
-        outputs=map(_ -> 8f0,zero_accumulator(TiledMMA(a,Val((wm,1)),Val((rm,8)),Val(16))))
+        scores=zero_accumulator(TiledMMA(a,(wm,1),(rm,2),16))
+        outputs=map(_ -> 8f0,zero_accumulator(TiledMMA(a,(wm,1),(rm,8),16)))
         o=Tylo._reduced_ownership(Tylo.Layouts.layout(scores),Val(2))
         s=SoftmaxState(Fragment(ntuple(_ -> 2f0,2rm),o),Fragment(ntuple(_ -> 4f0,2rm),o))
         y=softmax_normalize(outputs,s)
@@ -62,15 +62,15 @@ end
 
 @testset "Streaming softmax on either logical axis" begin
     for axis in (1,2)
-        f = Fragment((-Inf32,2f0,3f0,-4f0),Tylo.Layouts.LocalOwnership{4,axis}())
-        state = @inferred SoftmaxState(f;dims=Val(axis))
+        f = Fragment((-Inf32,2f0,3f0,-4f0),lane_local(4,axis))
+        state = axis == 1 ? (@inferred (x -> SoftmaxState(x;dims=1))(f)) : (@inferred (x -> SoftmaxState(x;dims=2))(f))
         update = @inferred softmax_update(state,f)
         normalized = @inferred softmax_normalize(update.weights,update.state)
         ref = exp.(Float64.(f.data) .- 3)
         @test all(isapprox.(normalized.data, ref ./ sum(ref); atol=2e-7))
         @test size(Tylo.Layouts.layout(update.state.sum)) == (axis == 2 ? (32,1) : (1,32))
         @test softmax_merge(update.state,state).state.sum.data == update.state.sum.data
-        other = @inferred SoftmaxState(f;dims=Val(3-axis))
+        other = axis == 2 ? (@inferred (x -> SoftmaxState(x;dims=1))(f)) : (@inferred (x -> SoftmaxState(x;dims=2))(f))
         @test size(Tylo.Layouts.layout(other.sum)) == (axis == 2 ? (1,4) : (4,1))
     end
 end

@@ -9,7 +9,7 @@ function attention_case(B,H,S; input_scale=0.5f0, blocks=nothing, splitp=true)
     # Each input is a row-major (rows, 128) tensor loaded as 128-row by
     # 64-column B128-swizzled stripes. Retain the bindings while either
     # compiled kernel or a benchmark execution can still use them.
-    plan = Tylo.TMALoad(mod.BFloat16,Val((128,64)),Val(2))
+    plan = Tylo.TMATile(mod.BFloat16,(128,64),2)
     bindings = map(x -> Tylo.prepare_tma(plan,x),device_inputs)
     GC.@preserve bindings device_inputs begin
         descriptors = map(b -> b.descriptor,bindings)

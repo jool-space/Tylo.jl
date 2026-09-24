@@ -10,12 +10,12 @@ results do not automatically validate later changes.
 | Area | Implemented scope | Evidence available | Main limit |
 |:--|:--|:--|:--|
 | Layout mathematics | Hierarchical affine shapes/strides, static/runtime leaves, symbolic composition, complements, right and left inverses, logical/zipped/tiled division, logical/blocked/raked products, slicing, XOR swizzles, windows, two-axis permutation; ownership plans derived from this algebra | Host tests against the enumeration oracle; selected device arithmetic on GB10; machine code of every prior kernel unchanged | Complements and inverses need static strides; windows do not compose symbolically |
-| Register arithmetic and memory access | Generic `Fragment` values, scalar broadcast, conversions and axis permutation; loads and stores derived from ownership: `ldmatrix`/`stmatrix` blocks, then vectors within a tile's declared alignment, then scalars | Host and GB10 tests; machine code of every prior kernel unchanged | Not a full array interface; bounded stores stay scalar |
+| Register arithmetic and memory access | One `Fragment` type of logical values (8- and 16-bit values stored as register words), scalar broadcast, `Fragment{T}` conversion and axis permutation; loads and stores derived from ownership: `ldmatrix`/`stmatrix` blocks, then vectors within a tile's declared alignment, then scalars | Host and GB10 tests; machine code of every prior kernel unchanged | Not a full array interface; bounded stores stay scalar |
 | Reductions/windows | Selected lane-local, warp-striped, warp-MMA, WGMMA and TMEM ownership recipes | Independent coordinate/numerical references, assembly, GB10 | Arbitrary ownership does not imply a supported collective or slice |
 | Warp MMA | 24 `mma.sync` atoms (16-bit, TF32, FP8, INT8) as ownership tables; derived `ldmatrix`/`stmatrix` operand copies; `TiledMMA` GEMM with full/bounded copies and stores, one/two copy stages | SM80/89/90a/100a/121a assembly; GB10 runtime oracle for every atom | No claim of a tuned GEMM library; no split-K/autotuning |
 | TMA | 2D loads and stores of one-, two- and four-byte elements with 32-, 64- or 128-byte swizzle rows, from matrices or batches of matrices with logical bounds, into canonical storage expressed as `Swizzle{B,M,3}` over packed rows and shared with `ldmatrix`, WGMMA and tcgen05 operands | GB10 runtime for every width, batches, clipping, reuse and lifetime tests | No multicast, clusters, boxes beyond one matrix or unswizzled boxes |
 | Hopper WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, selected partial accumulators | SM90a assembly; H100/H200 tests prepared | Runtime and performance on Hopper remain unvalidated |
-| TMEM and tcgen05 MMA | FP32 and packed BF16/FP16 `.32x32b` loads/stores, x1–x128, logical windows and transfer partitions; `Tcgen05MMA` atoms (f16/tf32/f8f6f4/i8 kinds, M=128) with shared operands recognized structurally as the 128-byte-swizzled encoding, TMEM accumulators and TMEM-sourced A, commit and TMEM allocation | SM100a assembly; B200 round trips of the transfers; MMA issue compared against the reference attention kernel on GB10 | MMA execution not yet run on B200; M=64 and cta_group::2 not described |
+| TMEM and tcgen05 MMA | FP32 and packed BF16/FP16 `.32x32b` loads/stores, x1–x128, logical windows and transfer partitions; `Tcgen05Atom`s (f16/tf32/f8f6f4/i8 kinds, M=128) with shared operands recognized structurally as the 128-byte-swizzled encoding, TMEM accumulators and TMEM-sourced A, commit and TMEM allocation | SM100a assembly; B200 round trips of the transfers; MMA issue compared against the reference attention kernel on GB10 | MMA execution not yet run on B200; M=64 and cta_group::2 not described |
 | Streaming attention | Complete multi-head BF16 forward kernel, D=64: TMA-fed stages, register-resident Q, online statistics, optional masks, causal tails, two warp groups alternating on the tensor pipe | GB10 correctness, dated paired measurements against a materialized cuBLAS baseline and the measured `mma.sync` peak | Fixed geometry (128 queries × 64 keys per step); single-head cases below 2048 queries underfill the 48 SMs |
 | Datacenter attention experiment | TMA loads, both MMA issues, correction and epilogue replaced in a raw PTX kernel | Six kernel-code comparisons on GB10; paired B200 execution and timings of the pre-MMA revision | Softmax stream, barrier plan and roles remain raw PTX; the MMA revision awaits B200 execution |
 
@@ -24,6 +24,46 @@ online `SoftmaxState(f; dims)` uses reduced fragments on either implemented
 logical axis. It does not synthesize collectives for arbitrary ownership.
 
 ## Most recent checks
+
+### One vocabulary (2026-09-24)
+
+The public surface was consolidated so that each part has one spelling.
+
+- One distribution type: `LocalOwnership`, `StripedOwnership`,
+  `TiledMMAOwnership`, `WGMMAOwnership`, `PermutedOwnership` and the
+  transfer-as-ownership are gone; each is an `Ownership` built from its
+  mapping. The constructor stores the mapping canonically (thread and slot
+  modes coalesced), so equal distributions have equal types and transposing
+  twice is the identity. `coordinate` evaluates the mapping's projections
+  onto the two axes, generated per slot, with shifts and masks for power-of-two
+  thread modes, and splits into a thread part and a slot constant: loads and
+  stores of affine tiles form one base pointer per thread and add constant
+  offsets that fold into the instructions.
+- One register type: `PackedFragment`, `pack`, `unpack` and `scale` are gone.
+  `f.data` is always logical values; 8- and 16-bit values are stored as the
+  register words instructions consume, so loop-carried operands stay in their
+  words. `Fragment{T}(f)` converts.
+- One instruction description: `abstract type Atom` with `MMAAtom`,
+  `ScaledMMAAtom`, `CopyAtom`, `WGMMAAtom` (was `WGMMA64`) and `Tcgen05Atom`
+  (was `Tcgen05MMA`); `load_fragment(atom, role, tile, thread)` replaces
+  `load_a`, `load_b`, `load_scale_a` and `load_scale_b`; `instruction_atoms()`
+  includes the block-scaled atoms. The tiled `pack_operand_a` takes its plan.
+- One static convention: shapes, axes, counts and alignments are plain
+  constants everywhere (`TiledMMA(atom,(2,2),(2,4),32)`, `window(t,o,(16,16))`,
+  `GlobalTile(p,l,16)`, `wait_copies(1)`, `CopyPlan((64,64),128,2)`,
+  `TmemTransfer((32,64),2)`, `TMATile(T,(128,64),2)`, `dims=2`).
+- `Layouts` is exported with its core names; `TMALoad`, `PreparedTMA`,
+  `DeviceTMA` and `BroadcastFragment` are gone. Of the 83 names exported
+  before, the kernel-writing vocabulary stays exported (66 names, now
+  including `Atom` and the layout core) and inspection, validation and rarer
+  operations are declared `public` and used qualified (17 names).
+
+GB10, Julia 1.13: the full suite passes 71,368 checks (3 broken, as before).
+Of 365 kernels saved before and after, 117 are smaller, 244 are unchanged and 4
+test oracles on sm_80 grew by three address instructions; streaming attention
+dropped from 1800 to 1752 instructions (2232 to 2168 with masks). Megakernels'
+programs compile to identical PTX except the two Tylo-tile projections, whose
+kernels shrank.
 
 ### Layout algebra and algebraic derivations (2026-09-16)
 

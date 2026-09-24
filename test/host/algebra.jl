@@ -142,7 +142,7 @@ end
 # tile via logical_divide reproduces the existing factorization.
 @testset "tile equivalence" begin
     l = L((16, 32), (32, 1))
-    old = TL.tile(l, Val((8, 16)))
+    old = TL.tile(l, (8, 16))
     new = logical_divide(l, (static(8), static(16)))
     @test shape(old) == shape(new) && TL.strides(old) == TL.strides(new)
     @test pointwise(old, new)

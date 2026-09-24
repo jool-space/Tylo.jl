@@ -10,7 +10,7 @@
     :($s)
 end
 Base.@propagate_inbounds function tcgen05_operand(a::A,role::Role,t::SharedTile{T,L},
-        origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {A<:Tcgen05MMA,Role<:Union{OperandA,OperandB},T,L}
+        origin::Tuple{Int32,Int32}=(Int32(0),Int32(0))) where {A<:Tcgen05Atom,Role<:Union{OperandA,OperandB},T,L}
     T === eltype(a,role) || throw(ArgumentError("operand tile element type differs from the atom"))
     s = _operand_structure(L,T,Role)
     m,n,k = size(a)
@@ -97,16 +97,18 @@ _step_expr(name,::Type{<:TmemTile},::Type,DK) = :(_step($name,Val($DK)))
 @inline _k_extent(t::TmemTile) = Int(size(t)[2])
 
 """
-    mma(atom::Tcgen05MMA, d::TmemTile, a, b, Val(K), accumulate::Bool)
+    mma(atom::Tcgen05Atom, d::TmemTile, a, b, K, accumulate::Bool)
 
-Issue `K ÷ k` instructions accumulating `a*b` over logical K into the TMEM
+Issue `K ÷ k` instructions, for a constant `K`, accumulating `a*b` over logical K into the TMEM
 accumulator `d`, from one thread. `a` is a [`Tcgen05Operand`](@ref) or a
 `TmemTile` of the atom's A type in the accumulator convention; `b` is a
 [`Tcgen05Operand`](@ref). With `accumulate=false` the first instruction
 overwrites `d`. Nothing waits: order TMEM and shared-memory readiness with
 fences and barriers, and observe completion through [`commit_mma`](@ref).
 """
-@generated function mma(atom::A,d::TmemTile{TC,LD},a::OA,b::OB,::Val{K},accumulate::Bool) where {A<:Tcgen05MMA,TC,LD,OA,OB,K}
+Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::TmemTile,a,b,k::Integer,accumulate::Bool) =
+    _mma(atom,d,a,b,Val(Int(k)),accumulate)
+@generated function _mma(atom::A,d::TmemTile{TC,LD},a::OA,b::OB,::Val{K},accumulate::Bool) where {A<:Tcgen05Atom,TC,LD,OA,OB,K}
     inst = A()
     m,n,katom = size(inst)
     TC === eltype(inst,Accumulator()) || return :(throw(ArgumentError("accumulator element type differs from the atom")))
@@ -145,14 +147,14 @@ end
     ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cta.b64"(barrier)
 
 @inline function _check_tmem_columns(c)
-    c isa Int && ispow2(c) && 32 <= c <= 512 || throw(ArgumentError("TMEM allocations are powers of two from 32 to 512 columns"))
+    ispow2(c) && 32 <= c <= 512 || throw(ArgumentError("TMEM allocations are powers of two from 32 to 512 columns"))
 end
-@inline function tmem_allocate!(slot::Core.LLVMPtr{UInt32,PTX.AS.Shared},::Val{C}) where C
-    _check_tmem_columns(C)
-    ptx"tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"(PTX.smem_addr_u32(slot),UInt32(C))
+@inline function tmem_allocate!(slot::Core.LLVMPtr{UInt32,PTX.AS.Shared},columns::Integer)
+    _check_tmem_columns(columns)
+    ptx"tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"(PTX.smem_addr_u32(slot),columns % UInt32)
 end
-@inline function tmem_deallocate!(address::UInt32,::Val{C}) where C
-    _check_tmem_columns(C)
-    ptx"tcgen05.dealloc.cta_group::1.sync.aligned.b32"(address,UInt32(C))
+@inline function tmem_deallocate!(address::UInt32,columns::Integer)
+    _check_tmem_columns(columns)
+    ptx"tcgen05.dealloc.cta_group::1.sync.aligned.b32"(address,columns % UInt32)
 end
 @inline tmem_relinquish_permit() = ptx"tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"()

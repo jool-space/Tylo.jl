@@ -4,7 +4,7 @@ module Layouts
 
 using Static: StaticInt, static
 
-export Layout, @Layout, Swizzle, compose, window, shape, cosize, static, coordinate
+export Layout, @Layout, Ownership, Swizzle, compose, window, shape, cosize, static, coordinate
 export concat, coalesce, complement, right_inverse, left_inverse,
        logical_divide, zipped_divide, tiled_divide,
        logical_product, blocked_product, raked_product,
@@ -17,44 +17,101 @@ include("algebra.jl")
 
 function layout end
 
+# ── Ownership coordinates ───────────────────────────────────────────────
+# A static ownership's coordinate is evaluated through its projections onto
+# the two logical axes, worked out while generating: each axis is a sum of
+# `((t ÷ prefix) % extent) * stride` terms over the thread modes plus the
+# slot's constant, with shifts and masks for powers of two since thread
+# indices are non-negative. Zero-stride modes contribute nothing, and the
+# outermost thread mode takes no remainder, since a coordinate is only
+# defined for the ownership's own threads.
+function _axis_expr(axis::Layout,e::Int)
+    pairs = [(Int(s),Int(d)) for (s,d) in zip(shape(flatten(mode(axis,1))),strides(flatten(mode(axis,1))))]
+    constant = Int(mode(axis,2)(e))
+    terms = Any[]
+    prefix = 1
+    for (i,(s,d)) in enumerate(pairs)
+        if s > 1 && d != 0
+            # Thread indices are non-negative: powers of two become shifts and masks.
+            x = prefix == 1 ? :t : ispow2(prefix) ? :(t >> $(trailing_zeros(prefix))) : :(t ÷ oftype(t,$prefix))
+            if i != length(pairs)
+                x = ispow2(s) ? :($x & oftype(t,$(s-1))) : :($x % oftype(t,$s))
+            end
+            push!(terms,d == 1 ? x : :($x * oftype(t,$d)))
+        end
+        prefix *= s
+    end
+    constant == 0 || push!(terms,:(oftype(t,$constant)))
+    isempty(terms) ? :(zero(t)) : length(terms) == 1 ? only(terms) : Expr(:call,:+,terms...)
+end
 """
-    LocalOwnership{N,Axis}()
-    StripedOwnership{N,Axis}()
+    coordinate(ownership, thread, slot)
 
-Two explicit warp ownership patterns. Each lane holds `N` local values along
-logical `Axis` (1 or 2). `LocalOwnership` assigns one independent sequence to
-each lane; `StripedOwnership` interleaves the 32 lanes within one sequence.
-Neither describes memory strides. Coordinates take a zero-based lane (0:31),
-local to this warp, and a zero-based value slot. Use `Ownership` for an explicit mapping.
+The zero-based logical coordinate `(row, col)` that `thread` holds in its
+zero-based `slot`. In a kernel `slot` must be a constant; the evaluation is
+then a few integer operations on `thread`, derived while generating.
 """
-struct LocalOwnership{N,Axis}
-    function LocalOwnership{N,Axis}() where {N,Axis}
-        _check_ownership(N,Axis)
-        new{N,Axis}()
+Base.@constprop :aggressive @inline coordinate(o::Ownership,t::Integer,e::Integer) = _coordinate(o,t,Val(Int(e)))
+@generated function _coordinate(o::Ownership{S,L},t::Integer,::Val{E}) where {S,L,E}
+    Base.issingletontype(L) || return :(_indexed_coordinate(o,t,Val(E)))
+    l = L.instance
+    E isa Int && 0 <= E < Int(size(l)[2]) || return :(throw(BoundsError()))
+    m, n = S
+    rows = compose(Layout((static(m),static(n)),(static(1),static(0))),l)
+    cols = compose(Layout((static(m),static(n)),(static(0),static(1))),l)
+    quote
+        Base.@inline
+        ($(_axis_expr(rows,E)),$(_axis_expr(cols,E)))
     end
 end
-struct StripedOwnership{N,Axis}
-    function StripedOwnership{N,Axis}() where {N,Axis}
-        _check_ownership(N,Axis)
-        new{N,Axis}()
+# The same coordinate in two parts: the thread's part, evaluated at run
+# time, and the slot's constant part. `coordinate == thread part + slot part`
+# on each axis, since the mapping is a sum over its thread and slot modes.
+@generated function _thread_coordinate(o::Ownership{S,L},t::Integer) where {S,L}
+    l = L.instance
+    m, n = S
+    rows = compose(Layout((static(m),static(n)),(static(1),static(0))),l)
+    cols = compose(Layout((static(m),static(n)),(static(0),static(1))),l)
+    strip(axis) = Layout((shape(axis)[1],static(1)),(strides(axis)[1],static(0)))
+    quote
+        Base.@inline
+        ($(_axis_expr(strip(rows),0)),$(_axis_expr(strip(cols),0)))
     end
 end
-function _check_ownership(n,axis)
-    n isa Int && n > 0 && axis isa Int && axis in (1,2) ||
-        throw(ArgumentError("ownership requires a positive value count and axis 1 or 2"))
+function _slot_coordinate(o::Ownership{S},e::Int) where S
+    m, n = S
+    rows = compose(Layout((static(m),static(n)),(static(1),static(0))),o.mapping)
+    cols = compose(Layout((static(m),static(n)),(static(0),static(1))),o.mapping)
+    (Int(mode(rows,2)(e)),Int(mode(cols,2)(e)))
 end
-Base.size(::LocalOwnership{N,A}) where {N,A} = A == 2 ? (32,N) : (N,32)
-Base.size(::StripedOwnership{N,A}) where {N,A} = A == 2 ? (1,32N) : (32N,1)
-@inline function coordinate(::LocalOwnership{N,A},t::Integer,::Val{E}) where {N,A,E}
-    E isa Int && 0 <= E < N || throw(BoundsError())
-    A == 2 ? (t,oftype(t,E)) : (oftype(t,E),t)
+@inline function _indexed_coordinate(o::Ownership{S},t::Integer,::Val{E}) where {S,E}
+    E isa Int && 0 <= E < size(o.mapping)[2] || throw(BoundsError())
+    i = o.mapping((t,oftype(t,E)))
+    m = oftype(i,S[1])
+    (i % m,i ÷ m)
 end
-@inline function coordinate(::StripedOwnership{N,A},t::Integer,::Val{E}) where {N,A,E}
-    E isa Int && 0 <= E < N || throw(BoundsError())
-    value = t+oftype(t,32E)
-    A == 2 ? (zero(t),value) : (value,zero(t))
+
+"""
+    permutedims(ownership)
+
+The same threads and slots holding the transposed tile: coordinate `(r, c)`
+becomes `(c, r)`.
+"""
+function Base.permutedims(o::Ownership{S},perm=(2,1)) where S
+    _check_permutation(perm)
+    perm == (1,2) && return o
+    m, n = S
+    Ownership((n,m),compose(Layout((static(m),static(n)),(static(n),static(1))),o.mapping))
 end
-Base.permutedims(::LocalOwnership{N,A}) where {N,A} = LocalOwnership{N,3-A}()
-Base.permutedims(::StripedOwnership{N,A}) where {N,A} = StripedOwnership{N,3-A}()
+
+# An ownership's canonical mapping: thread and slot modes each coalesced, a
+# mode of one leaf written as that leaf.
+@inline _canonical_mapping(l) = l
+@inline function _canonical_mapping(l::Layout)
+    t, v = coalesce(mode(l,1)), coalesce(mode(l,2))
+    Layout((_unwrap(shape(t)),_unwrap(shape(v))),(_unwrap(strides(t)),_unwrap(strides(v))))
+end
+@inline _unwrap(x::Tuple{Any}) = x[1]
+@inline _unwrap(x) = x
 
 end

@@ -13,7 +13,7 @@ operations for GEMM and fused gate/up projection.
 ## The same storage contract on both sides
 
 ```jldoctest
-julia> a = TMATile(Tylo.BFloat16, Val((128,64)), Val(2));
+julia> a = TMATile(Tylo.BFloat16, (128,64), 2);
 
 julia> transfer_bytes(a)
 16384
@@ -21,14 +21,14 @@ julia> transfer_bytes(a)
 julia> shared_layout(a)((Int32(1), Int32(0)))
 72
 
-julia> b = TMATile(Float32, Val((16,64)), Val(1), Val(64));
+julia> b = TMATile(Float32, (16,64), 1, 64);
 
 julia> swizzle_bytes(b), size(b)
 (64, (16, 64))
 ```
 
 The first plan is logical A(M,K) with K contiguous before swizzling; logical
-B(K,N) uses `TMATile(T, Val((k,n)), Val(1))`. The host arrays passed to
+B(K,N) uses `TMATile(T, (k,n), 1)`. The host arrays passed to
 `prepare_tma` are physically `(inner, outer)` Julia matrices in both cases:
 transpose A's storage once; B already has this storage order.
 
@@ -41,7 +41,7 @@ packed rows, where `M` keeps the 16-byte chunk bits and `2^B` chunks form a
 row. For 128-byte rows of 16-bit elements and row r, the mapping is
 `64r + xor(k,8*(r%8))`. An allocation aligned to eight rows (1024 bytes for
 128-byte rows) establishes the swizzle origin. `shared_tile(plan, pointer)`
-borrows that allocation. `TMALoad(T, Val(S), Val(A))` is the earlier name of
+borrows that allocation. `TMATile(T, S, A)` is the earlier name of
 the 128-byte plan.
 
 `prepare_tma(plan, device_array)` returns an owner of the uploaded descriptor
@@ -95,8 +95,8 @@ sync_threads()
 # One elected thread:
 tma_store!(c_map, shared_tile(c_map, stage_pointer), (row, col))
 commit_tma_stores()
-wait_tma_reads(Val(0))   # the shared stage may be refilled
-wait_tma_stores(Val(0))  # the global writes are complete
+wait_tma_reads(0)   # the shared stage may be refilled
+wait_tma_stores(0)  # the global writes are complete
 ```
 
 Store origins are non-negative; elements past the array's far edges are
@@ -109,7 +109,7 @@ and the rendezvous between writers and the issuing thread are the caller's.
 ## WGMMA values and ownership
 
 ```julia
-plan = WGMMA64(BFloat16, Val(8), Val(64), Val(4))
+plan = WGMMAAtom(BFloat16, 8, 64, 4)
 acc = zero_accumulator(plan)
 a = wgmma_operand(plan, OperandA(), a_shared, (row, Int32(0)))
 b = wgmma_operand(plan, OperandB(), b_shared)

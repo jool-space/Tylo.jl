@@ -8,16 +8,16 @@ function gemm_config(::Type{T}=BFloat16; block=(64,64,32),warps=(2,2),swizzled=t
     stages in (1,2) || throw(ArgumentError("one or two copy stages required"))
     bm % (16warps[1]) == bn % (8warps[2]) == 0 || throw(ArgumentError("warp tiles must divide block"))
     bk in (16,32,64) || throw(ArgumentError("supported K tiles: 16,32,64"))
-    plan = TiledMMA(MMAAtom((16,8,16),T),Val(warps),Val((bm÷(16warps[1]),bn÷(8warps[2]))),Val(bk))
+    plan = TiledMMA(MMAAtom((16,8,16),T),warps,(bm÷(16warps[1]),bn÷(8warps[2])),bk)
     a = @Layout (bm, bk) (bk, 1)
     b = @Layout (bk, bn) (1, bk)
     bits = trailing_zeros(bk)-3
     sa = swizzled ? compose(Swizzle{bits,3,bits}(),a) : a
     sb = swizzled ? compose(Swizzle{bits,3,bits}(),b) : b
-    ac = CopyPlan{(bm,bk),Tylo.threads(plan),2}()
-    bc = CopyPlan{(bk,bn),Tylo.threads(plan),1}()
-    validate_copy(ac,T,sa,a)
-    validate_copy(bc,T,sb,b)
+    ac = CopyPlan((bm,bk),Tylo.threads(plan),2)
+    bc = CopyPlan((bk,bn),Tylo.threads(plan),1)
+    Tylo.validate_copy(ac,T,sa,a)
+    Tylo.validate_copy(bc,T,sb,b)
     (;plan,ac,bc,sa,sb,a_span=Val(Int(cosize(sa))),b_span=Val(Int(cosize(sb))),stages=Val(stages),bounds=Val(bounds))
 end
 shared_bytes(config,::Type{T}) where T = value(config.stages)*(value(config.a_span)+value(config.b_span))*sizeof(T)
@@ -42,12 +42,12 @@ end
     sa,sb = shared_stage(ptr,config,stage)
     @inbounds begin
         if !value(config.bounds) || full_vectors(a,(m,k),(bm,bk),2)
-            copy_async!(config.ac,sa,window(a,(m,k),Val((bm,bk))),tid)
+            copy_async!(config.ac,sa,window(a,(m,k),(bm,bk)),tid)
         else
             copy_async!(config.ac,sa,a,(m,k),tid)
         end
         if !value(config.bounds) || full_vectors(b,(k,n),(bk,bn),1)
-            copy_async!(config.bc,sb,window(b,(k,n),Val((bk,bn))),tid)
+            copy_async!(config.bc,sb,window(b,(k,n),(bk,bn)),tid)
         else
             copy_async!(config.bc,sb,b,(k,n),tid)
         end
@@ -79,9 +79,9 @@ function tiled_gemm_kernel!(out,a_data,b_data,m::Int32,n::Int32,k::Int32,
     for i in Int32(0):iterations-Int32(1)
         stage = i % Int32(stages)
         if stages == 2 && i+Int32(1) < iterations
-            wait_copies(Val(1))
+            wait_copies(1)
         else
-            wait_copies(Val(0))
+            wait_copies(0)
         end
         sync_threads() # make each producer's completed copies visible to all warps
         sa,sb = shared_stage(ptr,config,stage)
@@ -93,7 +93,7 @@ function tiled_gemm_kernel!(out,a_data,b_data,m::Int32,n::Int32,k::Int32,
     end
     result = map(x -> Relu ? max(alpha*x,0f0) : alpha*x,acc)
     @inbounds if !value(config.bounds) || (eltype(out)===Float32 && row+bm<=m && col+bn<=n)
-        store!(config.plan,window(d,(row,col),Val((bm,bn))),result,tid)
+        store!(config.plan,window(d,(row,col),(bm,bn)),result,tid)
     else
         store!(config.plan,d,result,(row,col),tid)
     end

@@ -1,6 +1,6 @@
 """
-    TMATile(T, Val((m,k)), Val(2))            # logical A(M,K), 128-byte rows
-    TMATile(T, Val((k,n)), Val(1), Val(64))   # logical B(K,N), 64-byte rows
+    TMATile(T, (m,k), 2)        # logical A(M,K), 128-byte rows
+    TMATile(T, (k,n), 1, 64)    # logical B(K,N), 64-byte rows
 
 A 2D tile that TMA moves between global and shared memory. Elements are
 one, two or four bytes wide. Axis `A` is the inner axis and spans one
@@ -9,10 +9,11 @@ positive multiple of eight, at most 256. Shared storage is
 [`shared_layout`](@ref)`(plan)`, allocated at a multiple of `8W` bytes.
 `transfer_bytes` counts every element of the box, including zero-filled
 out-of-bounds elements of a load. The plan owns no memory, descriptor or
-barrier; [`prepare_tma`](@ref) binds it to a device array.
+barrier; [`prepare_tma`](@ref) binds it to a device array. The shape, axis
+and width must be constants.
 """
 struct TMATile{T,S,A,W}
-    @inline function TMATile(::Type{T},::Val{S},::Val{A},::Val{W}=Val(128)) where {T,S,A,W}
+    @inline function TMATile{T,S,A,W}() where {T,S,A,W}
         isbitstype(T) && sizeof(T) in (1,2,4) || throw(ArgumentError("TMA elements are one, two or four bytes wide"))
         W isa Int && W in (32,64,128) || throw(ArgumentError("swizzle rows are 32, 64 or 128 bytes"))
         S isa Tuple && length(S) == 2 && all(x -> x isa Int && x > 0,S) && A isa Int && A in (1,2) &&
@@ -21,9 +22,8 @@ struct TMATile{T,S,A,W}
         new{T,S,A,W}()
     end
 end
-"`TMALoad(T, Val(S), Val(A))`: the 128-byte-row [`TMATile`](@ref), under its earlier name."
-const TMALoad{T,S,A} = TMATile{T,S,A,128}
-@inline (::Type{TMALoad})(::Type{T},s::Val,a::Val) where T = TMATile(T,s,a,Val(128))
+Base.@constprop :aggressive @inline TMATile(::Type{T},shape::Tuple{Integer,Integer},axis::Integer,width::Integer=128) where T =
+    TMATile{T,map(Int,shape),Int(axis),Int(width)}()
 Base.size(::TMATile{T,S}) where {T,S} = S
 transfer_bytes(::TMATile{T,S}) where {T,S} = sizeof(T)*prod(S)
 swizzle_bytes(::TMATile{T,S,A,W}) where {T,S,A,W} = W
@@ -66,11 +66,8 @@ struct TMABinding{P,D,R}
     descriptor::D
     TMABinding(plan::P,descriptor::D,::Val{R}) where {P,D,R} = new{P,D,R}(plan,descriptor)
 end
-"Bindings of one matrix, under their earlier names."
-const PreparedTMA{P,A,D,B} = HostTMA{P,A,D,B,2}
-const DeviceTMA{P,D} = TMABinding{P,D,2}
-(::Type{PreparedTMA})(plan,source,descriptor,storage) = HostTMA(plan,source,descriptor,storage,Val(2))
-(::Type{DeviceTMA})(plan,descriptor) = TMABinding(plan,descriptor,Val(2))
+"`TMABinding(plan, descriptor)`: a device binding of one matrix to a descriptor already on the device."
+TMABinding(plan,descriptor) = TMABinding(plan,descriptor,Val(2))
 shared_layout(b::Union{HostTMA,TMABinding}) = shared_layout(b.plan)
 transfer_bytes(b::Union{HostTMA,TMABinding}) = transfer_bytes(b.plan)
 swizzle_bytes(b::Union{HostTMA,TMABinding}) = swizzle_bytes(b.plan)
@@ -132,18 +129,18 @@ Close the issuing thread's bulk group of TMA stores.
 function commit_tma_stores end
 
 """
-    wait_tma_reads(Val(N))
+    wait_tma_reads(n)
 
-Wait until at most `N` of the issuing thread's committed bulk groups are
-still reading shared memory; the source tiles of the others may be reused.
+Wait until at most `n` (a constant) of the issuing thread's committed bulk
+groups are still reading shared memory; the source tiles of the others may be reused.
 """
 function wait_tma_reads end
 
 """
-    wait_tma_stores(Val(N))
+    wait_tma_stores(n)
 
-Wait until at most `N` of the issuing thread's committed bulk groups are
-still in flight; the global writes of the others are complete and visible
+Wait until at most `n` (a constant) of the issuing thread's committed bulk
+groups are still in flight; the global writes of the others are complete and visible
 to the issuing thread.
 """
 function wait_tma_stores end

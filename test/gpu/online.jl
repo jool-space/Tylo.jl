@@ -36,7 +36,7 @@ end
 if runtime_supported(@__FILE__)
 @testset "Online state distributed rows" begin
     for kind in (Val(:local),Val(:warp),MMAAtom((16,8,16),BFloat16),
-                 TiledMMA(MMAAtom((16,8,16),BFloat16),Val((2,1)),Val((2,3)),Val(16)))
+                 TiledMMA(MMAAtom((16,8,16),BFloat16),(2,1),(2,3),16))
         n=kind isa Val ? 3 : kind isa MMAAtom ? 4 : 24
         nt=kind isa TiledMMA ? 64 : 32; chunks=7
         rng=MersenneTwister(n+nt); x=randn(rng,Float32,n,nt,chunks)

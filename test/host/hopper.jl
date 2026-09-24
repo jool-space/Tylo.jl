@@ -5,7 +5,7 @@
     for T in (UInt8,BFloat16,Float16,Float32), W in (32,64,128), axis in (1,2), rows in (8,16,64,128,256)
         row = W ÷ sizeof(T)
         shape = axis == 2 ? (rows,row) : (row,rows)
-        p = TMATile(T,Val(shape),Val(axis),Val(W)); l = shared_layout(p)
+        p = TMATile(T,shape,axis,W); l = shared_layout(p)
         @test size(p) == shape && swizzle_bytes(p) == W && transfer_bytes(p) == W*rows
         offsets = [Int(l(axis == 2 ? (Int32(r),Int32(k)) : (Int32(k),Int32(r)))) for r in 0:rows-1,k in 0:row-1]
         expected = [swizzle(sizeof(T)*(row*r+k),W) ÷ sizeof(T) for r in 0:rows-1,k in 0:row-1]
@@ -16,48 +16,48 @@
         s = Tylo.swizzled_structure(typeof(l),T,axis)
         @test s.major === :K && s.swizzle_bytes == W && s.row_elements == row && s.stride_bytes == 8W && s.groups == 1
     end
-    @test TMALoad(BFloat16,Val((128,64)),Val(2)) === TMATile(BFloat16,Val((128,64)),Val(2))
-    @test TMALoad(BFloat16,Val((128,64)),Val(2)) isa TMALoad{BFloat16,(128,64),2}
+    @test TMATile(BFloat16,(128,64),2) === TMATile(BFloat16,(128,64),2)
+    @test TMATile(BFloat16,(128,64),2) isa TMATile{BFloat16,(128,64),2,128}
     for (shape,axis) in (((64,32),2),((7,64),2),((264,64),2),((64,8),0))
-        @test_throws ArgumentError TMALoad(BFloat16,Val(shape),Val(axis))
+        @test_throws ArgumentError TMATile(BFloat16,shape,axis)
     end
-    @test_throws ArgumentError TMATile(Float32,Val((64,64)),Val(2))
-    @test_throws ArgumentError TMATile(Float32,Val((32,32)),Val(2),Val(64))
-    @test_throws ArgumentError TMATile(BFloat16,Val((64,64)),Val(2),Val(256))
-    @test_throws ArgumentError TMATile(BFloat16,Val((64,64)),Val(2),Val(48))
-    @test_throws ArgumentError TMATile(Float64,Val((64,16)),Val(2))
-    @test_throws ArgumentError TMATile(UInt8,Val((64,64)),Val(2))
+    @test_throws ArgumentError TMATile(Float32,(64,64),2)
+    @test_throws ArgumentError TMATile(Float32,(32,32),2,64)
+    @test_throws ArgumentError TMATile(BFloat16,(64,64),2,256)
+    @test_throws ArgumentError TMATile(BFloat16,(64,64),2,48)
+    @test_throws ArgumentError TMATile(Float64,(64,16),2)
+    @test_throws ArgumentError TMATile(UInt8,(64,64),2)
 end
 
 @testset "WGMMA ownership" begin
     for T in (BFloat16,Float16), n in 8:8:256
-        p = WGMMA64(T,Val(n))
+        p = WGMMAAtom(T,n)
         l = operand_layout(p,Accumulator())
-        coordinates = [Tylo.Layouts.coordinate(l,Int32(t),Val(e)) for t in 0:127,e in 0:n÷2-1]
+        coordinates = [Tylo.Layouts.coordinate(l,Int32(t),e) for t in 0:127,e in 0:n÷2-1]
         @test Set(coordinates) == Set((r,c) for r in 0:63,c in 0:n-1)
         @test all(c -> c isa Tuple{Int32,Int32},coordinates)
         @test all(iszero,finish_mma(zero_accumulator(p)).data)
     end
     for k in (16,32,64), partials in (1,k÷16)
-        p = WGMMA64(BFloat16,Val(8),Val(k),Val(partials))
+        p = WGMMAAtom(BFloat16,8,k,partials)
         c = Tylo.WGMMAAccumulator(p,ntuple(Float32,4partials))
         f = finish_mma(c)
         @test f.data == ntuple(i -> sum(Float32(i+4j) for j in 0:partials-1),4)
-        @test map(x -> 2f0*x,f).data == scale(f,2f0).data
+        @test map(x -> 2f0*x,f).data == (f .* 2f0).data
     end
-    @test_throws ArgumentError WGMMA64(Float32,Val(8))
-    @test_throws ArgumentError WGMMA64(BFloat16,Val(9))
-    @test_throws ArgumentError WGMMA64(BFloat16,Val(8),Val(48))
-    @test_throws ArgumentError WGMMA64(BFloat16,Val(8),Val(64),Val(3))
-    @test_throws ArgumentError WGMMA64(BFloat16,Val(256),Val(64),Val(4))
-    @test_throws ArgumentError Tylo.WGMMAAccumulator(WGMMA64(BFloat16,Val(8)),(0f0,))
+    @test_throws ArgumentError WGMMAAtom(Float32,8)
+    @test_throws ArgumentError WGMMAAtom(BFloat16,9)
+    @test_throws ArgumentError WGMMAAtom(BFloat16,8,48)
+    @test_throws ArgumentError WGMMAAtom(BFloat16,8,64,3)
+    @test_throws ArgumentError WGMMAAtom(BFloat16,256,64,4)
+    @test_throws ArgumentError Tylo.WGMMAAccumulator(WGMMAAtom(BFloat16,8),(0f0,))
 end
 
 @testset "WGMMA descriptor geometry" begin
     for k in (16,32,64), n in (8,16,64,256)
-        p = WGMMA64(BFloat16,Val(n),Val(k))
-        a = shared_layout(TMALoad(BFloat16,Val((128,64)),Val(2)))
-        b = shared_layout(TMALoad(BFloat16,Val((64,256)),Val(1)))
+        p = WGMMAAtom(BFloat16,n,k)
+        a = shared_layout(TMATile(BFloat16,(128,64),2))
+        b = shared_layout(TMATile(BFloat16,(64,256),1))
         for kk in 0:16:64-k, rr in (0,8,64)
             @test validate_wgmma(p,OperandA(),a,(rr,kk)) === nothing
         end
@@ -74,8 +74,8 @@ end
     # Narrower rows: the plan's K must fit one row, origins stay inside it.
     for W in (32,64), k in (16,32,64)
         row = W ÷ 2
-        a = shared_layout(TMATile(BFloat16,Val((64,row)),Val(2),Val(W)))
-        p = WGMMA64(BFloat16,Val(16),Val(k))
+        a = shared_layout(TMATile(BFloat16,(64,row),2,W))
+        p = WGMMAAtom(BFloat16,16,k)
         if k <= row
             for kk in 0:16:row-k
                 @test validate_wgmma(p,OperandA(),a,(0,kk)) === nothing

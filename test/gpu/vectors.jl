@@ -1,5 +1,5 @@
 # TEST_TARGET: cc>=8.0
-using Tylo.Layouts: @Layout, LocalOwnership
+using Tylo.Layouts: @Layout
 
 # Aligned tiles vectorize fragment loads and stores; tiles with natural
 # alignment take the scalar path. Both must agree exactly.
@@ -8,15 +8,15 @@ function vector_kernel!(out,inp,ownership,::Val{A}) where A
     lane = Int32(threadIdx().x)-Int32(1)
     m,n = size(ownership)
     # The launch guarantees 256-byte pointers and rows of whole 16-byte vectors.
-    src = @inbounds GlobalTile(pointer(inp),@Layout((m,n),(n,1)),Val(A))
-    dst = @inbounds GlobalTile(pointer(out),@Layout((m,n),(n,1)),Val(A))
+    src = @inbounds GlobalTile(pointer(inp),@Layout((m,n),(n,1)),A)
+    dst = @inbounds GlobalTile(pointer(out),@Layout((m,n),(n,1)),A)
     f = load_fragment(ownership,src,lane)
     store!(dst,f,lane)
     nothing
 end
 
 cases() = ((operand_layout(MMAAtom((16,8,16),BFloat16),Accumulator()),Float32),
-           (LocalOwnership{4,2}(),Float32),
+           (lane_local(4,2),Float32),
            (operand_layout(MMAAtom((16,8,16),BFloat16),OperandA()),BFloat16),
            (operand_layout(MMAAtom((16,8,32),Float8_E4M3FN),OperandA()),Float8_E4M3FN))
 

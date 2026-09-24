@@ -42,20 +42,21 @@ function operand_load_kernel!(outa,outb,ina,inb,config)
     a = GlobalTile(pointer(ina),@Layout((32, 32), (32, 1)))
     b = GlobalTile(pointer(inb),@Layout((32, 32), (1, 32)))
     @inbounds begin
-        copy_async!(CopyPlan{(32,32),32,2}(),sa,a,tid)
-        copy_async!(CopyPlan{(32,32),32,1}(),sb,b,tid)
+        copy_async!(CopyPlan((32,32),32,2),sa,a,tid)
+        copy_async!(CopyPlan((32,32),32,1),sb,b,tid)
     end
     commit_copies()
-    wait_copies(Val(0))
+    wait_copies(0)
     sync_threads()
     atom = MMAAtom((16,8,16),T)
-    av = @inbounds load_a(atom,window(sa,(Int32(3),Int32(8)),Val((16,16))),tid)
-    bv = @inbounds load_b(atom,window(sb,(Int32(8),Int32(3)),Val((16,8))),tid)
+    av = @inbounds load_fragment(atom,OperandA(),window(sa,(Int32(3),Int32(8)),(16,16)),tid)
+    bv = @inbounds load_fragment(atom,OperandB(),window(sb,(Int32(8),Int32(3)),(16,8)),tid)
+    wa, wb = Tylo._pack_words(av), Tylo._pack_words(bv)
     PTX.Utils.@unroll for j in 1:4
-        @inbounds outa[4tid+j] = av.data[j]
+        @inbounds outa[4tid+j] = wa[j]
     end
     PTX.Utils.@unroll for j in 1:2
-        @inbounds outb[2tid+j] = bv.data[j]
+        @inbounds outb[2tid+j] = wb[j]
     end
     nothing
 end
@@ -98,8 +99,8 @@ function check_gemm(T,config,m,n,k;pad=0,relu=false)
     # Validate the actual runtime leading dimensions before launching.
     la = @Layout ($m, $k) ($lda, $1)
     lb = @Layout ($k, $n) ($1, $ldb)
-    validate_copy(config.ac,T,config.sa,Tylo.Layouts.window(la,(0,0),Val((bm,bk))))
-    validate_copy(config.bc,T,config.sb,Tylo.Layouts.window(lb,(0,0),Val((bk,bn))))
+    validate_copy(config.ac,T,config.sa,Tylo.Layouts.window(la,(0,0),(bm,bk)))
+    validate_copy(config.bc,T,config.sb,Tylo.Layouts.window(lb,(0,0),(bk,bn)))
     alpha = relu ? -0.75f0 : 1f0
     @cuda threads=Tylo.threads(config.plan) blocks=(m÷bm,n÷bn) shmem=shared_bytes(config,T) tiled_gemm_kernel!(
         dd,da,db,Int32(m),Int32(n),Int32(k),Int32(lda),Int32(ldb),Int32(ldc),config,alpha,Val(relu))

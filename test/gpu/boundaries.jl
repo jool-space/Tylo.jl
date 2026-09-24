@@ -13,7 +13,7 @@ function boundary_copy_kernel!(out,input,dstlayout,srclayout,plan,origin,::Val{S
     dst=SharedTile(pointer(smem),dstlayout)
     src=GlobalTile(pointer(input),srclayout)
     @inbounds copy_async!(plan,dst,src,origin,t)
-    commit_copies();wait_copies(Val(0));sync_threads()
+    commit_copies();wait_copies(0);sync_threads()
     for i in t+Int32(1):Int32(blockDim().x):Int32(Span)
         @inbounds out[i]=smem[i]
     end
@@ -33,8 +33,8 @@ function check_boundary_copy(T,axis,step,origin)
     parent=axis==1 ? @Layout((64, 32), (1, 64)) :
                      @Layout((32, 64), (64, 1))
     start=axis==1 ? (8,3) : (3,8)
-    dst=Tylo.Layouts.window(compose(Swizzle{3,3,3}(),parent),map(Int32,start),Val((16,16)))
-    p=CopyPlan{(16,16),32,axis}()
+    dst=Tylo.Layouts.window(compose(Swizzle{3,3,3}(),parent),map(Int32,start),(16,16))
+    p=CopyPlan((16,16),32,axis)
     # Validate destination contiguity independently from the bounded source.
     validate_copy(p,T,dst,dst)
     span=Int(cosize(parent));expected=fill(T(99),span)

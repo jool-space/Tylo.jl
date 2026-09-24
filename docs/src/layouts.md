@@ -27,7 +27,7 @@ julia> l = @Layout (16, 32) (32, 1);
 julia> l((Int32(3), Int32(7)))
 103
 
-julia> Tylo.Layouts.tile(l, Val((8, 16)))(((3, 1), (7, 1))) == l((11, 23))
+julia> Tylo.Layouts.tile(l, (8, 16))(((3, 1), (7, 1))) == l((11, 23))
 true
 ```
 
@@ -129,7 +129,7 @@ julia> using Tylo.Layouts: @Layout, Swizzle, compose;
 
 julia> l = compose(Swizzle{2,3,2}(), @Layout((32, 32), (32, 1)));
 
-julia> w = Tylo.Layouts.window(l, (1, 8), Val((16, 16)));
+julia> w = Tylo.Layouts.window(l, (1, 8), (16, 16));
 
 julia> w((2, 3)) == l((3, 11))
 true
@@ -151,13 +151,12 @@ dimensions and its launch grid.
 - `GlobalTile` and `SharedTile` borrow typed LLVM pointers. Their layouts
   count elements; pointer access converts to bytes. Global coordinates are
   widened before offset arithmetic to support allocations larger than 4 GiB.
-  A third argument, `Val(align)`, declares that the pointer and every
+  A third argument, `align`, declares that the pointer and every
   non-unit stride are multiples of `align` bytes; fragment loads and stores
   then vectorize up to that width, and windows keep the declaration only at
   aligned origins. The default is the element size.
-- `Fragment` holds immutable values and explicit ownership. MMA operands
-  retain instruction-specific packing. Neither is an addressable local array;
-  register indexing stays static.
+- `Fragment` holds immutable logical values and explicit ownership. It is
+  not an addressable local array; register indexing stays static.
 - `TmemTile` maps logical coordinates to TMEM storage; `TmemTransfer` binds
   register ownership to a supported hardware access. See [TMEM tiles and transfers](@ref).
   Generic byte-pointer slicing is never applied to TMEM.
@@ -183,8 +182,8 @@ and `store!` derive the copy of any 32-lane ownership from those tables:
 blocks along the shared layout's static unit-stride axis, plain or
 transposed, grouped into `.x1`/`.x2`/`.x4` instructions, with the words
 permuted into the fragment's slot order; `validate_copy(ownership, T,
-layout)` checks the addressed rows on the host. `load_a` and `load_b` are
-that load with the atom's operand ownership.
+layout)` checks the addressed rows on the host. `load_fragment(atom, role,
+tile, thread)` is that load with the atom's operand ownership.
 `ScaledMMAAtom` is the block-scaled `mma.sync` of consumer Blackwell
 (`.kind::mxf8f6f4`): `D = (A .* scale_A) * (B .* scale_B) + C` with FP8
 operands and one `Float8_E8M0FNU` power-of-two scale per row of A and per

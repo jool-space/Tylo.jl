@@ -1,25 +1,25 @@
 using Tylo.Layouts: @Layout, Layout, Swizzle, compose, window, static
 
 @testset "tcgen05 atoms as data" begin
-    a = Tcgen05MMA((128,128,16),BFloat16)
+    a = Tcgen05Atom((128,128,16),BFloat16)
     @test size(a) == (128,128,16)
     @test Tylo.threads(a) == 1
     @test eltype(a,OperandA()) === BFloat16 && eltype(a,Accumulator()) === Float32
     @test operand_layout(a,Accumulator()) == @Layout((128,128),(1,128))
-    @test operand_layout(Tcgen05MMA((128,64,16),Float16),Accumulator()) == @Layout((128,64),(1,128))
-    @test Tcgen05MMA((128,64,8),Float32) isa Tcgen05MMA
-    @test Tcgen05MMA((128,256,32),Float8_E4M3FN,Float8_E5M2,Float32) isa Tcgen05MMA
-    @test Tcgen05MMA((128,32,32),Int8,UInt8,Int32) isa Tcgen05MMA
-    @test_throws ArgumentError Tcgen05MMA((128,128,8),BFloat16)      # K is 256 bits
-    @test_throws ArgumentError Tcgen05MMA((64,128,16),BFloat16)      # M=64 layout not described
-    @test_throws ArgumentError Tcgen05MMA((128,8,16),BFloat16)       # N multiple of 16
-    @test_throws ArgumentError Tcgen05MMA((128,128,16),BFloat16,Float16)
-    @test_throws ArgumentError Tcgen05MMA((128,128,16),BFloat16,Float16,Float32)
-    @test_throws ArgumentError Tcgen05MMA((128,128,32),Int8,Int8,Float32)
+    @test operand_layout(Tcgen05Atom((128,64,16),Float16),Accumulator()) == @Layout((128,64),(1,128))
+    @test Tcgen05Atom((128,64,8),Float32) isa Tcgen05Atom
+    @test Tcgen05Atom((128,256,32),Float8_E4M3FN,Float8_E5M2,Float32) isa Tcgen05Atom
+    @test Tcgen05Atom((128,32,32),Int8,UInt8,Int32) isa Tcgen05Atom
+    @test_throws ArgumentError Tcgen05Atom((128,128,8),BFloat16)      # K is 256 bits
+    @test_throws ArgumentError Tcgen05Atom((64,128,16),BFloat16)      # M=64 layout not described
+    @test_throws ArgumentError Tcgen05Atom((128,8,16),BFloat16)       # N multiple of 16
+    @test_throws ArgumentError Tcgen05Atom((128,128,16),BFloat16,Float16)
+    @test_throws ArgumentError Tcgen05Atom((128,128,16),BFloat16,Float16,Float32)
+    @test_throws ArgumentError Tcgen05Atom((128,128,32),Int8,Int8,Float32)
 end
 
 @testset "Instruction descriptors are pure functions of the atom" begin
-    a = Tcgen05MMA((128,128,16),BFloat16)
+    a = Tcgen05Atom((128,128,16),BFloat16)
     # PTX ISA Table 45: D=f32 at bits 4-5, A/B format bf16=1 at bits 7-9 and
     # 10-12, majorness at bits 15-16, N>>3 at bits 17-22, M>>4 at bits 24-28.
     expected(am,bm) = UInt32(1<<4 | 1<<7 | 1<<10 | am<<15 | bm<<16 | (128>>3)<<17 | (128>>4)<<24)
@@ -28,19 +28,19 @@ end
     @test Tylo.instruction_descriptor(a;a_major=:MN,b_major=:MN) == expected(1,1)
     @test Tylo.instruction_descriptor(a;b_major=:MN) ==
         PTX.tcgen05_instr_desc_f16bf16_f32(m=128,n=128,ab_dtype=:bf16,a_major=:K,b_major=:MN)
-    @test Tylo.instruction_descriptor(Tcgen05MMA((128,64,8),Float32)) ==
+    @test Tylo.instruction_descriptor(Tcgen05Atom((128,64,8),Float32)) ==
         PTX.tcgen05_instr_desc_f16bf16_f32(m=128,n=64,ab_dtype=:tf32)
-    @test Tylo.instruction_descriptor(Tcgen05MMA((128,32,32),Int8,UInt8,Int32)) ==
+    @test Tylo.instruction_descriptor(Tcgen05Atom((128,32,32),Int8,UInt8,Int32)) ==
         PTX.tcgen05_instr_desc_i8(m=128,n=32,a_dtype=:s8,b_dtype=:u8)
-    @test Tylo.instruction_descriptor(Tcgen05MMA((128,256,32),Float8_E4M3FN,Float8_E5M2,Float32)) ==
+    @test Tylo.instruction_descriptor(Tcgen05Atom((128,256,32),Float8_E4M3FN,Float8_E5M2,Float32)) ==
         PTX.tcgen05_instr_desc_f8f6f4(m=128,n=256,a_dtype=:e4m3,b_dtype=:e5m2)
 end
 
 @testset "Canonical swizzled encodings" begin
     structure = Tylo.swizzled_structure
     # Tylo's TMA storage is the canonical K-major encoding of either operand.
-    tma_a = typeof(shared_layout(TMALoad(BFloat16,Val((128,64)),Val(2))))
-    tma_b = typeof(shared_layout(TMALoad(BFloat16,Val((64,128)),Val(1))))
+    tma_a = typeof(shared_layout(TMATile(BFloat16,(128,64),2)))
+    tma_b = typeof(shared_layout(TMATile(BFloat16,(64,128),1)))
     sa = structure(tma_a,BFloat16,2)
     @test sa.major === :K && sa.swizzle_bytes == 128 && sa.leading_bytes == 16 && sa.stride_bytes == 1024 && sa.groups == 1
     sb = structure(tma_b,BFloat16,1)
@@ -56,7 +56,7 @@ end
     @test structure(typeof(q),BFloat16,2) == (;major=:K,swizzle_bytes=128,leading_bytes=16,stride_bytes=1024,row_elements=64,groups=2)
     @test structure(typeof(k),BFloat16,1) == (;major=:K,swizzle_bytes=128,leading_bytes=16,stride_bytes=1024,row_elements=64,groups=2)
     @test structure(typeof(v),BFloat16,1) == (;major=:MN,swizzle_bytes=128,leading_bytes=16384,stride_bytes=1024,row_elements=64,groups=2)
-    @test structure(typeof(window(q,(Int32(128),Int32(0)),Val((128,128)))),BFloat16,2).major === :K
+    @test structure(typeof(window(q,(Int32(128),Int32(0)),(128,128))),BFloat16,2).major === :K
     # Element widths change the swizzle's unchanged low bits and the row extent.
     @test structure(typeof(compose(Swizzle{3,4,3}(),@Layout((128,128),(128,1)))),Float8_E4M3FN,2).major === :K
     @test structure(typeof(compose(Swizzle{3,2,3}(),@Layout((128,32),(32,1)))),Float32,2).major === :K

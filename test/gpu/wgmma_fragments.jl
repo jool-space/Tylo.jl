@@ -4,9 +4,9 @@ include("wgmma_defs.jl")
 # The matrix input/output is ordinary column-major Julia storage.
 function wgmma_fragment_kernel!(out,input,::Val{N},::Val{A}) where {N,A}
     thread = Int32(threadIdx().x)-Int32(1)
-    ownership = Tylo.WGMMAOwnership{N}()
+    ownership = operand_layout(WGMMAAtom(BFloat16,N),Accumulator())
     values = Tylo.@rtuple(0:N÷2-1) do e
-        i,j = Tylo.Layouts.coordinate(ownership,thread,Val(e))
+        i,j = Tylo.Layouts.coordinate(ownership,thread,e)
         @inbounds input[i+Int32(1),j+Int32(1)]
     end
     f = Fragment(values,ownership)
@@ -42,7 +42,7 @@ end
 
 @testset "Completed WGMMA and fused softmax epilogue" begin
     for T in (BFloat16,Float16), n in (8,24), k in (16,64)
-        p = WGMMA64(T,Val(n),Val(k))
+        p = WGMMAAtom(T,n,k)
         begin # assembly checks
             code = compile_kernel(wgmma_operand_probe!,Tuple{CuDeviceMatrix{Float32,1},typeof(p),Int32,Val{true}};
                                   arch=CUDACore.SMVersion(9,0,:arch))

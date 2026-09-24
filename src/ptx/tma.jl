@@ -39,5 +39,5 @@ Base.@propagate_inbounds function _check_tma(t::SharedTile{T,L},b::TMABinding{TM
     nothing
 end
 @inline commit_tma_stores() = ptx"cp.async.bulk.commit_group"()
-@inline wait_tma_reads(::Val{N}) where N = ptx"cp.async.bulk.wait_group.read"(Val(N))
-@inline wait_tma_stores(::Val{N}) where N = ptx"cp.async.bulk.wait_group"(Val(N))
+Base.@constprop :aggressive @inline wait_tma_reads(n::Integer) = ptx"cp.async.bulk.wait_group.read"(Val(Int(n)))
+Base.@constprop :aggressive @inline wait_tma_stores(n::Integer) = ptx"cp.async.bulk.wait_group"(Val(Int(n)))

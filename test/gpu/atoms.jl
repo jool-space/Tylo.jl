@@ -1,4 +1,5 @@
 # TEST_TARGET: cc>=8.0
+mma_atoms() = filter(a -> a isa MMAAtom,instruction_atoms())
 using Tylo.Layouts: @Layout, Layout, Swizzle, compose, static
 
 # The generic oracle: load A and B through scalar loads at the ownership
@@ -21,11 +22,14 @@ end
 # shared memory through `store!` (stmatrix from sm_90, scalar stores
 # otherwise), the raw tile is exported for the host, and the tile is loaded
 # back through `load_fragment` (ldmatrix wherever a plan derives).
+# 8- and 16-bit values export as the register words an instruction consumes.
+@inline register_words(f) = Tylo._element_bits(eltype(f)) == 32 ? f.data : Tylo._pack_words(f)
 @generated function export_words!(out,f::F,g::F,lane) where F
-    W = F.parameters[2]
-    stores = [:(@inbounds out[$i,lane+1] = f.data[$i]; @inbounds out[$(i+W),lane+1] = g.data[$i]) for i in 1:W]
+    W = F.parameters[2]*Tylo._element_bits(F.parameters[1])÷32
+    stores = [:(@inbounds out[$i,lane+1] = wf[$i]; @inbounds out[$(i+W),lane+1] = wg[$i]) for i in 1:W]
     quote
         Base.@inline
+        wf, wg = register_words(f), register_words(g)
         $(stores...)
         nothing
     end
@@ -102,8 +106,8 @@ oracle_name(atom) = join((string(eltype(atom,OperandA())),string(eltype(atom,Ope
 
 begin # assembly checks
 @testset "Atom oracle assembly" begin
-    @test length(instruction_atoms()) == 24
-    for atom in instruction_atoms(), arch in oracle_archs(atom)
+    @test length(mma_atoms()) == 24
+    for atom in mma_atoms(), arch in oracle_archs(atom)
         TA,TB,TC=eltype(atom,OperandA()),eltype(atom,OperandB()),eltype(atom,Accumulator())
         tt=Tuple{CuDeviceMatrix{TC,1},CuDeviceMatrix{TA,1},CuDeviceMatrix{TB,1},typeof(atom)}
         code=compile_kernel(atom_oracle_kernel!,tt;arch,threads=32)
@@ -118,7 +122,7 @@ end
 # ldmatrix per block group with the planned width and transposition, and
 # stmatrix only when compiling for sm_90 or later.
 @testset "Derived matrix copy assembly" begin
-    for atom in instruction_atoms(), case in copy_cases(atom), arch in oracle_archs(atom)
+    for atom in mma_atoms(), case in copy_cases(atom), arch in oracle_archs(atom)
         config=copy_config(atom,case)
         config === nothing && continue
         TA,TB=eltype(atom,OperandA()),eltype(atom,OperandB())
@@ -149,7 +153,7 @@ end
 
 if runtime_supported(@__FILE__)
 @testset "Atom oracle: generic loads, MMA and stores match a host matmul" begin
-    for atom in instruction_atoms()
+    for atom in mma_atoms()
         TA,TB,TC=eltype(atom,OperandA()),eltype(atom,OperandB()),eltype(atom,Accumulator())
         m,n,k=size(atom)
         rng=MersenneTwister(hash((m,n,k,TA,TB,TC)) % 100000)
@@ -161,7 +165,7 @@ if runtime_supported(@__FILE__)
     end
 end
 @testset "Derived matrix copies round-trip through shared memory" begin
-    for atom in instruction_atoms(), case in copy_cases(atom)
+    for atom in mma_atoms(), case in copy_cases(atom)
         config=copy_config(atom,case)
         config === nothing && continue
         TA,TB=eltype(atom,OperandA()),eltype(atom,OperandB())

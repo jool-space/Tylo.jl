@@ -46,30 +46,27 @@ end
 @testset "8-bit and 16-bit register packing" begin
     for (T,values) in ((Int8,ntuple(i -> Int8(i-5),8)),(UInt8,ntuple(i -> UInt8(240+i),8)),
                        (Float8_E4M3FN,ntuple(i -> Float8_E4M3FN(i/4),8)),(Float16,ntuple(i -> Float16(i),4)))
-        f = Fragment(values,Tylo.Layouts.LocalOwnership{length(values),2}())
-        p = pack(f)
-        @test length(p.data) == length(values)*Tylo._element_bits(T)÷32
-        @test unpack(p).data == values
-        @test eltype(p) === T
+        f = Fragment(values,lane_local(length(values),2))
+        words = Tylo._pack_words(f)
+        @test length(words) == length(values)*Tylo._element_bits(T)÷32
+        @test Tylo._from_words(T,words,Tylo.Layouts.layout(f)) === f
     end
-    @test pack(Fragment((Int8(1),Int8(2),Int8(3),Int8(4)),Tylo.Layouts.LocalOwnership{4,2}())).data == (0x04030201,)
-    @test_throws ArgumentError pack(Fragment((Int8(1),Int8(2)),Tylo.Layouts.LocalOwnership{2,2}()))
-    @test_throws ArgumentError pack(Fragment((1f0,2f0),Tylo.Layouts.LocalOwnership{2,2}()))
-    q = pack(Fragment(ntuple(i -> Int8(i),16),Tylo.Layouts.LocalOwnership{16,2}()))
-    @test window(q,Val((0,4)),Val((32,8))).data == q.data[2:3]
-    @test_throws ArgumentError window(q,Val((0,2)),Val((32,8)))
-    converted = pack(Float8_E4M3FN,Fragment((1f0,-2f0,0.5f0,1000f0),Tylo.Layouts.LocalOwnership{4,2}()))
-    @test Float32.(unpack(converted).data) == (1f0,-2f0,0.5f0,448f0)
+    @test Tylo._pack_words(Fragment((Int8(1),Int8(2),Int8(3),Int8(4)),lane_local(4,2))) == (0x04030201,)
+    @test_throws ArgumentError Tylo._pack_words(Fragment((Int8(1),Int8(2)),lane_local(2,2)))
+    q = Fragment(ntuple(i -> Int8(i),16),lane_local(16,2))
+    @test window(q,(0,2),(32,8)).data == q.data[3:10]
+    converted = Fragment{Float8_E4M3FN}(Fragment((1f0,-2f0,0.5f0,1000f0),lane_local(4,2)))
+    @test Float32.(converted.data) == (1f0,-2f0,0.5f0,448f0)
     # Numeric packing saturates from every source type and is the identity on its own type.
     for S in (Float32,Float16,BFloat16,Float64), T in (Float8_E4M3FN,Float8_E5M2)
         values = (S(1),S(-2.5),S(0.5),S(3e4),S(-Inf),S(0),S(448),S(-0.0))
-        p = pack(T,Fragment(values,Tylo.Layouts.LocalOwnership{8,2}()))
-        @test unpack(p).data == map(x -> Tylo.convert_element(T,x),values)
-        @test pack(T,unpack(p)).data == p.data
-        # Widening unpack is exact and keeps ownership.
+        p = Fragment{T}(Fragment(values,lane_local(8,2)))
+        @test p.data == map(x -> Tylo.convert_element(T,x),values)
+        @test Fragment{T}(p) === p
+        # Widening is exact and keeps ownership.
         for F in (Float16,BFloat16,Float32,Float64)
-            w = unpack(F,p)
-            @test w.data == map(F,unpack(p).data) && eltype(w.data) === F
+            w = Fragment{F}(p)
+            @test w.data == map(F,p.data) && eltype(w.data) === F
             @test Tylo.Layouts.layout(w) === Tylo.Layouts.layout(p)
         end
     end
@@ -95,7 +92,7 @@ end
     @test_throws ArgumentError MMAAtom((16,8,16),BFloat16,BFloat16,Float16)
     @test_throws ArgumentError MMAAtom((16,8,64),Int8)
     @test_throws ArgumentError MMAAtom((16,8,16),Float32)
-    @test length(Tylo.instruction_atoms()) == 24
+    @test count(a -> a isa MMAAtom,Tylo.instruction_atoms()) == 24
 end
 
 @testset "Block-scaled atom acceptance" begin
@@ -118,8 +115,8 @@ end
         # replicates, and every lane of quad q holds column q; slot s is K block s.
         for lane in 0:31, s in 0:3
             q,l = divrem(lane,4)
-            @test Tylo.Layouts.coordinate(operand_layout(a,ScaleA()),lane,Val(s)) == (q+8*(l&1),s)
-            @test Tylo.Layouts.coordinate(operand_layout(a,ScaleB()),lane,Val(s)) == (s,q)
+            @test Tylo.Layouts.coordinate(operand_layout(a,ScaleA()),lane,s) == (q+8*(l&1),s)
+            @test Tylo.Layouts.coordinate(operand_layout(a,ScaleB()),lane,s) == (s,q)
         end
     end
     @test ScaledMMAAtom((16,8,32),Float8_E4M3FN) isa ScaledMMAAtom{(16,8,32),Float8_E4M3FN,Float8_E4M3FN,Float8_E8M0FNU}
@@ -127,6 +124,6 @@ end
     @test_throws ArgumentError ScaledMMAAtom((16,8,32),BFloat16)
     @test_throws ArgumentError ScaledMMAAtom((16,8,32),Float8_E4M3FN,Int8)
     @test_throws ArgumentError ScaledMMAAtom((16,8,32),Float8_E4M3FN,Float8_E4M3FN,Float8_E5M2)
-    @test length(scaled_instruction_atoms()) == 4
+    @test count(a -> a isa ScaledMMAAtom,instruction_atoms()) == 4
     @test Tylo._element_bits(Float8_E8M0FNU) == 8
 end

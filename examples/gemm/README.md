@@ -16,7 +16,7 @@ The central operations are:
 copy_async!(config.ac, shared_a, global_a_window, tid)
 copy_async!(config.bc, shared_b, global_b_window, tid)
 commit_copies()
-wait_copies(Val(1)) # for a two-stage pipeline with the next stage still pending
+wait_copies(1) # for a two-stage pipeline with the next stage still pending
 sync_threads()
 acc = mma(config.plan, shared_a, shared_b, acc, tid)
 sync_threads()    # release shared storage for reuse
@@ -24,7 +24,7 @@ result = map(x -> max(alpha*x, 0f0), acc)
 store!(config.plan, output_window, result, tid)
 ```
 
-The actual loop drains the last copy group with `wait_copies(Val(0))`.
+The actual loop drains the last copy group with `wait_copies(0)`.
 
 ## Run
 

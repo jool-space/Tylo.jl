@@ -2,29 +2,33 @@ module Tylo
 
 using BFloat16s: BFloat16
 
-export SoftmaxState, softmax_update, softmax_merge, softmax_normalize, softmax_logsumexp
+# The kernel-writing vocabulary is exported: layouts and ownerships, register
+# fragments, memory tiles, atoms with their operands and verbs, and the
+# per-hardware copy, MMA and completion operations.
+export Layouts, Layout, @Layout, Ownership, coordinate, compose, window,
+       Fragment, relayout, GlobalTile, SharedTile, TmemTile, load_fragment, store!,
+       Atom, OperandA, OperandB, Accumulator, ScaleA, ScaleB, operand_layout,
+       MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, mma, pack_operand_a,
+       CopyAtom, CopyPlan, copy_async!, commit_copies, wait_copies,
+       TMATile, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes, tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores,
+       WGMMAAtom, wgmma_operand, mma_async, wait_mma, finish_mma,
+       Tcgen05Atom, tcgen05_operand, accumulator, commit_mma,
+       TmemTransfer, partition, reinterpret_tile, load_async, wait_load, store_async!, wait_stores,
+       SoftmaxState, softmax_update, softmax_merge, softmax_normalize,
+       Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU
 
-export TMATile, TMALoad, TMABinding, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes,
-       tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores, swizzled_structure,
-       WGMMA64, validate_wgmma, wgmma_operand, mma_async, wait_mma, finish_mma
-
-export Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU
-
-export GlobalTile, SharedTile, window, CopyPlan, validate_copy, copy_async!,
-       commit_copies, wait_copies, MMAAtom, TiledMMA, zero_accumulator,
-       ScaledMMAAtom, ScaleA, ScaleB, load_scale_a, load_scale_b, scaled_instruction_atoms,
-       load_a, load_b, load_fragment, pack_operand_a, mma, store!, operand_layout, OperandA, OperandB, Accumulator,
-       instruction_atoms, CopyAtom, copy_atoms, Registers, Addresses,
-       Fragment, PackedFragment, scale, pack, unpack,
-       TmemTile, TmemTransfer, partition, reinterpret_tile,
-       Tcgen05MMA, Tcgen05Operand, tcgen05_operand, accumulator, commit_mma,
-       tmem_allocate!, tmem_deallocate!, tmem_relinquish_permit,
-       load_async, wait_load, store_async!, wait_stores,
-       fence_after_thread_sync, fence_before_thread_sync
+# Inspection, validation and less common operations are public, used qualified.
+@static if VERSION >= v"1.11.0-DEV.469"
+    eval(Expr(:public,:Registers,:Addresses,:instruction_atoms,:copy_atoms,:validate_copy,
+        :TMABinding,:swizzled_structure,:validate_wgmma,
+        :Tcgen05Operand,:tmem_allocate!,:tmem_deallocate!,:tmem_relinquish_permit,
+        :fence_after_thread_sync,:fence_before_thread_sync,:softmax_logsumexp,:convert_element,:threads))
+end
 
 include("tuples.jl")
 include("elements.jl")
 include("layouts/layouts.jl")
+import .Layouts: Layout, @Layout, Ownership, coordinate, compose, window
 include("fragments.jl")
 include("tmem.jl")
 include("memory.jl")
@@ -53,7 +57,7 @@ function load_async end
     wait_load(pending)
 
 Complete prior TMEM loads and return this load's typed registers.
-FP32 loads return `Fragment`; BF16/FP16 loads return `PackedFragment`.
+Returns a `Fragment` of the partition's element type.
 The wait also carries a compiler dependency through the returned registers.
 It waits for all prior loads of the executing threads, not just this handle.
 """

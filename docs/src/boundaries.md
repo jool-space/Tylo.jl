@@ -7,7 +7,7 @@ source contains a complete tile:
 ```julia
 copy_async!(plan, shared_destination, global_source, (row, col), thread)
 commit_copies()
-wait_copies(Val(0))
+wait_copies(0)
 # The caller synchronizes participating producers and consumers here.
 ```
 

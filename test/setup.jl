@@ -6,8 +6,8 @@ using .TestTargets
 include(joinpath(@__DIR__, "coverage.jl"))
 
 # Explicit ownership patterns reused across host and device tests.
-@inline local_fragment(data::NTuple{N}) where N = Fragment(data,Tylo.Layouts.LocalOwnership{N,2}())
-@inline striped_fragment(data::NTuple{N}) where N = Fragment(data,Tylo.Layouts.StripedOwnership{N,2}())
+@inline local_fragment(data::NTuple{N}) where N = Fragment(data,lane_local(N,2))
+@inline striped_fragment(data::NTuple{N}) where N = Fragment(data,striped(N,2))
 # Row-distributed fragments for the reduction tests, keyed by ownership kind.
 row_fragment(::Val{:local},data) = local_fragment(data)
 row_fragment(::Val{:warp},data) = striped_fragment(data)
@@ -98,3 +98,14 @@ function kernel_text(image, prefix=".text._Z11fab_kernel_")
     end
     error("kernel code section not found: $prefix")
 end
+
+# The lane-local and warp-striped ownerships the tests use most, as ordinary
+# Ownerships: lane t holds `n` values of line t along `axis`, or the 32 lanes
+# interleave within one line of 32n values.
+@generated _lane_local(::Val{N},::Val{A}) where {N,A} = :($(A == 2 ?
+    Ownership((32,N),Layout((static(32),static(N)),(static(1),static(32)))) :
+    Ownership((N,32),Layout((static(32),static(N)),(static(N),static(1))))))
+@generated _striped(::Val{N},::Val{A}) where {N,A} =
+    :($(Ownership(A == 2 ? (1,32N) : (32N,1),Layout((static(32),static(N)),(static(1),static(32))))))
+Base.@constprop :aggressive @inline lane_local(n,axis) = _lane_local(Val(n),Val(axis))
+Base.@constprop :aggressive @inline striped(n,axis) = _striped(Val(n),Val(axis))

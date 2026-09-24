@@ -5,19 +5,19 @@ using Tylo.Layouts: @Layout
 function fragment_kernel!(out, input, alpha)
     tid = Int32(threadIdx().x)-Int32(1)
     values = local_fragment(ntuple(i -> @inbounds(input[64tid+i]),Val(64)))
-    for_half = window(values,Val((0,0)),Val((32,32)))
-    for_tail = window(values,Val((0,32)),Val((32,32)))
-    store!(pointer(out)+128tid,pack(BFloat16,for_half .* alpha))
-    store!(pointer(out)+128tid+64,pack(BFloat16,for_tail .* alpha))
+    for_half = window(values,(0,0),(32,32))
+    for_tail = window(values,(0,32),(32,32))
+    store!(pointer(out)+128tid,Fragment{BFloat16}(for_half .* alpha))
+    store!(pointer(out)+128tid+64,Fragment{BFloat16}(for_tail .* alpha))
     nothing
 end
 
 function tmem_correction_kernel!(base::UInt32, alpha::Float32)
     warp = (UInt32(threadIdx().x)-UInt32(1)) >> UInt32(5)
-    output = @inbounds window(TmemTile(Float32,base,@Layout((128,128),(1,128))),(UInt32(32)*warp,UInt32(0)),Val((32,128)))
+    output = @inbounds window(TmemTile(Float32,base,@Layout((128,128),(1,128))),(UInt32(32)*warp,UInt32(0)),(32,128))
     fence_after_thread_sync()
     PTX.Utils.@unroll for half in 0:1
-        chunk = @inbounds partition(TmemTransfer{(32,64),2}(),window(output,(0,64half),Val((32,64))))
+        chunk = @inbounds partition(TmemTransfer((32,64),2),window(output,(0,64half),(32,64)))
         values = wait_load(load_async(chunk))
         store_async!(chunk,values .* alpha)
     end
@@ -28,11 +28,11 @@ end
 
 function tmem_epilogue_kernel!(out, base::UInt32, alpha::Float32)
     tid = UInt32(threadIdx().x)-UInt32(1)
-    output = @inbounds window(TmemTile(Float32,base,@Layout((128,64),(1,128))),(UInt32(32)*(tid >> UInt32(5)),UInt32(0)),Val((32,64)))
-    values = @inbounds wait_load(load_async(partition(TmemTransfer{(32,64),2}(),output)))
+    output = @inbounds window(TmemTile(Float32,base,@Layout((128,64),(1,128))),(UInt32(32)*(tid >> UInt32(5)),UInt32(0)),(32,64))
+    values = @inbounds wait_load(load_async(partition(TmemTransfer((32,64),2),output)))
     PTX.Utils.@unroll for half in 0:1
-        part = window(values,Val((0,32half)),Val((32,32)))
-        store!(pointer(out)+Int(tid)*128+64half,pack(BFloat16,part .* alpha))
+        part = window(values,(0,32half),(32,32))
+        store!(pointer(out)+Int(tid)*128+64half,Fragment{BFloat16}(part .* alpha))
     end
     nothing
 end

@@ -1,4 +1,5 @@
 # TEST_TARGET: cc==12
+scaled_atoms() = filter(a -> a isa ScaledMMAAtom,instruction_atoms())
 using Tylo.Layouts: @Layout
 
 # A block-scaled product over NB microscaling blocks of 32 along K: operands
@@ -15,12 +16,12 @@ function scaled_atom_kernel!(out,a_data,b_data,sa_data,sb_data,atom,::Val{NB}) w
     acc=zero_accumulator(atom)
     # The launch supplies NB complete blocks; block offsets are in bounds by construction.
     @inbounds for word in Int32(0):Int32(NB÷4-1)
-        fsa=load_fragment(operand_layout(atom,ScaleA()),window(sa,(Int32(0),4word),Val((m,4))),lane)
-        fsb=load_fragment(operand_layout(atom,ScaleB()),window(sb,(4word,Int32(0)),Val((4,n))),lane)
+        fsa=load_fragment(operand_layout(atom,ScaleA()),window(sa,(Int32(0),4word),(m,4)),lane)
+        fsb=load_fragment(operand_layout(atom,ScaleB()),window(sb,(4word,Int32(0)),(4,n)),lane)
         for block in Int32(0):Int32(3)
             s=4word+block
-            fa=load_fragment(operand_layout(atom,OperandA()),window(a,(Int32(0),Int32(k)*s),Val((m,k))),lane)
-            fb=load_fragment(operand_layout(atom,OperandB()),window(b,(Int32(k)*s,Int32(0)),Val((k,n))),lane)
+            fa=load_fragment(operand_layout(atom,OperandA()),window(a,(Int32(0),Int32(k)*s),(m,k)),lane)
+            fb=load_fragment(operand_layout(atom,OperandB()),window(b,(Int32(k)*s,Int32(0)),(k,n)),lane)
             acc=mma(atom,fa,fb,acc,fsa,fsb,block)
         end
     end
@@ -30,8 +31,8 @@ end
 scaled_name(atom) = join((string(eltype(atom,OperandA())),string(eltype(atom,OperandB()))),'-')
 
 @testset "Block-scaled atom assembly" begin
-    @test length(scaled_instruction_atoms()) == 4
-    for atom in scaled_instruction_atoms(), arch in (CUDACore.SMVersion(12,1,:arch),CUDACore.SMVersion(12,0,:family)), nb in (4,8)
+    @test length(scaled_atoms()) == 4
+    for atom in scaled_atoms(), arch in (CUDACore.SMVersion(12,1,:arch),CUDACore.SMVersion(12,0,:family)), nb in (4,8)
         TA,TB=eltype(atom,OperandA()),eltype(atom,OperandB())
         tt=Tuple{CuDeviceMatrix{Float32,1},CuDeviceMatrix{TA,1},CuDeviceMatrix{TB,1},
                  CuDeviceMatrix{Float8_E8M0FNU,1},CuDeviceMatrix{Float8_E8M0FNU,1},typeof(atom),Val{nb}}
@@ -47,7 +48,7 @@ end
 if runtime_supported(@__FILE__)
     @testset "Block-scaled atom oracle" begin
         rng=MersenneTwister(29)
-        for atom in scaled_instruction_atoms(), nb in (4,8)
+        for atom in scaled_atoms(), nb in (4,8)
             TA,TB=eltype(atom,OperandA()),eltype(atom,OperandB())
             m,n,k=size(atom)
             # Products and sums are exact in FP32 for these values and scale

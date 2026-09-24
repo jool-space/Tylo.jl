@@ -1,11 +1,11 @@
 # TEST_TARGET: cc==9.0
 include("../../examples/hopper/kernel.jl")
 function hopper_signature(T,n,partials,stages)
-    ap = TMALoad(T,Val((64,64)),Val(2))
-    bp = TMALoad(T,Val((64,n)),Val(1))
-    p = WGMMA64(T,Val(n),Val(64),Val(partials))
-    Tuple{CuDeviceMatrix{Float32,1},Tylo.DeviceTMA{typeof(ap),PTX.TMADescriptorPtr},
-        Tylo.DeviceTMA{typeof(bp),PTX.TMADescriptorPtr},typeof(p),Int32,Val{stages}}
+    ap = TMATile(T,(64,64),2)
+    bp = TMATile(T,(64,n),1)
+    p = WGMMAAtom(T,n,64,partials)
+    Tuple{CuDeviceMatrix{Float32,1},Tylo.TMABinding{typeof(ap),PTX.TMADescriptorPtr,2},
+        Tylo.TMABinding{typeof(bp),PTX.TMADescriptorPtr,2},typeof(p),Int32,Val{stages}}
 end
 begin # assembly checks
 @testset "TMA to Hopper WGMMA complete pipeline assembly" begin
@@ -31,9 +31,9 @@ if capability_is(v"9.0")
     rng = MersenneTwister(1049)
     for T in (BFloat16,Float16), (n,partials) in ((8,1),(8,4),(16,1),(24,1),(64,1),(128,1),(256,1)), stages in (1,2), k in (64,128,320,328)
         ha,hb = T.(0.1f0 .* randn(rng,Float32,k,64)),T.(0.1f0 .* randn(rng,Float32,k,n))
-        a = prepare_tma(TMALoad(T,Val((64,64)),Val(2)),CuArray(ha))
-        b = prepare_tma(TMALoad(T,Val((64,n)),Val(1)),CuArray(hb))
-        plan = WGMMA64(T,Val(n),Val(64),Val(partials))
+        a = prepare_tma(TMATile(T,(64,64),2),CuArray(ha))
+        b = prepare_tma(TMATile(T,(64,n),1),CuArray(hb))
+        plan = WGMMAAtom(T,n,64,partials)
         out = CuArray{Float32}(undef,64,n)
         GC.@preserve a b begin
             kernel = @cuda launch=false arch=CUDACore.SMVersion(9,0,:arch) minthreads=160 hopper_gemm_kernel!(out,a,b,plan,Int32(k),Val(stages))
@@ -61,7 +61,7 @@ include("wgmma_defs.jl")
 begin # assembly checks
 @testset "WGMMA K extents and nonzero descriptor origins assemble" begin
     for T in (BFloat16,Float16), k in (16,32,64), n in (8,24), partials in unique((1,k÷16))
-        p = WGMMA64(T,Val(n),Val(k),Val(partials))
+        p = WGMMAAtom(T,n,k,partials)
         code = compile_kernel(wgmma_operand_probe!,Tuple{CuDeviceMatrix{Float32,1},typeof(p),Int32};
             arch=CUDACore.SMVersion(9,0,:arch))
         save_code("hopper-origin-$(T)-n$n-k$k-p$partials",code)
@@ -73,7 +73,7 @@ end
 if capability_is(v"9.0")
 @testset "WGMMA shared stores and descriptor origins" begin
     for T in (BFloat16,Float16), k in (16,32,64), n in (8,24), partials in unique((1,k÷16)), k0 in unique((0,64-k))
-        p = WGMMA64(T,Val(n),Val(k),Val(partials))
+        p = WGMMAAtom(T,n,k,partials)
         out = CuArray{Float32}(undef,64,n)
         @cuda threads=128 shmem=33792 arch=CUDACore.SMVersion(9,0,:arch) wgmma_operand_probe!(out,p,Int32(k0))
         a = Float64[(r+3kk)%19-9 for r in 64:127, kk in k0:k0+k-1]

@@ -20,7 +20,7 @@ An update returns a new state, unnormalized weights, and the factor that
 rescales a previous weighted numerator:
 
 ```jldoctest
-julia> f = Fragment((0f0, 0f0), Tylo.Layouts.LocalOwnership{2,2}()); s = SoftmaxState(f);
+julia> f = Fragment((0f0, 0f0), Ownership((32,2), @Layout((32,2),(1,32)))); s = SoftmaxState(f);
 
 julia> u = softmax_update(s, f);
 
@@ -56,12 +56,12 @@ compares it with full-row register fragments and a scalar three-pass warp loop.
 ## Same-lane conversion
 
 For `mma.sync.m16n8k16`, two adjacent 16×8 C atoms supply a 16×16 A operand in
-the same lanes. Their eight FP32 values become four packed BF16/FP16 words.
-`pack_operand_a(atom,left,right)` performs rounding and packing. It does not
+the same lanes. Their eight FP32 values become eight BF16/FP16 values in the
+A operand's ownership. `pack_operand_a(atom,left,right)` performs the rounding. It does not
 reinterpret FP32 bits or communicate between lanes.
 
-For a tiled accumulator, `pack_operand_a(atom,acc,Val(m),Val(k))` selects a
-zero-based M repetition and 16-column pair. It rejects multiple N warps and
+For a tiled accumulator, `pack_operand_a(plan,acc,m,k)` selects a
+zero-based M repetition and 16-column pair and converts for the plan's atom. It rejects multiple N warps and
 unpaired N atoms. Coordinate tests enumerate every lane/value and repeated M/N
 atom against an independent oracle; GPU tests compare with shared store/load
 and consume the result in a second MMA.

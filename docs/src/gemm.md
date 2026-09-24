@@ -21,7 +21,7 @@ repetitions per warp, and the K extent consumed by one call:
 ```jldoctest
 julia> atom = MMAAtom((16,8,16),Tylo.BFloat16);
 
-julia> plan = TiledMMA(atom, Val((2, 2)), Val((2, 4)), Val(32));
+julia> plan = TiledMMA(atom, (2, 2), (2, 4), 32);
 
 julia> size(plan), Tylo.threads(plan)
 ((64, 64, 32), 128)
@@ -100,7 +100,7 @@ The main loop has this shape:
 
 ```julia
 # Excerpt: the real loop chooses groups_remaining when filling/draining.
-wait_copies(Val(groups_remaining))
+wait_copies(groups_remaining)
 sync_threads()
 acc = mma(config.plan, shared_a, shared_b, acc, tid)
 sync_threads()
@@ -114,10 +114,10 @@ The two barriers have different purposes:
 | After the copy wait | Every consumer must observe all participating producers' completed writes |
 | After MMA has read shared memory | Every reader must finish before producers overwrite the stage |
 
-Copy groups belong to the issuing thread. `wait_copies(Val(1))` allows at most
+Copy groups belong to the issuing thread. `wait_copies(1)` allows at most
 one committed group to remain pending; it does not identify a particular
 buffer or synchronize the CTA. The two-stage example uses this while another
-stage is pending, and drains with `Val(0)` at the end. That rule is part of the
+stage is pending, and drains with `wait_copies(0)` at the end. That rule is part of the
 example's schedule, not a general rule for every two-buffer pipeline.
 
 Inside `mma(plan, ...)`, Tylo selects shared windows for each warp, loads

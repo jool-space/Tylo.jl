@@ -17,30 +17,26 @@ when the logical tile shape stays the same. An MMA lane, for example, holds
 values spanning two logical rows, with other lanes supplying the missing
 columns. A fragment is therefore not an ordinary array of its local registers.
 
-The public value type is `Fragment`. Two compact ownership patterns cover the
-common local and interleaved cases:
+Every distribution is an `Ownership((rows, cols), mapping)`: a layout from
+`(thread, slot)` to the column-major index of the logical coordinate held
+there. Instruction operands, reduction results, windows and transposes are
+all ownerships of this one type, and the constructor stores the mapping in a
+canonical form, so two ownerships that distribute a tile alike have the same
+type. Two common cases, one row per lane and one row interleaved across a warp:
 
 ```julia
-Fragment(values, Tylo.Layouts.LocalOwnership{N,2}())   # N values per lane along axis 2
-Fragment(values, Tylo.Layouts.StripedOwnership{N,2}()) # N values per lane interleaved along axis 2
+Ownership((32,n), @Layout((32,n),(1,32)))    # lane t holds row t, n values
+Ownership((1,32n), @Layout((32,n),(1,32)))   # the 32 lanes interleave along one row
 ```
-
-Use axis `1` for the corresponding transposed logical interpretation. These
-patterns have shapes `(32,N)` and `(1,32N)` respectively at axis `2`. They
-specify ownership, independently of memory order. `Layouts.Ownership` accepts
-an explicit thread/value mapping when neither pattern fits.
 
 Here each lane instead owns a 2×2 patch:
 
 ```jldoctest
-julia> using Tylo.Layouts: @Layout, coordinate
-
-julia> ownership = Tylo.Layouts.Ownership(Val((16,8)),
-           @Layout(((8,4),(2,2)), ((2,32),(1,16))));
+julia> ownership = Ownership((16,8), @Layout(((8,4),(2,2)), ((2,32),(1,16))));
 
 julia> f = Fragment((1f0, -2f0, 3f0, -4f0), ownership);
 
-julia> [coordinate(ownership, 0, Val(e)) for e in 0:3]
+julia> [coordinate(ownership, 0, slot) for slot in 0:3]
 4-element Vector{Tuple{Int64, Int64}}:
  (0, 0)
  (1, 0)
@@ -66,7 +62,9 @@ applying them again requires no additional communication. Matching logical
 shapes alone are insufficient: incompatible ownerships are rejected.
 
 ```jldoctest
-julia> f = Fragment((1f0, 2f0, 3f0), Tylo.Layouts.LocalOwnership{3,2}());
+julia> rows = Ownership((32,3), @Layout((32,3),(1,32)));
+
+julia> f = Fragment((1f0, 2f0, 3f0), rows);
 
 julia> only(sum(f; dims=2))
 6.0f0
@@ -93,7 +91,7 @@ same ownership. A GPU-compilable user function participates in exactly this
 way. Nested dotted expressions fuse over each static local slot.
 
 ```jldoctest
-julia> f = Fragment((-2f0, 0f0, 3f0), Tylo.Layouts.LocalOwnership{3,2}());
+julia> f = Fragment((-2f0, 0f0, 3f0), Ownership((32,3), @Layout((32,3),(1,32))));
 
 julia> affine_relu(x, a, b) = max(muladd(a, x, b), 0f0);
 
@@ -129,10 +127,9 @@ participate in fragment arithmetic.
 
 | Representation | Scalar arithmetic | Reductions | Views and conversion |
 |:--|:--|:--|:--|
-| `Fragment(values, ownership)` | `map`, fused broadcast, type-changing results | Only implemented ownership recipes | Logical axis permutation; static `window` for lane-local/TMEM-transfer ownership |
-| Ready warp-MMA accumulator | `map`, broadcast; `Fragment(acc)` exposes local values | Supported atom/tiled recipes below | Axis permutation preserves local slots; MMA operands still require specific packing |
-| Completed WGMMA result | Ordinary `Fragment`: fused broadcast, `map`, conversions | Two results per thread, replicated across four lanes | `finish_mma` combines partials; logical axis permutation and ownership-based `store!` |
-| `PackedFragment{T}` | `unpack` first; `T` is the logical element type | `unpack` and convert to FP32 first | BF16/FP16 packing, axis permutation, pair-aligned windows, typed global/TMEM stores |
+| `Fragment(values, ownership)` of any element type | `map`, fused broadcast, type-changing results, `Fragment{T}(f)` conversion | FP32 values with a derived recipe | Logical axis permutation; static `window`; ownership-derived `load_fragment`/`store!` |
+| Warp-MMA accumulator and operands | The same: they are ordinary fragments | Supported atom/tiled recipes below | Instructions pack 8- and 16-bit values into words when they issue |
+| Completed WGMMA result | The same | Two results per thread, replicated across four lanes | `finish_mma` combines partials |
 | Pending TMEM/WGMMA result | Wait first | Wait first | No arithmetic completion implied by its Julia type |
 
 `SoftmaxState(f; dims)` uses reduced fragments and accepts either implemented
@@ -153,7 +150,7 @@ ownership metadata. The values stay in the same threads and local slots.
 Its corresponding reduction is therefore `dims=1`:
 
 ```jldoctest
-julia> f = Fragment((1f0, 2f0, 3f0), Tylo.Layouts.LocalOwnership{3,2}());
+julia> f = Fragment((1f0, 2f0, 3f0), Ownership((32,3), @Layout((32,3),(1,32))));
 
 julia> g = permutedims(f);
 
@@ -163,14 +160,14 @@ julia> size(Tylo.Layouts.layout(g))
 julia> size(Tylo.Layouts.layout(maximum(g; dims=1)))
 (1, 32)
 
-julia> parent(g .- maximum(g; dims=1)) === f .- maximum(f; dims=2)
+julia> permutedims(g .- maximum(g; dims=1)) === f .- maximum(f; dims=2)
 true
 ```
 
-This view does not redistribute values into a different MMA operand format.
-`Fragment(accumulator)` exposes ready warp-MMA accumulator values and their
-ownership; packed operands and pending asynchronous results retain their
-separate representations and completion requirements.
+Transposing twice restores the identical fragment, since canonical ownerships
+of the same distribution are the same value. The transpose does not
+redistribute values into a different MMA operand distribution; pending
+asynchronous results keep their completion requirements.
 
 ## Collective implementations and participation
 
@@ -186,8 +183,8 @@ hand-written recipes exactly:
 
 | Ownership | Derived communication | Result per thread |
 |:--|:--|:--|
-| `Layouts.LocalOwnership`, axis along the slots | Local register arithmetic | One result |
-| `Layouts.StripedOwnership` | Five butterfly shuffle rounds | One result, replicated across the warp |
+| One row per lane, reducing along the row | Local register arithmetic | One result |
+| One row interleaved across the warp | Five butterfly shuffle rounds | One result, replicated across the warp |
 | Warp MMA or completed WGMMA accumulator, `dims=2` | Two shuffle rounds per row after local reduction | Two results per M repetition, replicated across four lanes |
 | TMEM-transfer fragment | Local register arithmetic | One result per thread |
 
@@ -199,7 +196,7 @@ raises an error rather than reducing only this thread's values. Full
 reductions are not provided. Lower-precision values must be converted
 explicitly with `Float32.(f)` before reducing. Floating-point reduction order
 need not match a sequential sum. The result type depends on the axis, so a
-kernel must supply a constant; `dims=Val(2)` makes that explicit.
+kernel must supply a constant `dims`.
 
 All 32 lanes of each warp execute distributed reductions, including the
 four-lane MMA reductions. Bounds masks select data and neutral values; they
@@ -238,44 +235,35 @@ adjacent warp lanes adjacent addresses. This storage choice is separate from
 the fragment's logical axes. The MMA example normalizes one complete output
 tile, not groups spanning independently scheduled tiles.
 
-## Logical types and register packing
+## Element types and conversion
 
-`BFloat16.(f)` and `Float16.(f)` perform ordinary numerical conversion and return
-fragments of those element types. Instructions consume two 16-bit or four
-8-bit values in each 32-bit register operand. `pack(T, f)` performs conversion
-and constructs that packed representation; `pack(f)` preserves every bit of
-already typed 8- or 16-bit values. `unpack` returns an ordinary `Fragment{T}`
-without conversion; `unpack(F, p)` numerically widens packed FP8 elements to
-`Float16`, `BFloat16`, `Float32` or `Float64`. The 8-bit element types are
-`Int8`, `UInt8` and Microfloats' `Float8_E4M3FN` and `Float8_E5M2`, which Tylo
-re-exports. Tylo converts into them through [`Tylo.convert_element`](@ref):
-round to nearest even and saturate to the largest finite value, as
-`cvt.rn.satfinite` does, whatever overflow policy the type declares. The
-conversions go through Microfloats' conversion funnel, so a kernel compiled
-for a target with the instructions gets one native `cvt` per two values, from
-FP32, FP16 and BF16 sources and back, and the same bits as the host.
+A fragment always holds logical values, whatever their width: a BF16
+fragment holds `BFloat16` values, an FP8 fragment `Float8_E4M3FN` values.
+Instructions consume two 16-bit or four 8-bit values per 32-bit register;
+the binding packs them, adjacent slots into one word lowest first, when it
+issues, and a load unpacks the words it reads. Both are bit operations that
+LLVM folds when a load feeds an instruction, so the representation costs
+nothing and no packed fragment type is needed.
+
+`Fragment{T}(f)` converts every value to `T` and keeps the ownership. The
+8-bit element types are `Int8`, `UInt8` and Microfloats' `Float8_E4M3FN` and
+`Float8_E5M2`, which Tylo re-exports. Conversions into them follow
+[`Tylo.convert_element`](@ref): round to nearest even and saturate to the
+largest finite value, as `cvt.rn.satfinite` does, whatever overflow policy
+the type declares. They go through Microfloats' conversion funnel, and FP32
+to BF16/FP16 through paired conversions, so a kernel compiled for a target
+with the instructions gets one native `cvt` per two values, and the same bits
+as the host.
 
 ```jldoctest
-julia> f = Fragment((1f0, -2f0), Tylo.Layouts.LocalOwnership{2,2}());
+julia> f = Fragment((1f0, -2f0, 1000f0, 0.1f0), Ownership((32,4), @Layout((32,4),(1,32))));
 
-julia> p = pack(Float16, f);
+julia> Float32.(Fragment{Float8_E4M3FN}(f)).data     # saturates, rounds to nearest even
+(1.0f0, -2.0f0, 448.0f0, 0.1015625f0)
 
-julia> eltype(p), p.data
-(Float16, (0xc0003c00,))
-
-julia> unpack(p).data
-(Float16(1.0), Float16(-2.0))
-
-julia> Float32.(unpack(p)).data
-(1.0f0, -2.0f0)
+julia> Float32.(Fragment{Tylo.BFloat16}(f)).data
+(1.0f0, -2.0f0, 1000.0f0, 0.100097656f0)
 ```
-
-Ownership still counts logical elements, and adjacent *local slots* form each
-word, lowest element first. Packing does not imply adjacent memory addresses
-or redistribute values.
-A `PackedFragment(T, words, ownership)` constructor interprets supplied bits;
-it does not convert a different numeric format to `T`. NaN payload preservation
-is guaranteed for packing/unpacking already typed bits, not for numerical conversion.
 
 This separation follows the useful distinction between element type, storage
 and mapping in [CuTe tensors](https://github.com/NVIDIA/cutlass/blob/main/include/cute/tensor_impl.hpp)

@@ -45,25 +45,28 @@ shape(::Window{S}) where S = map(static,S)
 end
 
 """
-    window(layout, origin, Val(shape))
+    window(layout, origin, shape)
 
-A static-size logical window with a potentially runtime origin. Offsets stay
-relative to the parent's allocation base, preserving swizzle phase. Bounds
-are checked unless the caller uses `@inbounds` after establishing validity.
+A static-size logical window with a potentially runtime origin. `shape` must
+be a constant tuple. Offsets stay relative to the parent's allocation base,
+preserving swizzle phase. Bounds are checked unless the caller uses
+`@inbounds` after establishing validity.
 """
-Base.@propagate_inbounds function window(l::AbstractLayout,o::Tuple,::Val{S}) where S
+Base.@constprop :aggressive Base.@propagate_inbounds window(l::AbstractLayout,o::Tuple,s::Tuple) =
+    _window(l,o,Val(map(Int,s)))
+Base.@propagate_inbounds function _window(l::AbstractLayout,o::Tuple,::Val{S}) where S
     length(S) == length(o) == length(size(l)) || throw(ArgumentError("window rank mismatch"))
     all(n -> n isa Int && n > 0,S) || throw(ArgumentError("positive static extents required"))
     @boundscheck all(map((n,x,w) -> 0 <= x && x <= n-w,size(l),o,S)) ||
         throw(BoundsError(l,(o,S)))
     Window{S,typeof(l),typeof(o)}(l,o)
 end
-Base.@propagate_inbounds function window(l::Window,o::Tuple,::Val{S}) where S
+Base.@propagate_inbounds function _window(l::Window,o::Tuple,::Val{S}) where S
     length(S) == length(o) == length(size(l)) || throw(ArgumentError("window rank mismatch"))
     all(n -> n isa Int && n > 0,S) || throw(ArgumentError("positive static extents required"))
     @boundscheck all(map((n,x,w) -> 0 <= x && x <= n-w,size(l),o,S)) ||
         throw(BoundsError(l,(o,S)))
-    @inbounds window(l.parent,map(+,l.origin,o),Val(S))
+    @inbounds _window(l.parent,map(+,l.origin,o),Val(S))
 end
 
 # Exact planning queries; enumerate nonlinear layouts on the host, never
@@ -71,27 +74,33 @@ end
 cosize(l::Union{Composition,Window}) = 1 + maximum(l(i) for i in 0:Int(length(l))-1)
 
 """
-    Ownership(Val((rows, cols)), thread_value_layout)
+    Ownership((rows, cols), mapping)
 
-Map `(lane, logical_value)` to a matrix coordinate through a hierarchical
-layout. The layout's output is a column-major logical index, independent of
-physical memory layout and register packing.
+Which thread holds which value of a `rows × cols` logical tile. `mapping` is
+a layout with two modes, threads then slots, from `(thread, slot)` to the
+column-major index of the logical coordinate held there. It says nothing
+about memory or register packing. Every thread/value distribution in Tylo
+is an `Ownership`: instruction operands, reduction results, windows and
+transposes. `coordinate(ownership, thread, slot)` evaluates it.
+
+The constructor stores the mapping in a canonical form, its thread and slot
+modes each coalesced, so two ownerships with the same distribution have the
+same type.
 """
 struct Ownership{S,L<:AbstractLayout}
     mapping::L
+    function Ownership{S,L}(l::L) where {S,L<:AbstractLayout}
+        S isa Tuple{Int,Int} && all(>(0),S) && length(size(l)) == 2 ||
+            throw(ArgumentError("ownership requires a matrix shape and (thread, slot) modes"))
+        new{S,L}(l)
+    end
 end
-function Ownership(::Val{S},l::AbstractLayout) where S
-    length(S) == 2 && all(n -> n isa Int && n > 0,S) && length(size(l)) == 2 ||
-        throw(ArgumentError("ownership requires matrix and thread/value domains"))
-    Ownership{S,typeof(l)}(l)
+Base.@constprop :aggressive @inline function Ownership(s::Tuple{Integer,Integer},l::AbstractLayout)
+    c = _canonical_mapping(l)
+    Ownership{map(Int,s),typeof(c)}(c)
 end
 Base.size(::Ownership{S}) where S = S
-@inline function coordinate(o::Ownership{S},lane::Integer,::Val{E}) where {S,E}
-    E isa Int && 0 <= E < size(o.mapping)[2] || throw(BoundsError())
-    i = o.mapping((lane,oftype(lane,E)))
-    m = oftype(i,S[1])
-    (i % m,i ÷ m)
-end
+Base.:(==)(a::Ownership,b::Ownership) = size(a) == size(b) && a.mapping == b.mapping
 
 # Logical axis permutation preserves the storage map and parent-relative origin.
 @inline function _check_permutation(perm)

@@ -10,8 +10,8 @@ reuse. Those choices can differ while using the same Tylo primitive.
 | Fact | Representation | What it does not establish |
 |:--|:--|:--|
 | Logical domain and storage | `GlobalTile`, `SharedTile`, `TmemTile`, with a layout | Which thread owns a value, or whether the storage is ready |
-| Register values and ownership | `Fragment(values, ownership)` | A memory address, or a valid MMA operand representation |
-| A supported operation | `MMAAtom`, `CopyAtom`, `CopyPlan`, `TiledMMA`, `TMATile`, `WGMMA64`, `TmemTransfer`, `Tcgen05MMA` | A complete pipeline or an arbitrary layout conversion |
+| Register values and ownership | `Fragment(values, ownership)`, with `ownership` an `Ownership` | A memory address |
+| A supported operation | Atoms (`MMAAtom`, `ScaledMMAAtom`, `CopyAtom`, `WGMMAAtom`, `Tcgen05Atom`) and plans built from them (`TiledMMA`, `CopyPlan`, `TMATile`, `TmemTransfer`) | A complete pipeline or an arbitrary layout conversion |
 | Completion | Explicit waits/fences, with pending types for TMEM loads and WGMMA results | Allocation lifetime, converged participation, or exclusive access |
 
 Two maps explain most of the interface:
@@ -70,7 +70,8 @@ These boundaries are listed in [the fragment support table](rows.md).
 ## Why static parameters and generated functions appear
 
 Tile capacities, instruction shapes, and register slot selections usually need
-to be known to inference. Julia can specialize on types and `Val` parameters;
+to be known to inference. Tylo takes them as plain integers and tuples, which
+constant propagation turns into type parameters inside a kernel;
 `@Layout` makes static shape/stride leaves concise. Runtime matrix dimensions,
 leading strides and storage-window offsets can remain ordinary integers.
 
@@ -134,16 +135,43 @@ The present approach requires each hardware mapping to have an explicit
 contract and a worked consumer. An independent Laythe package is a possible
 future extraction of shared mathematics, not a prerequisite for this codebase.
 
+## One vocabulary
+
+The API is small on purpose, and each part has one spelling:
+
+- **One distribution type.** Every thread/value distribution is an
+  `Ownership`: MMA operands and accumulators, tiled and warpgroup
+  accumulators, TMEM transfers, reduction results, windows and transposes.
+  Its constructor stores the mapping in canonical form, so distributions that
+  agree are the same type and transposing twice is the identity. Coordinates
+  come from the mapping's projections onto the two axes, worked out while
+  generating, which reproduces the hand-written formulas they replaced.
+- **One register type.** A `Fragment` holds logical values of any width. Word
+  packing is how instructions consume 8- and 16-bit values, so the bindings
+  pack when they issue and loads unpack what they read; LLVM folds the pair.
+  `Fragment{T}(f)` is the only conversion.
+- **One kind of instruction description.** Every `Atom` answers `size`,
+  `threads`, `eltype(atom, role)` and `operand_layout(atom, role)`;
+  `load_fragment(atom, role, tile, thread)` loads any register operand.
+  Tilings (`TiledMMA`) and multi-instruction plans are built from atoms.
+- **One static convention.** Shapes, axes, counts and alignments are plain
+  integers and tuples at every call site. They must be constants in a
+  kernel, where constant propagation specializes on them; `Val` appears only
+  inside the implementation.
+- **One layout namespace.** `Tylo.Layouts` is public. Its core names
+  (`Layout`, `@Layout`, `Ownership`, `coordinate`, `compose`, `window`) are
+  re-exported, and the algebra is available as `Layouts.logical_divide` and
+  friends.
+
 ## Decisions still worth challenging
 
-- **Plan ergonomics.** `CopyPlan{...}()`, `WGMMA64(..., Val(...))` and
-  `partition(TmemTransfer{...}(), tile)` expose related choices in different
-  ways. Their contracts are useful; a coherent convenience layer is unfinished.
-- **Atoms as data.** A warp `MMAAtom` contributes only its operand ownerships;
-  fragments, generic loads and stores, reductions, tiling and same-lane
-  conversion derive from them by layout algebra. WGMMA and TMEM transfers still
-  carry their own plan types and completion contracts; folding them into the
-  same atom description is planned, not done.
+- **Completion.** Asynchronous operations still complete through their own
+  verbs (`wait_copies`, `wait_mma`, `wait_load`, `wait_tma_reads`, ...), one
+  per hardware mechanism. A single `wait` over typed pending values would be
+  shorter, but the mechanisms wait on different scopes.
+- **TMEM transfers.** `TmemTransfer` is a plan whose register distribution is
+  an ordinary ownership, but it is not yet an `Atom` of the `tcgen05.ld`
+  instruction with its own shapes.
 - **Collective scope.** Tylo has no single counterpart to TK's `group<N>` yet.
   Whether one improves composition should be tested against the existing warp,
   warpgroup and producer/consumer kernels.

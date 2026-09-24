@@ -1,7 +1,8 @@
 module SoftmaxExample
 using Tylo, PTX, CUDACore, BFloat16s
-using Tylo.Layouts: @Layout, coordinate
+using Tylo.Layouts: @Layout, coordinate, static
 include("../gemm/kernel.jl")
+include("ownerships.jl")
 
 # Finite valid logits; invalid entries are represented by -Inf. The explicit
 # all-masked case avoids -Inf - -Inf and division by zero. No hidden barriers.
@@ -20,7 +21,7 @@ function lane_softmax_kernel!(output,input,mask,::Val{N}) where N
     width,rows=size(input)
     f=Fragment(ntuple(Val(N)) do j
         row<=rows && j<=width && (@inbounds mask[j,row]) ? Float32(@inbounds input[j,row]) : -Inf32
-    end, Tylo.Layouts.LocalOwnership{N,2}())
+    end, row_per_lane(N))
     result=softmax(f)
     ntuple(Val(N)) do j
         if row<=rows && j<=width
@@ -37,7 +38,7 @@ function warp_softmax_kernel!(output,input,mask,::Val{N}) where N
     f=Fragment(ntuple(Val(N)) do e
         j=lane+Int32(32(e-1))+Int32(1)
         row<=rows && j<=width && (@inbounds mask[j,row]) ? Float32(@inbounds input[j,row]) : -Inf32
-    end, Tylo.Layouts.StripedOwnership{N,2}())
+    end, row_per_warp(N))
     result=softmax(f)
     ntuple(Val(N)) do e
         j=lane+Int32(32(e-1))+Int32(1)
@@ -50,7 +51,7 @@ end
 
 @generated function mask_accumulator(a::Fragment{Float32,N},mask,tid) where N
     values = [quote
-        r,c=coordinate(Tylo.Layouts.layout(a),tid,Val($(e-1)))
+        r,c=coordinate(Tylo.Layouts.layout(a),tid,$(e-1))
         @inbounds mask[r+Int32(1),c+Int32(1)] ? a.data[$e] : -Inf32
     end for e in 1:N]
     quote
@@ -73,7 +74,7 @@ function mma_softmax_kernel!(output,a_data,b_data,mask,config)
         copy_async!(config.ac,sa,a,tid)
         copy_async!(config.bc,sb,b,tid)
     end
-    commit_copies(); wait_copies(Val(0)); sync_threads()
+    commit_copies(); wait_copies(0); sync_threads()
     acc=@inbounds mma(config.plan,sa,sb,zero_accumulator(config.plan),tid)
     result=softmax(mask_accumulator(acc,mask,tid))
     dst=GlobalTile(pointer(output),@Layout((m, n), (1, m)))

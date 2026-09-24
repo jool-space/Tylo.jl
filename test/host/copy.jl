@@ -1,4 +1,4 @@
-using Tylo.Layouts: @Layout, Layout, Swizzle, compose, LocalOwnership, StripedOwnership
+using Tylo.Layouts: @Layout, Layout, Swizzle, compose
 
 # Independent ISA figures for ldmatrix/stmatrix: lane t holds units
 # (t÷4, 2(t%4)+e) of an 8×8 matrix, transposed with .trans; lanes 8i:8i+7
@@ -54,14 +54,14 @@ end
     @test Tylo.matrix_copy_plan(operand_layout(atom,Accumulator()),Float16,2).grid == (2,1)
     @test Tylo.matrix_copy_plan(operand_layout(atom,Accumulator()),Float16,1).trans
     # Lane-local rows hold different slots in each block; striped rows are not words.
-    @test Tylo.matrix_copy_plan(LocalOwnership{8,2}(),BFloat16,2) === nothing
-    @test Tylo.matrix_copy_plan(StripedOwnership{2,2}(),BFloat16,2) === nothing
+    @test Tylo.matrix_copy_plan(lane_local(8,2),BFloat16,2) === nothing
+    @test Tylo.matrix_copy_plan(striped(2,2),BFloat16,2) === nothing
     # Multi-warp ownerships are outside the warp-collective instruction.
-    tiled = Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,Val((2,1)),Val((1,1)),Val(16))))
+    tiled = Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,(2,1),(1,1),16)))
     @test Tylo.matrix_copy_plan(tiled,Float16,2) === nothing
     # Logical transposition swaps which storage axis needs .trans.
-    @test !Tylo.matrix_copy_plan(Tylo.PermutedOwnership(a),BFloat16,1).trans
-    @test Tylo.matrix_copy_plan(Tylo.PermutedOwnership(a),BFloat16,2).trans
+    @test !Tylo.matrix_copy_plan(permutedims(a),BFloat16,1).trans
+    @test Tylo.matrix_copy_plan(permutedims(a),BFloat16,2).trans
     @test_throws ArgumentError Tylo.matrix_copy_plan(a,BFloat16,3)
     @test Tylo._matrix_groups(4) == [1:4]
     @test Tylo._matrix_groups(2) == [1:2]
@@ -79,7 +79,7 @@ end
     @test validate_copy(a,BFloat16,compose(Swizzle{1,3,1}(),l)) === nothing
     @test validate_copy(a,BFloat16,@Layout (16,16) (1,16)) === nothing
     @test validate_copy(b,BFloat16,@Layout (16,8) (1,16)) === nothing
-    @test validate_copy(b,BFloat16,Tylo.Layouts.window(@Layout((64,32),(1,64)),(16,8),Val((16,8)))) === nothing
+    @test validate_copy(b,BFloat16,Tylo.Layouts.window(@Layout((64,32),(1,64)),(16,8),(16,8))) === nothing
     fp8 = MMAAtom((16,8,32),Float8_E4M3FN)
     @test validate_copy(operand_layout(fp8,OperandA()),Float8_E4M3FN,@Layout (16,32) (32,1)) === nothing
     @test validate_copy(operand_layout(fp8,OperandA()),Float8_E4M3FN,compose(Swizzle{1,4,1}(),@Layout (16,32) (32,1))) === nothing
@@ -88,9 +88,9 @@ end
     @test_throws ArgumentError validate_copy(a,BFloat16,@Layout (16,16) (2,32))   # no unit stride
     @test_throws ArgumentError validate_copy(a,BFloat16,Layout((16,16),(16,1)))   # runtime strides
     @test_throws DimensionMismatch validate_copy(a,BFloat16,@Layout (16,8) (8,1))
-    @test_throws ArgumentError validate_copy(LocalOwnership{8,2}(),BFloat16,@Layout (32,8) (8,1))
+    @test_throws ArgumentError validate_copy(lane_local(8,2),BFloat16,@Layout (32,8) (8,1))
     @test Tylo._contiguous_axis(typeof(l)) == 2
     @test Tylo._contiguous_axis(typeof(@Layout (16,16) (1,16))) == 1
-    @test Tylo._contiguous_axis(typeof(shared_layout(TMALoad(BFloat16,Val((64,64)),Val(2))))) == 2
+    @test Tylo._contiguous_axis(typeof(shared_layout(TMATile(BFloat16,(64,64),2)))) == 2
     @test Tylo._contiguous_axis(typeof(@Layout (16,16) (1,1))) === nothing
 end

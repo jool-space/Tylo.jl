@@ -1,16 +1,17 @@
 module CUDACoreExt
 using Tylo, PTX, CUDACore, Adapt
-using Tylo: @rtuple, Fragment, PackedFragment, BFloat16, TMATile
+using Tylo: @rtuple, Fragment, BFloat16, TMATile
 using CUDACore: @device_override
 using PTX: @ptx_str
 
 # Device-only implementations of host-callable generics. The host keeps the
 # generic method (or raises); kernels compiled through CUDACore's method
 # table use these.
-@device_override @inline function Tylo.pack(::Type{T}, f::Fragment{Float32,N}) where {T<:Union{BFloat16,Float16},N}
-    iseven(N) || throw(ArgumentError("packing requires complete pairs"))
+# FP32 to BF16/FP16 converts pairs with one `cvt` each.
+@device_override @inline function Tylo._convert_fragment(::Type{T}, f::Fragment{Float32,N}) where {T<:Union{BFloat16,Float16},N}
+    iseven(N) || return Tylo.map(Base.Fix1(Tylo.convert_element,T),f)
     words = @rtuple(i -> Tylo._pack_mma_pair(T,f.data[2i-1],f.data[2i]), 1:N÷2)
-    PackedFragment(T,words,Tylo.Layouts.layout(f))
+    Tylo._from_words(T,words,Tylo.Layouts.layout(f))
 end
 @device_override @inline Tylo._warp_reduce(op::F,x,::Val{W}) where {F,W} = PTX.Warps.warp_reduce(op,x,Val(W))
 # stmatrix exists from sm_90; the compile target decides, folded at compile time.

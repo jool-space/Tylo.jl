@@ -19,7 +19,7 @@ permutes the result words into the target's slot order. Adjacent pairs of
 8-bit elements form one unit, so 8-bit operands qualify as well.
 `load_fragment` and `store!` use the derived copy for shared tiles.
 """
-struct CopyAtom{Op,Trans}
+struct CopyAtom{Op,Trans} <: Atom
     function CopyAtom{Op,Trans}() where {Op,Trans}
         Op in (:load,:store) && Trans isa Bool ||
             throw(ArgumentError("copy atoms are :load or :store, transposed or not"))
@@ -28,7 +28,6 @@ struct CopyAtom{Op,Trans}
 end
 CopyAtom(op::Symbol,trans::Bool=false) = CopyAtom{op,trans}()
 Base.size(::CopyAtom) = (8,8)
-threads(::CopyAtom) = 32
 "The register operand of a copy atom: two units per lane in one word."
 struct Registers <: OperandRole end
 "The address operand of a copy atom: the 16-byte row each lane supplies."
@@ -40,7 +39,7 @@ struct Addresses <: OperandRole end
 _registers_layout(trans) = trans ? _ownership((8,8),((4,2),(8,8)),((2,1),)) :
                                    _ownership((8,8),((4,16),(8,1)),((2,8),))
 _addresses_layout() = _ownership((8,8),((8,1),(4,0)),((8,8),))
-@generated operand_layout(::CopyAtom{Op,Trans},::Registers) where {Op,Trans} = :($(_registers_layout(Trans)))
-@generated operand_layout(::CopyAtom{Op,Trans},::Addresses) where {Op,Trans} = :($(_addresses_layout()))
+_operand_layout(::CopyAtom{Op,Trans},::Registers) where {Op,Trans} = _registers_layout(Trans)
+_operand_layout(::CopyAtom,::Addresses) = _addresses_layout()
 "The four matrix copy atoms: loads and stores, plain and transposed."
 copy_atoms() = [CopyAtom{op,trans}() for trans in (false,true) for op in (:load,:store)]

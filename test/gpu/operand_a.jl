@@ -6,8 +6,8 @@ function conversion_probe!(out,input,atom)
     c=operand_layout(atom,Accumulator())
     left=Fragment(ntuple(i -> @inbounds(input[i,lane+1]),Val(4)),c)
     right=Fragment(ntuple(i -> @inbounds(input[i+4,lane+1]),Val(4)),c)
-    a=pack_operand_a(atom,left,right)
-    ntuple(i -> (@inbounds out[i,lane+1]=a.data[i]),Val(4))
+    a=Tylo._pack_words(pack_operand_a(atom,left,right))
+    ntuple(i -> (@inbounds out[i,lane+1]=a[i]),Val(4))
     nothing
 end
 function conversion_shared_probe!(out,input,atom::MMAAtom{(16,8,16),T}) where T
@@ -23,8 +23,8 @@ function conversion_shared_probe!(out,input,atom::MMAAtom{(16,8,16),T}) where T
     end
     sync_threads()
     tile=SharedTile(pointer(smem),@Layout((16, 16), (16, 1)))
-    a=@inbounds load_a(atom,tile,lane)
-    ntuple(i -> (@inbounds out[i,lane+1]=a.data[i]),Val(4))
+    a=Tylo._pack_words(@inbounds load_fragment(atom,OperandA(),tile,lane))
+    ntuple(i -> (@inbounds out[i,lane+1]=a[i]),Val(4))
     nothing
 end
 function chained_mma_kernel!(out,a_data,b_data,v_data,atom::MMAAtom{(16,8,16),T}) where T
@@ -33,18 +33,18 @@ function chained_mma_kernel!(out,a_data,b_data,v_data,atom::MMAAtom{(16,8,16),T}
     sb=SharedTile(pointer(s)+512,@Layout((16, 16), (1, 16)))
     sv=SharedTile(pointer(s)+1024,@Layout((16, 8), (1, 16)))
     @inbounds begin
-        copy_async!(CopyPlan{(16,16),32,2}(),sa,GlobalTile(pointer(a_data),sa.layout),tid)
-        copy_async!(CopyPlan{(16,16),32,1}(),sb,GlobalTile(pointer(b_data),sb.layout),tid)
-        copy_async!(CopyPlan{(16,8),32,1}(),sv,GlobalTile(pointer(v_data),sv.layout),tid)
+        copy_async!(CopyPlan((16,16),32,2),sa,GlobalTile(pointer(a_data),sa.layout),tid)
+        copy_async!(CopyPlan((16,16),32,1),sb,GlobalTile(pointer(b_data),sb.layout),tid)
+        copy_async!(CopyPlan((16,8),32,1),sv,GlobalTile(pointer(v_data),sv.layout),tid)
     end
-    commit_copies();wait_copies(Val(0));sync_threads()
+    commit_copies();wait_copies(0);sync_threads()
     @inbounds begin
-        aa=load_a(atom,sa,tid)
-        b0=load_b(atom,window(sb,(Int32(0),Int32(0)),Val((16,8))),tid)
-        b1=load_b(atom,window(sb,(Int32(0),Int32(8)),Val((16,8))),tid)
+        aa=load_fragment(atom,OperandA(),sa,tid)
+        b0=load_fragment(atom,OperandB(),window(sb,(Int32(0),Int32(0)),(16,8)),tid)
+        b1=load_fragment(atom,OperandB(),window(sb,(Int32(0),Int32(8)),(16,8)),tid)
         c0=mma(atom,aa,b0,zero_accumulator(atom))
         c1=mma(atom,aa,b1,zero_accumulator(atom))
-        c=mma(atom,pack_operand_a(atom,c0,c1),load_b(atom,sv,tid),zero_accumulator(atom))
+        c=mma(atom,pack_operand_a(atom,c0,c1),load_fragment(atom,OperandB(),sv,tid),zero_accumulator(atom))
         store!(GlobalTile(pointer(out),@Layout((16, 8), (1, 16))),c,tid)
     end
     nothing

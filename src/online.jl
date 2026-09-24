@@ -4,8 +4,7 @@
 FP32 running maxima and unnormalized exponential sums in the fragment's
 reduced ownership. The empty state is `(-Inf, 0)`. Scores must be finite or
 `-Inf` (masked). State arithmetic does not allocate storage or synchronize.
-The state type depends on the axis; pass `dims=Val(axis)` when the axis is
-not a literal.
+The state type depends on the axis, so `dims` must be a constant.
 """
 struct SoftmaxState{D,R<:Fragment}
     maximum::R

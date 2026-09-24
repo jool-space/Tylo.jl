@@ -12,19 +12,19 @@ bindings.
 | `src/Tylo.jl` | Public bindings, file ordering and device-operation declarations | `Project.toml` for extension triggers |
 | `src/tuples.jl` | Internal range-to-tuple expansion with inlined scalar calls | `test/host/tuples.jl`, `test/gpu/tuples.jl` |
 | `src/elements.jl` | Element widths, the Microfloats FP8 element types and `convert_element`, the saturating conversion through Microfloats' funnel | `test/host/elements.jl` |
-| `src/layouts/layouts.jl`, `src/layouts/` | Affine coordinate maps, static notation, composition, swizzles and windows | `test/host/layouts.jl`, `test/host/layout_macro.jl` |
+| `src/layouts/layouts.jl`, `src/layouts/` | Affine coordinate maps, static notation, composition, swizzles, windows, and `Ownership` with its canonical form and generated coordinates | `test/host/layouts.jl`, `test/host/layout_macro.jl`, `test/host/derive.jl` |
 | `src/memory.jl` | Typed global/shared pointers plus storage layout and a declared alignment; address-unit conversion | `test/host/memory.jl`, `test/gpu/vectors.jl`, `test/gpu/gemm.jl` |
-| `src/fragments.jl`, `src/arrayops.jl` | Local values plus ownership, generic scalar broadcast, axis views and supported reductions/windows | `test/host/arrayops.jl`, `test/gpu/arrayops.jl` |
+| `src/fragments.jl`, `src/arrayops.jl` | Logical values plus ownership, `Fragment{T}` conversion, register words for instructions, generic scalar broadcast, transposes, reductions and windows | `test/host/arrayops.jl`, `test/gpu/arrayops.jl` |
 | `src/layouts/algebra.jl` | Symbolic layout algebra: composition, coalescing, complements, inverses, division, products, slicing, and the enumeration oracle | `test/host/algebra.jl` |
 | `src/derive.jl` | Ownership mappings and the plans derived from them by algebra: reductions, broadcast slot maps, windows, in-lane relayouts, matrix copy and vector plans | `test/host/derive.jl`, `test/host/copy.jl`, `test/host/memory.jl` |
 | `src/rows.jl`, `src/ptx/rows.jl` | Generated reductions from derived plans; warp shuffle bindings | `test/host/rows.jl`, `test/gpu/rows.jl` |
 | `src/copy.jl`, `src/ptx/copy.jl` | Vector copy assignment, structural validation, full and bounded copies; derived `ldmatrix`/`stmatrix` loads and stores of fragments | `test/gpu/boundaries.jl`, `test/gpu/atoms.jl` |
 | `src/copyatoms.jl` | `CopyAtom` register and address ownerships of the 8×8 matrix copy instructions | `test/host/copy.jl` |
-| `src/mma.jl`, `src/ptx/mma.jl` | `MMAAtom` and block-scaled `ScaledMMAAtom` operand ownerships, tiling, instruction bindings, generic loads/stores and same-lane conversion | `test/gpu/atoms.jl`, `test/gpu/scaled_atoms.jl`, `test/gpu/gemm.jl`, `test/gpu/operand_a.jl` |
+| `src/mma.jl`, `src/ptx/mma.jl` | The `Atom` interface; `MMAAtom` and block-scaled `ScaledMMAAtom` operand ownerships, `TiledMMA`, instruction bindings, operand loads and same-lane conversion | `test/gpu/atoms.jl`, `test/gpu/scaled_atoms.jl`, `test/gpu/gemm.jl`, `test/gpu/operand_a.jl` |
 | `src/tma.jl`, `src/ptx/tma.jl`, `ext/CUDACoreExt.jl` | TMA tiles over element widths and swizzle rows, the canonical swizzled storage and its structural recognition, loads, stores, descriptor preparation and launch/lifetime binding | `test/host/hopper.jl`, `test/host/tcgen05.jl`, `test/gpu/tma.jl` |
 | `src/wgmma.jl`, `src/ptx/wgmma.jl` | Warpgroup plan, shared descriptors, partial accumulators and register-dependent completion | `test/gpu/wgmma.jl` |
 | `src/tmem.jl`, `src/ptx/ptx.jl` | TMEM address mapping, transfer partitions, pending loads and packed stores | `test/host/tmem.jl`, `test/gpu/tmem_views.jl`, `test/gpu/tmem.jl` |
-| `src/tcgen05.jl`, `src/ptx/tcgen05.jl` | `Tcgen05MMA` atoms: structural recognition of swizzled shared encodings, descriptors, TMEM accumulators, K-stepped issue, commit and TMEM allocation | `test/host/tcgen05.jl`, `test/gpu/tcgen05.jl`, `test/gpu/flash_attention.jl` |
+| `src/tcgen05.jl`, `src/ptx/tcgen05.jl` | `Tcgen05Atom` atoms: structural recognition of swizzled shared encodings, descriptors, TMEM accumulators, K-stepped issue, commit and TMEM allocation | `test/host/tcgen05.jl`, `test/gpu/tcgen05.jl`, `test/gpu/flash_attention.jl` |
 | `src/online.jl` | Current online softmax state, update, merge and normalization | `test/host/online.jl`, `test/gpu/online.jl` |
 
 `using Tylo` loads the descriptions, host operations and, from `src/ptx/`,
@@ -102,7 +102,7 @@ proof.
 
 ## Follow a TMEM load into arithmetic
 
-`window(tile, origin, Val(shape))` preserves the allocation-relative storage
+`window(tile, origin, shape)` preserves the allocation-relative storage
 map. `partition(transfer, view)` checks the shape, supported affine strides,
 word packing and hardware band, then produces the address and transfer
 ownership required by the instruction.

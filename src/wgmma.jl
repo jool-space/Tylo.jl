@@ -1,5 +1,5 @@
 """
-    WGMMA64(T, Val(n), Val(k)=Val(64), Val(partials)=Val(1))
+    WGMMAAtom(T, n, k=64, partials=1)
 
 Hopper shared/shared warpgroup MMA: 128 threads compute a 64×n×k product.
 BF16/FP16 inputs, FP32 accumulation; n=8:8:256, k in (16,32,64). Each K=16
@@ -7,9 +7,12 @@ instruction updates one of `partials` independent accumulators cyclically.
 Partials must divide k/16; total registers per thread must not exceed 128.
 `partials=4` at n=8,k=64 preserves Cohere's four independent K chains.
 Use `finish_mma` to sum partials after waiting. No allocation or CTA barrier.
+The sizes must be constants. The finished accumulator is a `Fragment` in
+`operand_layout(atom, Accumulator())`; A and B are shared-memory descriptors
+from [`wgmma_operand`](@ref), not registers.
 """
-struct WGMMA64{T,N,K,P}
-    function WGMMA64(::Type{T},::Val{N},::Val{K}=Val(64),::Val{P}=Val(1)) where {T,N,K,P}
+struct WGMMAAtom{T,N,K,P} <: Atom
+    function WGMMAAtom{T,N,K,P}() where {T,N,K,P}
         T === BFloat16 || T === Float16 || throw(ArgumentError("BF16 or FP16 required"))
         N isa Int && 8 <= N <= 256 && N % 8 == 0 && K isa Int && K in (16,32,64) &&
             P isa Int && P > 0 && (K÷16) % P == 0 && N÷2*P <= 128 ||
@@ -17,12 +20,16 @@ struct WGMMA64{T,N,K,P}
         new{T,N,K,P}()
     end
 end
-Base.size(::WGMMA64{T,N,K}) where {T,N,K} = (64,N,K)
-threads(::WGMMA64) = 128
-_wg_registers(::WGMMA64{T,N,K,P}) where {T,N,K,P} = N÷2*P
+Base.@constprop :aggressive @inline WGMMAAtom(::Type{T},n::Integer,k::Integer=64,partials::Integer=1) where T =
+    WGMMAAtom{T,Int(n),Int(k),Int(partials)}()
+Base.size(::WGMMAAtom{T,N,K}) where {T,N,K} = (64,N,K)
+threads(::WGMMAAtom) = 128
+Base.eltype(::WGMMAAtom{T},::Union{OperandA,OperandB}) where T = T
+Base.eltype(::WGMMAAtom,::Accumulator) = Float32
+_wg_registers(::WGMMAAtom{T,N,K,P}) where {T,N,K,P} = N÷2*P
 struct WGMMAAccumulator{P,R}
     data::NTuple{R,Float32}
-    function WGMMAAccumulator(p::P,data::NTuple{R,Float32}) where {P<:WGMMA64,R}
+    function WGMMAAccumulator(p::P,data::NTuple{R,Float32}) where {P<:WGMMAAtom,R}
         R == _wg_registers(p) || throw(ArgumentError("wrong WGMMA register count"))
         new{P,R}(data)
     end
@@ -30,18 +37,16 @@ end
 struct PendingWGMMA{P,R}
     data::NTuple{R,Float32}
 end
-@inline zero_accumulator(p::WGMMA64) =
+@inline zero_accumulator(p::WGMMAAtom) =
     WGMMAAccumulator(p,ntuple(_ -> 0f0,Val(_wg_registers(p))))
 
-struct WGMMAOwnership{N} end
-Base.size(::WGMMAOwnership{N}) where N = (64,N)
-operand_layout(::WGMMA64{T,N},::Accumulator) where {T,N} = WGMMAOwnership{N}()
-@inline function Layouts.coordinate(::WGMMAOwnership{N},t::Integer,::Val{E}) where {N,E}
-    E isa Int && 0 <= E < N÷2 || throw(BoundsError())
-    lane = t % oftype(t,32)
-    row = (t ÷ oftype(t,32))*oftype(t,16) + lane÷oftype(t,4) + oftype(t,8*((E%4)÷2))
-    col = (lane % oftype(t,4))*oftype(t,2) + oftype(t,E%2+8*(E÷4))
-    (row,col)
+# PTX ISA wgmma accumulator figure: lane groups t%4 select column pairs,
+# (t%32)÷4 the row, warps 16-row bands; slots alternate column, row half,
+# 8-column block.
+function _operand_layout(::WGMMAAtom{T,N},::Accumulator) where {T,N}
+    L, s = Layouts.Layout, Layouts.static
+    Layouts.Ownership((64,N),L(((s(4),s(8),s(4)),(s(2),s(2),s(N÷8))),
+                               ((s(128),s(1),s(16)),(s(64),s(8),s(512)))))
 end
 
 # The role and complete plan travel with the descriptor, preventing A/B swaps
@@ -74,16 +79,16 @@ function mma_async end
 "Wait for ALL this warpgroup's committed WGMMA groups; return ready registers."
 function wait_mma end
 
-@generated function finish_mma(c::WGMMAAccumulator{WGMMA64{T,N,K,P}}) where {T,N,K,P}
+@generated function finish_mma(c::WGMMAAccumulator{WGMMAAtom{T,N,K,P}}) where {T,N,K,P}
     values = [foldl((a,b) -> :($a + $b), [:(c.data[$(i+j*(N÷2))]) for j in 0:P-1]) for i in 1:N÷2]
     quote
         Base.@inline
-        Fragment(($(values...),),WGMMAOwnership{$N}())
+        Fragment(($(values...),),operand_layout(WGMMAAtom{T,N,K,P}(),Accumulator()))
     end
 end
 
 "Check canonical operand geometry on the host; pointer alignment is checked at binding."
-function validate_wgmma(p::WGMMA64{T,N,K},role::Role,l::Layouts.AbstractLayout,origin=(0,0)) where {T,N,K,Role<:Union{OperandA,OperandB}}
+function validate_wgmma(p::WGMMAAtom{T,N,K},role::Role,l::Layouts.AbstractLayout,origin=(0,0)) where {T,N,K,Role<:Union{OperandA,OperandB}}
     A = Role === OperandA ? 2 : 1
     s = swizzled_structure(typeof(l),T,A)
     s === nothing && throw(ArgumentError("operand storage is not a canonical swizzled encoding"))
@@ -97,4 +102,3 @@ function validate_wgmma(p::WGMMA64{T,N,K},role::Role,l::Layouts.AbstractLayout,o
     nothing
 end
 
-_register_count(::WGMMAOwnership{N}) where N = N÷2

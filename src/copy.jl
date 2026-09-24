@@ -1,10 +1,11 @@
 """
-    CopyPlan{Shape,Threads,Axis}()
+    CopyPlan((rows, cols), threads, axis)
 
-Distribute a matrix's 16-byte vectors over `Threads` threads, with vectors
-running along logical `Axis` (1 or 2). Shape is static; source and destination
-may have different memory layouts. This plan issues cp.async copies only.
-Call `commit_copies()` and `wait_copies(Val(groups_remaining))` explicitly,
+Distribute a matrix's 16-byte vectors over `threads` threads, with vectors
+running along logical `axis` (1 or 2). All three arguments must be constants;
+source and destination may have different memory layouts. This plan issues
+cp.async copies only.
+Call `commit_copies()` and `wait_copies(groups_remaining)` explicitly,
 then synchronize the consumers before reading shared memory.
 
 Call `validate_copy(plan, T, destination_layout, source_layout)` on the host
@@ -20,6 +21,8 @@ struct CopyPlan{S,Threads,Axis}
         new{S,Threads,Axis}()
     end
 end
+Base.@constprop :aggressive @inline CopyPlan(shape::Tuple{Integer,Integer},threads::Integer,axis::Integer) =
+    CopyPlan{map(Int,shape),Int(threads),Int(axis)}()
 Base.size(::CopyPlan{S}) where S = S
 function _copy_vectors(::CopyPlan{S,Threads,Axis},::Type{T}) where {S,Threads,Axis,T}
     isbitstype(T) && sizeof(T) in (1,2,4,8,16) || throw(ArgumentError("unsupported copy element"))
@@ -58,7 +61,7 @@ end
 function copy_async! end
 "Close this thread's uncommitted cp.async operations as one group."
 function commit_copies end
-"Wait until at most N committed cp.async groups remain for this thread; no CTA barrier."
+"Wait until at most `n` (a constant) committed cp.async groups remain for this thread; no CTA barrier."
 function wait_copies end
 
 """

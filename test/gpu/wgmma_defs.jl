@@ -2,12 +2,12 @@
 # An independent descriptor test uses ordinary generic-proxy shared stores,
 # then explicitly publishes them. Distinct coordinate values expose incorrect
 # descriptor origins that a constant-filled matrix would hide.
-@inline function wgmma_operand_probe!(out,p::WGMMA64{T,N,K},k0::Int32,::Val{Normalize}=Val(false)) where {T,N,K,Normalize}
+@inline function wgmma_operand_probe!(out,p::WGMMAAtom{T,N,K},k0::Int32,::Val{Normalize}=Val(false)) where {T,N,K,Normalize}
     workspace = @inbounds CuDynamicSharedArray(UInt8,32768+1024)
     root = pointer(workspace)
     root += (UInt32(0)-PTX.smem_addr_u32(root)) & UInt32(1023)
-    a = shared_tile(TMALoad(T,Val((128,64)),Val(2)),root)
-    b = shared_tile(TMALoad(T,Val((64,128)),Val(1)),root+16384)
+    a = shared_tile(TMATile(T,(128,64),2),root)
+    b = shared_tile(TMATile(T,(64,128),1),root+16384)
     tid = Int32(threadIdx().x)-Int32(1)
     for i in tid:Int32(128):Int32(8191)
         r,k = i÷Int32(64),i%Int32(64)

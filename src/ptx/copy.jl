@@ -34,7 +34,7 @@ end
     end
 end
 @inline commit_copies() = ptx"cp.async.commit_group"()
-@inline wait_copies(::Val{N}) where N = ptx"cp.async.wait_group"(Val(N))
+Base.@constprop :aggressive @inline wait_copies(n::Integer) = ptx"cp.async.wait_group"(Val(Int(n)))
 
 @generated function _scalar_copy_vector!(dst::SharedTile{T},src::GlobalTile{T},c,q,
                                          ::Val{Axis},::Val{V}) where {T,Axis,V}
@@ -136,7 +136,7 @@ function _matrix_copy_expr(plan::MatrixCopyPlan,::Type{T},op::Symbol) where T
                 results[plan.words[b]] = n == 1 ? d : :($d[$j])
             end
         else
-            args = [:(f.data[$(plan.words[b])]) for b in group]
+            args = [:(words[$(plan.words[b])]) for b in group]
             push!(statements,:($instruction(pointer(tile,$c),$(n == 1 ? args[1] : Expr(:tuple,args...)))))
         end
     end
@@ -152,7 +152,13 @@ _stmatrix_available() = false
 # slots that form contiguous, aligned vectors within the tile's declared
 # alignment use vector accesses, as whole words for packed element types.
 _vector_type(::Type{T},k) where T = k == 1 ? T : NTuple{k,VecElement{T}}
-function _vector_access_exprs(plan,::Type{T},AS,packed::Bool,op::Symbol,data) where T
+# The address of slot `e`: the thread's base plus a constant for affine
+# tiles (`base` must be bound), the full coordinate otherwise.
+_slot_pointer_expr(o,ML,e) = _affine(ML) ?
+    :(_slot_address(tile,base,$(Layouts._slot_coordinate(o,e)))) :
+    :(pointer(tile,Layouts._coordinate(ownership,thread,Val($e))))
+_base_expr(ML) = _affine(ML) ? :(base = pointer(tile,Layouts._thread_coordinate(ownership,thread))) : nothing
+function _vector_access_exprs(plan,o,ML,::Type{T},AS,packed::Bool,op::Symbol,data) where T
     width = plan.width
     statements = Expr[]
     values = Any[]
@@ -161,8 +167,7 @@ function _vector_access_exprs(plan,::Type{T},AS,packed::Bool,op::Symbol,data) wh
         U = packed ? UInt32 : T
         V = _vector_type(U,k)
         p = Symbol(:p_,g)
-        push!(statements,:($p = reinterpret(Core.LLVMPtr{$V,$AS},
-            pointer(tile,Layouts.coordinate(ownership,thread,Val($(slots[1]-1)))))))
+        push!(statements,:($p = reinterpret(Core.LLVMPtr{$V,$AS},$(_slot_pointer_expr(o,ML,slots[1]-1)))))
         if op === :load
             v = Symbol(:v_,g)
             push!(statements,:($v = unsafe_load($p,1,Val($width))))
@@ -188,71 +193,60 @@ end
                 Base.@inline
                 @boundscheck 0 <= thread < 32 || throw(BoundsError())
                 $(statements...)
-                PackedFragment($T,($(words...),),$o)
+                _from_words($T,($(words...),),$o)
             end
         end
     end
     vplan = axis === nothing ? nothing : vector_plan(o,T,axis,A)
     if vplan !== nothing
-        statements, values = _vector_access_exprs(vplan,T,AS,packed,:load,nothing)
+        statements, values = _vector_access_exprs(vplan,o,ML,T,AS,packed,:load,nothing)
         return quote
             Base.@inline
             ownership = $o
+            $(_base_expr(ML))
             $(statements...)
-            $(packed ? :(PackedFragment($T,($(values...),),ownership)) : :(Fragment(($(values...),),ownership)))
+            $(packed ? :(_from_words($T,($(values...),),ownership)) : :(Fragment(($(values...),),ownership)))
         end
     end
     n = _register_count(o)
-    loads = [:(unsafe_load(pointer(tile,Layouts.coordinate(ownership,thread,Val($e))),1,Val($(sizeof(T))))) for e in 0:n-1]
+    loads = [:(unsafe_load($(_slot_pointer_expr(o,ML,e)),1,Val($(sizeof(T))))) for e in 0:n-1]
     quote
         Base.@inline
         ownership = $o
-        values = Fragment(($(loads...),),ownership)
-        $(packed ? :(pack(values)) : :(values))
+        $(_base_expr(ML))
+        Fragment(($(loads...),),ownership)
     end
 end
 @generated function store!(tile::MemoryTile{T,AS,ML,A},f::Fragment{T,N,L},thread::Integer) where {T,AS,ML,A,N,L}
     o = _static_instance(L)
-    o === nothing && return :(throw(ArgumentError("stores require a static ownership")))
-    axis = _contiguous_axis(ML)
-    vplan = axis === nothing || _element_bits(T) < 32 ? nothing : vector_plan(o,T,axis,A)
-    if vplan !== nothing
-        statements, _ = _vector_access_exprs(vplan,T,AS,false,:store,:(f.data))
-        return quote
-            Base.@inline
-            ownership = Layouts.layout(f)
-            $(statements...)
-            nothing
-        end
-    end
-    stores = [:(unsafe_store!(pointer(tile,Layouts.coordinate(ownership,thread,Val($e))),f.data[$(e+1)],1,Val($(sizeof(T))))) for e in 0:N-1]
-    quote
-        Base.@inline
+    scalar = o === nothing ? quote
         ownership = Layouts.layout(f)
-        $(stores...)
+        $([:(unsafe_store!(pointer(tile,Layouts._coordinate(ownership,thread,Val($e))),f.data[$(e+1)],1,Val($(sizeof(T))))) for e in 0:N-1]...)
+    end : quote
+        ownership = Layouts.layout(f)
+        $(_base_expr(ML))
+        $([:(unsafe_store!($(_slot_pointer_expr(o,ML,e)),f.data[$(e+1)],1,Val($(sizeof(T))))) for e in 0:N-1]...)
+    end
+    axis = _contiguous_axis(ML)
+    (o === nothing || axis === nothing) && return quote
+        Base.@inline
+        $scalar
         nothing
     end
-end
-@generated function store!(tile::MemoryTile{T,AS,ML,A},f::PackedFragment{T,W,L},thread::Integer) where {T,AS,ML,A,W,L}
-    fallback = quote
-        Base.@inline
-        store!(tile,unpack(f),thread)
-    end
-    o = _static_instance(L)
-    o === nothing && return fallback
-    axis = _contiguous_axis(ML)
-    axis === nothing && return fallback
+    packed = _element_bits(T) < 32
     vplan = vector_plan(o,T,axis,A)
     words = if vplan === nothing
-        :(store!(tile,unpack(f),thread))
+        scalar
     else
-        statements, _ = _vector_access_exprs(vplan,T,AS,true,:store,:(f.data))
+        statements, _ = _vector_access_exprs(vplan,o,ML,T,AS,packed,:store,packed ? :words : :(f.data))
         quote
             ownership = Layouts.layout(f)
+            $(_base_expr(ML))
+            $(packed ? :(words = _pack_words(f)) : nothing)
             $(statements...)
         end
     end
-    plan = AS == 3 ? matrix_copy_plan(o,T,axis) : nothing
+    plan = AS == 3 && packed ? matrix_copy_plan(o,T,axis) : nothing
     plan === nothing && return quote
         Base.@inline
         $words
@@ -263,6 +257,7 @@ end
         Base.@inline
         if _stmatrix_available()
             @boundscheck 0 <= thread < 32 || throw(BoundsError())
+            words = _pack_words(f)
             $(statements...)
         else
             $words
