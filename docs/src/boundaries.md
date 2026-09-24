@@ -24,6 +24,31 @@ layout must still satisfy the existing vector-layout contract. The pinned PTX
 wrapper currently exposes full-vector copies; the scalar path handles zero-fill
 without introducing another inline PTX wrapper in Tylo.
 
+## Bounded tiles
+
+`bound(tile, extents)` gives a tile the extents of its valid region, with
+`nothing` for an axis that needs no check. Fragment loads through it zero the
+elements outside and stores skip them; the check is on the thread's
+coordinate plus each slot's constant offset, and a vector counts as valid
+when its first element is, so the extent along the vector axis must be a
+multiple of the vector length. `window` and `tile(t, shape, index)` inherit
+the bounds shifted to their origin, so a loop over sub-tiles checks each
+against the same logical edge:
+
+```julia
+input = bound(GlobalTile(pointer(x), Layout((kmax, static(8)), (static(1), kmax)), 16), (nothing, batch))
+for k in lane:32:chunks-1
+    x = load_fragment(chunk, tile(input, (8,8), (k,0)), 0)   # absent columns read as zero
+end
+```
+
+`tile(t, shape, index)` is the `index`-th tile of `shape` in a tiling of `t`,
+as a tile of its own. Along a hierarchical mode the shape covers whole inner
+modes, so the tile index runs over the outer ones without carries: for a K
+order such as `(8,4,2,K÷64):(1,16,8,64)` the 8×8 tile `k` starts at
+`16(k%4) + 8((k÷4)%2) + 64(k÷8)`, computed with masks and shifts. The tile's
+declared alignment narrows to what its static outer strides keep.
+
 ## Copy completion and buffer reuse
 
 The mixed path does not change the caller's responsibilities. Commit and wait

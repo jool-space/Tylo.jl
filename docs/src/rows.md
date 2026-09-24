@@ -205,8 +205,48 @@ a maximum over padded entries. There is no implicit CTA barrier.
 
 Tiled MMA currently requires **one warp along N** for this reduction.
 Multiple warps along M own independent groups. With multiple N warps a
-complete reduction needs communication between warps, which remains explicit.
-Megakernels owns that shared scratch and worker synchronization.
+complete reduction needs communication between warps, composed as below.
+
+## Running statistics and combining warps
+
+`sum(f, x; dims, init)`, `maximum` and `minimum` apply `f` to each value and
+join an initial fragment in the result's ownership. Values a thread holds
+fold sequentially from it, so a statistic carried through a loop costs one
+operation per value, and `sum(abs2, x; dims=1, init=s)` one fused
+multiply-add:
+
+```julia
+chunk = Ownership((8,8), @Layout((1,64),(0,1)))   # one thread's 8 k × 8 columns
+stats = Ownership((1,8), @Layout((1,8),(0,1)))    # its per-column values
+s = m = Fragment(ntuple(_ -> 0f0, 8), stats)
+for k in lane:32:chunks-1
+    x = Float32.(load_fragment(chunk, tile(input, (8,8), (k,0)), 0))
+    s = sum(abs2, x; dims=1, init=s)
+    m = maximum(abs, x; dims=1, init=m)
+end
+```
+
+`Fragment(f, ownership)` gives the same registers another ownership with as
+many slots. Declaring each lane's statistics as one row of a warp-wide matrix
+makes the lane axis reducible, with five butterfly rounds per column. The
+result is replicated across the warp, and a store of a replicated fragment
+is issued by one replica only. Warps combine through shared memory: each
+stores its row, the caller synchronizes, and every thread loads all rows and
+reduces them locally:
+
+```julia
+warp = Ownership((32,8), @Layout((32,8),(1,32)))
+store!(tile(partials, (1,8), (warp_index,0)), maximum(Fragment(m, warp); dims=1), lane)
+# barrier
+largest = maximum(load_fragment(Ownership((8,8), @Layout((1,64),(0,1))), partials, 0); dims=1)
+```
+
+`relayout(to, f, thread)` moves values into another ownership when every
+thread already holds what it needs but which value depends on the thread:
+each slot becomes a chain of selects on the thread's coordinate. A fragment
+of eight per-column scale codes held by every lane becomes a block-scaled
+MMA's B scale register, where lane quad `q` needs column `q`.
+`reinterpret(T, f)` reads the same bits as another element type of one size.
 
 ## Worked softmax
 
@@ -251,9 +291,10 @@ nothing and no packed fragment type is needed.
 [`Tylo.convert_element`](@ref): round to nearest even and saturate to the
 largest finite value, as `cvt.rn.satfinite` does, whatever overflow policy
 the type declares. They go through Microfloats' conversion funnel, and FP32
-to BF16/FP16 through paired conversions, so a kernel compiled for a target
-with the instructions gets one native `cvt` per two values, and the same bits
-as the host.
+to BF16, FP16 and FP8 through paired conversions whose 16-bit results are
+halves of the fragment's words, so a kernel compiled for a target with the
+instructions gets one native `cvt` per two values, and the same bits as the
+host.
 
 ```jldoctest
 julia> f = Fragment((1f0, -2f0, 1000f0, 0.1f0), Ownership((32,4), @Layout((32,4),(1,32))));

@@ -7,22 +7,28 @@ The layout maps logical coordinates to element offsets from the allocation
 base. Pointer addition occurs in bytes only at `pointer(tile, coordinate)`.
 The caller owns allocation, lifetime, alignment and synchronization.
 
-`align` declares, in bytes, that the pointer and every stride of the
-layout other than the unit stride are multiples of `align`, so that any
-element whose coordinate along the unit-stride axis is a multiple of
-`align ÷ sizeof(T)` has an `align`-aligned address. It must be a constant.
-Loads and stores of fragments vectorize up to that width. A window's origin
-along the unit-stride axis must keep the declaration. Bounds checks verify
-the pointer, the strides and window origins unless elided with `@inbounds`.
+`align` declares, in bytes, that the tile's base address and every runtime
+stride of its layout are multiples of `align`. It must be a constant. Static
+strides are known exactly, so loads and stores of fragments derive vectors
+up to `align` bytes from the layout itself, even through permuted or
+hierarchical layouts. Bounds checks verify the declaration unless elided with
+`@inbounds`.
+
+A tile may carry the extents of its valid region, from [`bound`](@ref);
+loads through it zero the elements outside and stores skip them.
 """
-struct MemoryTile{T,AS,L<:Layouts.AbstractLayout,A}
+struct MemoryTile{T,AS,L<:Layouts.AbstractLayout,A,B}
     ptr::Core.LLVMPtr{T,AS}
     layout::L
-    Base.@propagate_inbounds function MemoryTile(ptr::Core.LLVMPtr{T,AS},l::Layouts.AbstractLayout,::Val{A}=Val(sizeof(T))) where {T,AS,A}
+    bounds::B
+    Base.@propagate_inbounds function MemoryTile(ptr::Core.LLVMPtr{T,AS},l::Layouts.AbstractLayout,::Val{A}=Val(sizeof(T)),
+            bounds::B=nothing) where {T,AS,A,B}
         AS == 1 || AS == 3 || throw(ArgumentError("global/shared pointer required"))
         A isa Int && ispow2(A) && A >= sizeof(T) || throw(ArgumentError("alignment is a power of two of at least the element size"))
+        B === Nothing || B <: Tuple{Union{Integer,Nothing},Union{Integer,Nothing}} ||
+            throw(ArgumentError("bounds are the valid extents of the tile's two axes, or nothing"))
         @boundscheck A == sizeof(T) || _aligned(ptr,l,T,A) || throw(ArgumentError("pointer, strides or window origin break the declared alignment"))
-        new{T,AS,typeof(l),A}(ptr,l)
+        new{T,AS,typeof(l),A,B}(ptr,l,bounds)
     end
 end
 const GlobalTile{T,L,A} = MemoryTile{T,1,L,A}
@@ -47,7 +53,130 @@ The `shape` sub-tile at a possibly runtime `origin`, addressing the same
 allocation. `shape` must be a constant tuple.
 """
 Base.@constprop :aggressive Base.@propagate_inbounds window(t::MemoryTile{T,AS,L,A},o::Tuple,s::Tuple) where {T,AS,L,A} =
-    MemoryTile(t.ptr,Layouts.window(t.layout,o,s),Val(A))
+    MemoryTile(t.ptr,Layouts.window(t.layout,o,s),Val(A),_shift_bounds(t.bounds,o))
+@inline _shift_bounds(::Nothing,o) = nothing
+@inline _shift_bounds(b::Tuple,o) = map(_shift,b,o)
+@inline _shift(::Nothing,o) = nothing
+@inline _shift(x,o) = x - oftype(x,o)
+
+"""
+    bound(tile, extents)
+
+The same tile, valid only below `extents` along each axis (`nothing` leaves
+an axis unchecked). Loads through a bounded tile zero the elements outside
+and stores skip them; a vector counts as valid when its first element is, so
+along the axis vectors run the extent must be a multiple of the vector
+length. Coordinates are non-negative, so only the upper bounds are checked.
+Sub-tiles from `window` and `tile` inherit the bounds, shifted to their
+origin.
+"""
+@inline bound(t::MemoryTile{T,AS,L,A},extents::Tuple{Any,Any}) where {T,AS,L,A} =
+    @inbounds MemoryTile(t.ptr,t.layout,Val(A),extents)
+
+"""
+    tile(t, shape, index)
+
+The zero-based `index`-th tile of `shape` in a tiling of `t`, as a tile of
+its own: the pointer advanced to that tile and a layout of the modes inside
+it. Along an axis whose mode is hierarchical, `shape` must cover whole inner
+modes; the tile then never carries into the outer modes, so no runtime
+division is needed to address it, which a `window` at an arbitrary origin
+could not promise. `shape` must be a constant.
+
+A bounded parent (see [`bound`](@ref)) gives a bounded tile: the tile may
+then extend past the valid region, whose elements loads zero and stores
+skip.
+"""
+Base.@constprop :aggressive @inline function Layouts.tile(t::MemoryTile{T,AS,L,A},shape::Tuple{Integer,Integer},
+        index::Tuple{Integer,Integer}) where {T,AS,L,A}
+    inner, outer = _split_tile(t.layout,Val(map(Int,shape)))
+    offset = _tile_offset(outer[1],index[1]) + _tile_offset(outer[2],index[2])
+    origin = map((i,n) -> i*oftype(i,n),index,shape)
+    # The parent's declaration covers the tile: runtime strides are multiples
+    # of it, and the declaration narrows to the static outer strides.
+    @inbounds MemoryTile(t.ptr + _widen(Val(AS),offset)*sizeof(T),inner,_tile_alignment(typeof(outer),T,Val(A)),
+                         _shift_bounds(t.bounds,origin))
+end
+# The largest power of two up to `A` dividing every static outer stride, in bytes.
+@generated _tile_alignment(::Type{O},::Type{T},::Val{A}) where {O,T,A} = :(Val($(_tile_alignment_bytes(O,T,A))))
+function _tile_alignment_bytes(O,T,A)
+    strides = Int[]
+    for o in O.parameters
+        if o <: Layouts.StaticInt
+            push!(strides,o.parameters[1])
+        elseif o <: Layouts.Layout
+            for (_,d) in _type_leaves(o.parameters[1],o.parameters[2])
+                d <: Layouts.StaticInt && push!(strides,d.parameters[1])
+            end
+        end
+    end
+    a = A
+    while a > sizeof(T) && any(d -> (d*sizeof(T)) % a != 0,strides)
+        a ÷= 2
+    end
+    a
+end
+_static_volume(::Type{Layouts.StaticInt{n}}) where n = n
+_static_volume(T::Type{<:Tuple}) = (v = map(_static_volume,T.parameters); any(isnothing,v) ? nothing : prod(v; init=1))
+_static_volume(::Type) = nothing
+@inline _tile_offset(stride,i) = i*stride
+@inline _tile_offset(l::Layouts.Layout,i) = Layouts._offset_nonnegative(l,i)
+@inline _widen(::Val{1},x) = Int(x)
+@inline _widen(::Val{3},x) = x
+# The inner layout of a tile of `shape` and the stride of the tile index
+# along each axis: a flat mode splits at the tile extent; a hierarchical
+# mode must cover `shape` with a prefix of its leaves exactly.
+@generated function _split_tile(l::Layouts.Layout{S,D},::Val{E}) where {S,D,E}
+    inner_s, inner_d, outer = Any[], Any[], Any[]
+    for a in 1:2
+        s_t, d_t = S.parameters[a], D.parameters[a]
+        if !(s_t <: Tuple)
+            push!(inner_s,:(Layouts.static($(E[a])))); push!(inner_d,:(strides(l)[$a]))
+            push!(outer,:(Layouts.static($(E[a]))*strides(l)[$a]))
+        else
+            # Children inside the tile, whole subtrees of static extent; a
+            # static leaf may split where the extent ends.
+            children = collect(s_t.parameters); volume = 1; k = 0
+            ins, ind = Any[], Any[]
+            while volume < E[a]
+                k < length(children) || return :(throw(ArgumentError("the tile extent exceeds the mode")))
+                k += 1; n = _static_volume(children[k])
+                n === nothing && return :(throw(ArgumentError("a tile must cover static inner modes")))
+                if volume*n <= E[a]
+                    push!(ins,:(Layouts.shape(l)[$a][$k])); push!(ind,:(strides(l)[$a][$k])); volume *= n
+                else
+                    children[k] <: Layouts.StaticInt ||
+                        return :(throw(ArgumentError("a tile may split only a leaf of the mode")))
+                    part = E[a] ÷ volume
+                    part*volume == E[a] && n % part == 0 ||
+                        return :(throw(ArgumentError("the tile extent must split the inner modes evenly")))
+                    push!(ins,:(Layouts.static($part))); push!(ind,:(strides(l)[$a][$k])); volume *= part
+                    # The tile index then runs over the rest of this leaf first, then the outer children.
+                    rest = [(:(Layouts.static($(n ÷ part))),:(Layouts.static($part)*strides(l)[$a][$k]))]
+                    for j in k+1:length(children)
+                        push!(rest,(:(Layouts.shape(l)[$a][$j]),:(strides(l)[$a][$j])))
+                    end
+                    push!(inner_s,Expr(:tuple,ins...)); push!(inner_d,Expr(:tuple,ind...))
+                    push!(outer,:(@inbounds Layouts.Layout(($([r[1] for r in rest]...),),($([r[2] for r in rest]...),))))
+                    @goto next_axis
+                end
+            end
+            k < length(children) || return :(throw(ArgumentError("the tile must leave an outer mode to index")))
+            # One child inside: keep it as the axis's mode; several: a tuple of them.
+            push!(inner_s,length(ins) == 1 ? ins[1] : Expr(:tuple,ins...))
+            push!(inner_d,length(ind) == 1 ? ind[1] : Expr(:tuple,ind...))
+            # The tile index runs over the outer children, first fastest.
+            push!(outer,k+1 == length(children) ? :(strides(l)[$a][$(k+1)]) :
+                :(@inbounds Layouts.Layout(($([:(Layouts.shape(l)[$a][$j]) for j in k+1:length(children)]...),),
+                                           ($([:(strides(l)[$a][$j]) for j in k+1:length(children)]...),))))
+        end
+        @label next_axis
+    end
+    quote
+        Base.@inline
+        @inbounds (Layouts.Layout(($(inner_s...),),($(inner_d...),)),($(outer...),))
+    end
+end
 
 # Global products may exceed 32-bit element or byte offsets even when each
 # matrix dimension fits Int32. Widen coordinates BEFORE evaluating strides.
@@ -57,30 +186,22 @@ Base.@constprop :aggressive Base.@propagate_inbounds window(t::MemoryTile{T,AS,L
     offset isa Layouts.StaticInt ? Int(offset)*sizeof(T) : offset*oftype(offset,sizeof(T))
 end
 
-# The alignment declaration, checked structurally: every non-unit stride
-# and the pointer are multiples of `A`; a window's origin along the unit
-# stride keeps the multiple; a swizzle limits the claim to the bytes it
-# leaves in place.
-@inline _aligned(ptr,l,::Type{T},A) where T = reinterpret(UInt64,ptr) % UInt64(A) == 0 && _aligned_layout(l,T,A)
+# The alignment declaration: the base address and every runtime stride are
+# multiples of `A`; a swizzle limits the claim to the bytes it leaves in
+# place; a window's base is its parent's address of the origin.
+@inline _aligned(ptr,l,::Type{T},A) where T = _aligned_base(ptr,l,T,A) && _aligned_layout(l,T,A)
+@inline _aligned_base(ptr,l,::Type{T},A) where T = reinterpret(UInt64,ptr) % UInt64(A) == 0
+@inline _aligned_base(ptr,l::Layouts.Window,::Type{T},A) where T =
+    (reinterpret(UInt64,ptr) + UInt64(Int(l.parent(l.origin))*sizeof(T))) % UInt64(A) == 0
 @inline _aligned_layout(l::Layouts.Layout,::Type{T},A) where T = _aligned_strides(Layouts.shape(l),strides(l),T,A)
 @inline _aligned_strides(s::Tuple,d::Tuple,::Type{T},A) where T = all(map((x,y) -> _aligned_strides(x,y,T,A),s,d))
+@inline _aligned_strides(s,d::Layouts.StaticInt,::Type{T},A) where T = true
 @inline _aligned_strides(s,d,::Type{T},A) where T = Int(s) <= 1 || Int(d) == 1 || (Int(d)*sizeof(T)) % A == 0
 @inline _aligned_layout(l::Layouts.Composition{Layouts.Swizzle{B,M,S}},::Type{T},A) where {B,M,S,T} =
     A <= (1 << M)*sizeof(T) && _aligned_layout(l.inner,T,A)
-@inline function _aligned_layout(l::Layouts.Window,::Type{T},A) where T
-    _aligned_layout(l.parent,T,A) || return false
-    axis = _unit_axis(l.parent)
-    axis === nothing || (Int(l.origin[axis])*sizeof(T)) % A == 0
-end
+@inline _aligned_layout(l::Layouts.Window,::Type{T},A) where T = _aligned_layout(l.parent,T,A)
 @inline _aligned_layout(l,::Type,A) = false
-@inline _unit_axis(l::Layouts.Layout) = _unit_axis(strides(l))
-@inline _unit_axis(l::Layouts.Composition) = _unit_axis(l.inner)
-@inline _unit_axis(l::Layouts.Window) = _unit_axis(l.parent)
-@inline _unit_axis(d::Tuple) = _unit_axis(d,1)
-@inline _unit_axis(::Tuple{},i) = nothing
-@inline _unit_axis(d::Tuple,i) = _has_unit(first(d)) ? i : _unit_axis(Base.tail(d),i+1)
-@inline _has_unit(d::Tuple) = any(map(_has_unit,d))
-@inline _has_unit(d) = Int(d) == 1
+
 
 # Affine tiles, a flat layout or a window of one, address linearly: the
 # address of `a + b` is the address of `a` plus the offset of `b`. Loads and

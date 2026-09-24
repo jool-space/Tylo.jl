@@ -1,6 +1,6 @@
 # Current status and validation
 
-This page describes the current working tree as of 2026-09-13. The detailed
+This page describes the current working tree as of 2026-09-24. The detailed
 [validation history](validation-history.md) records older revisions, compiler
 versions, numerical contracts and measurements. Historical sanitizer or timing
 results do not automatically validate later changes.
@@ -10,8 +10,8 @@ results do not automatically validate later changes.
 | Area | Implemented scope | Evidence available | Main limit |
 |:--|:--|:--|:--|
 | Layout mathematics | Hierarchical affine shapes/strides, static/runtime leaves, symbolic composition, complements, right and left inverses, logical/zipped/tiled division, logical/blocked/raked products, slicing, XOR swizzles, windows, two-axis permutation; ownership plans derived from this algebra | Host tests against the enumeration oracle; selected device arithmetic on GB10; machine code of every prior kernel unchanged | Complements and inverses need static strides; windows do not compose symbolically |
-| Register arithmetic and memory access | One `Fragment` type of logical values (8- and 16-bit values stored as register words), scalar broadcast, `Fragment{T}` conversion and axis permutation; loads and stores derived from ownership: `ldmatrix`/`stmatrix` blocks, then vectors within a tile's declared alignment, then scalars | Host and GB10 tests; machine code of every prior kernel unchanged | Not a full array interface; bounded stores stay scalar |
-| Reductions/windows | Selected lane-local, warp-striped, warp-MMA, WGMMA and TMEM ownership recipes | Independent coordinate/numerical references, assembly, GB10 | Arbitrary ownership does not imply a supported collective or slice |
+| Register arithmetic and memory access | One `Fragment` type of logical values (8- and 16-bit values stored as register words), scalar broadcast, `Fragment{T}` conversion and axis permutation; loads and stores derived from ownership: `ldmatrix`/`stmatrix` blocks, then vectors within a tile's declared alignment, then scalars, through bounded tiles and tiles by index | Host and GB10 tests; Megakernels' MXFP8 body identical to a hand-written reference | Not a full array interface; bounded tiles take the vector and scalar paths only |
+| Reductions/windows | Selected lane-local, warp-striped, warp-MMA, WGMMA and TMEM ownership recipes; running reductions from an initial value; cross-warp combination composed through shared memory | Independent coordinate/numerical references, assembly, GB10 | Arbitrary ownership does not imply a supported collective or slice |
 | Warp MMA | 24 `mma.sync` atoms (16-bit, TF32, FP8, INT8) as ownership tables; derived `ldmatrix`/`stmatrix` operand copies; `TiledMMA` GEMM with full/bounded copies and stores, one/two copy stages | SM80/89/90a/100a/121a assembly; GB10 runtime oracle for every atom | No claim of a tuned GEMM library; no split-K/autotuning |
 | TMA | 2D loads and stores of one-, two- and four-byte elements with 32-, 64- or 128-byte swizzle rows, from matrices or batches of matrices with logical bounds, into canonical storage expressed as `Swizzle{B,M,3}` over packed rows and shared with `ldmatrix`, WGMMA and tcgen05 operands | GB10 runtime for every width, batches, clipping, reuse and lifetime tests | No multicast, clusters, boxes beyond one matrix or unswizzled boxes |
 | Hopper WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, selected partial accumulators | SM90a assembly; H100/H200 tests prepared | Runtime and performance on Hopper remain unvalidated |
@@ -24,6 +24,52 @@ online `SoftmaxState(f; dims)` uses reduced fragments on either implemented
 logical axis. It does not synthesize collectives for arbitrary ownership.
 
 ## Most recent checks
+
+### The MXFP8 projection body, to the instruction (2026-09-24)
+
+Megakernels' MXFP8 streamed projection, its hardest body, was rewritten in
+Tylo and held to one test: it must compile to the same machine code as the
+same algorithm written by hand with pointers, vector loads, shuffles and
+inline PTX (`Megakernels/test/mxfp8_sass/`). Wherever the Tylo version could
+not say something, or said it at a cost, the vocabulary changed:
+
+- `bound(tile, extents)` gives a tile its valid region; loads zero what lies
+  outside and stores skip it, per vector. `tile(t, shape, index)` is the
+  `index`-th tile of a tiling, through hierarchical modes without carries,
+  its index split with masks and shifts, its alignment narrowed to what the
+  outer strides keep. Vector plans follow the tile's layout, so a 16-byte
+  lane load through a permuted K order is one instruction.
+- `sum`, `maximum` and `minimum` take a mapped function and an initial value,
+  folding a thread's values sequentially from it (`sum(abs2, x; dims=1,
+  init=s)` is one fused multiply-add per value). `Fragment(f, ownership)`
+  re-owns registers, which makes lanes an axis to reduce; a store of a
+  replicated fragment is issued by one replica. With a barrier and a local
+  reduction of the loaded rows this composes statistics across warps.
+- `relayout(to, f, thread)` selects by the thread's coordinate where each
+  thread already holds what it needs; `reinterpret(T, f)` keeps the bits.
+- `repeat(ownership, m, n)` tiles an ownership, so one lane's 16 bytes are
+  the A registers of two consecutive K blocks.
+- Paired FP32→FP8 conversions build register words directly, 8-bit words are
+  joined as 16-bit halves (a pair from one `cvt` folds back to itself), a
+  slot's value is extracted from its word alone, and a bound check at a zero
+  offset compares the coordinate directly.
+
+The hand-written reference and the Tylo body compile to identical SASS for
+every kernel of one-operation programs (with and without normalization and
+residual), the decoder (fused and unfused), a fork/join program and the full
+Llama 3.2 1B program at batch 1 and 8: symbol numbering aside, the same
+instructions in the same order. The original raw-PTX body (14,248
+instructions in the fork/join program's persistent kernel) is replaced by
+one of 11,120.
+
+GB10, Julia 1.13: the full suite passes 72,092 checks (3 broken, as before),
+with new host and device tests of tiles by index, bounds, re-owning,
+selection, initial values and the bounded chunk pattern end to end. Of 363
+kernels saved before and after, 244 are identical, 24 FP8 packing kernels are
+smaller by 8 to 24 instructions, and 95 have the same count: 43 differ in
+register assignment only and the rest in order, except the 8-bit `16x8x32`
+atom oracles, where ptxas scheduled the reordered byte packing with two
+uniform adds in place of two alignment NOPs.
 
 ### One vocabulary (2026-09-24)
 

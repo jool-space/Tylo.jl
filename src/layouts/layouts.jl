@@ -114,4 +114,22 @@ end
 @inline _unwrap(x::Tuple{Any}) = x[1]
 @inline _unwrap(x) = x
 
+"""
+    repeat(ownership, rm, rn)
+
+The ownership of an `rm × rn` grid of copies of `ownership`'s tile in which
+every thread holds its values of every copy: slots of the original first,
+then the copies, M fastest. It describes, for example, two consecutive K
+blocks of an MMA operand loaded at once. `rm` and `rn` must be constants.
+"""
+Base.@constprop :aggressive @inline Base.repeat(o::Ownership,rm::Integer,rn::Integer) = _repeat(o,Val((Int(rm),Int(rn))))
+@generated _repeat(o::O,::Val{R}) where {O<:Ownership,R} = :($(_repeat_ownership(O.instance,R)))
+function _repeat_ownership(o::Ownership{S},(rm,rn)) where S
+    m, n = S
+    M = m*rm
+    embedded = compose(Layout((static(m),static(n)),(static(1),static(M))),o.mapping)
+    values = concat(mode(embedded,2),Layout((static(rm),static(rn)),(static(m),static(n*M))))
+    Ownership((M,n*rn),concat(mode(embedded,1),values))
+end
+
 end

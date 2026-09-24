@@ -23,7 +23,7 @@ another MMA operand distribution.
 end
 
 _local_count(::Type{<:Fragment{T,N}}) where {T,N} = N
-@inline _register_value(f,::Val{I}) where I = f.data[I]
+@inline _register_value(f,::Val{I}) where I = _value(f,Val(I))
 @inline _register_values(f::Fragment) = f.data
 @inline Fragment(f::Fragment) = f
 
@@ -135,34 +135,77 @@ Base.@constprop :aggressive @inline _reduction_axis_argument(d::Integer) =
     d == 1 || d == 2 ? Int(d) : throw(ArgumentError("unsupported reduction axis for a fragment"))
 Base.@constprop :aggressive @inline _reduction_axis_argument(d::Tuple{Integer}) = _reduction_axis_argument(only(d))
 @inline _reduction_axis_argument(d) = throw(ArgumentError("unsupported reduction axis for a fragment"))
-Base.@constprop :aggressive @inline function _fragment_reduce(operation, fragment::Fragment, dimensions)
+Base.@constprop :aggressive @inline function _fragment_reduce(operation, f, fragment::Fragment, dimensions, init)
     axis = _reduction_axis_argument(dimensions)
-    eltype(fragment) === Float32 ||
-        throw(ArgumentError("fragment reductions currently require Float32 values"))
     layout = Layouts.layout(fragment)
-    Fragment(_reduce_values(operation, _register_values(fragment), layout, Val(axis)),
-             _reduced_ownership(layout, Val(axis)))
+    result = _reduced_ownership(layout, Val(axis))
+    if init === nothing
+        mapped = f === identity ? fragment : map(f, fragment)
+        eltype(mapped) === Float32 ||
+            throw(ArgumentError("fragment reductions currently require Float32 values"))
+        Fragment(_reduce_values(operation, _register_values(mapped), layout, Val(axis)), result)
+    else
+        eltype(init) === Float32 ||
+            throw(ArgumentError("fragment reductions currently require Float32 values"))
+        _same_distribution(Layouts.layout(init), result) ||
+            throw(DimensionMismatch("init must hold the reduced ownership"))
+        Fragment(_reduce_values_init(operation, f, _register_values(fragment), layout, Val(axis), init.data), result)
+    end
+end
+# One step of a fold: `op(acc, f(x))`, contracted to a fused multiply-add for sums of squares.
+@inline _fold(op::F, f::G, acc, x) where {F,G} = op(acc, f(x))
+@inline _fold(::typeof(+), ::typeof(abs2), acc, x) = muladd(x, x, acc)
+# With an initial value, a thread-local group folds sequentially from it,
+# slot order; with communication, the collective result joins it last.
+@generated function _reduce_values_init(op::F, f::G, data::NTuple{N,T}, ::L, ::Val{Axis}, init::NTuple{M,S}) where {F,G,N,T,L,Axis,M,S}
+    o = _static_instance(L)
+    o === nothing && return :(throw(ArgumentError("reductions require a static ownership")))
+    plan = reduction_plan(o,Axis)
+    plan === nothing &&
+        return :(throw(ArgumentError("no reduction implementation for this ownership layout and axis")))
+    if isempty(plan.bits)
+        results = map(enumerate(plan.groups)) do (g,group)
+            foldl((acc,e) -> :(_fold(op, f, $acc, data[$e])), group; init=:(init[$g]))
+        end
+    else
+        results = [:(op(init[$g], r[$g])) for g in eachindex(plan.groups)]
+    end
+    quote
+        Base.@inline
+        $(isempty(plan.bits) ? nothing : :(r = _reduce_values(op, map(f, data), $o, Val($Axis))))
+        ($(results...),)
+    end
 end
 
 """
-    sum(fragment; dims)
-    maximum(fragment; dims)
-    minimum(fragment; dims)
+    sum([f,] fragment; dims, init)
+    maximum([f,] fragment; dims, init)
+    minimum([f,] fragment; dims, init)
 
 Reduce FP32 values over a logical axis, retaining a singleton dimension and
-explicit result ownership. Broadcast the result back with ordinary dotted
-arithmetic, for example `fragment .- maximum(fragment; dims=2)`.
+explicit result ownership, after applying `f` to each value. Broadcast the
+result back with ordinary dotted arithmetic, for example
+`fragment .- maximum(fragment; dims=2)`.
 
 The recipe is derived from the ownership: a local tree over the slots that
 share a kept coordinate, then xor shuffles over the lane bits that replicate
 it. An axis whose values span warps has no recipe and is rejected rather than
-silently reducing only this thread's values. Reductions with shuffles require
-all 32 lanes of each warp. The result type depends on the axis, so `dims`
-must be a constant in a kernel.
+silently reducing only this thread's values; reduce within each warp, then
+combine the warps' results through shared memory. Reductions with shuffles
+require all 32 lanes of each warp. The result type depends on the axis, so
+`dims` must be a constant in a kernel.
+
+`init` is a fragment in the result's ownership, joined into the result.
+Values a thread reduces by itself then fold sequentially from it, in slot
+order, so a running reduction over a loop costs one operation per value:
+`sum(abs2, x; dims=1, init=s)` is one fused multiply-add per value.
 """
-@inline Base.sum(f::Fragment;dims=:) = _fragment_reduce(+,f,dims)
-@inline Base.maximum(f::Fragment;dims=:) = _fragment_reduce(max,f,dims)
-@inline Base.minimum(f::Fragment;dims=:) = _fragment_reduce(min,f,dims)
+@inline Base.sum(f::Fragment;dims=:,init=nothing) = _fragment_reduce(+,identity,f,dims,init)
+@inline Base.maximum(f::Fragment;dims=:,init=nothing) = _fragment_reduce(max,identity,f,dims,init)
+@inline Base.minimum(f::Fragment;dims=:,init=nothing) = _fragment_reduce(min,identity,f,dims,init)
+@inline Base.sum(g,f::Fragment;dims=:,init=nothing) = _fragment_reduce(+,g,f,dims,init)
+@inline Base.maximum(g,f::Fragment;dims=:,init=nothing) = _fragment_reduce(max,g,f,dims,init)
+@inline Base.minimum(g,f::Fragment;dims=:,init=nothing) = _fragment_reduce(min,g,f,dims,init)
 
 """
     window(fragment, origin, shape)
@@ -195,25 +238,58 @@ Base.@constprop :aggressive @inline window(f::Fragment,origin::Tuple{Integer,Int
     end
     quote
         Base.@inline
-        Fragment(($([:(f.data[$e]) for e in slots]...),),$(plan.ownership))
+        Fragment(($([:(_value(f,Val($e))) for e in slots]...),),$(plan.ownership))
     end
 end
 
 """
     relayout(target, fragment)
+    relayout(target, fragment, thread)
 
-Reinterpret this thread's values under `target` ownership. Valid when every
-thread holds the same element set in both ownerships, so the change is a
-register permutation without communication. Other conversions are rejected.
+This thread's values under `target` ownership, when every thread already
+holds the values `target` assigns it, so no value moves between threads.
+Singleton axes of `fragment` broadcast. Without `thread`, each target slot
+must take the same source slot on every thread (a register rename). With
+`thread`, a target slot whose source differs by thread is selected at run
+time, as when every thread holds a value for every column and `target`
+wants its own column's. Anything else needs communication and is rejected.
 """
 @generated function relayout(::TO,f::Fragment{T,N,L}) where {TO,T,N,L}
     from, to = _static_instance(L), _static_instance(TO)
     (from === nothing || to === nothing) && return :(throw(ArgumentError("relayout requires static ownerships")))
     permutation = relayout_permutation(from,to)
-    permutation === nothing &&
+    permutation === nothing || return quote
+        Base.@inline
+        Fragment(($([:(_value(f,Val($i))) for i in permutation]...),),$to)
+    end
+    plan = selection_plan(from,to)
+    plan === nothing || all(c -> length(c) == 1,plan) ||
+        return :(throw(ArgumentError("this relayout selects by thread; pass the thread index")))
+    plan === nothing &&
         return :(throw(ArgumentError("no in-lane relayout between these ownerships; communication is required")))
     quote
         Base.@inline
-        Fragment(($([:(f.data[$i]) for i in permutation]...),),$to)
+        Fragment(($([:(_value(f,Val($(only(c)[2])))) for c in plan]...),),$to)
+    end
+end
+@generated function relayout(::TO,f::Fragment{T,N,L},thread::Integer) where {TO,T,N,L}
+    from, to = _static_instance(L), _static_instance(TO)
+    (from === nothing || to === nothing) && return :(throw(ArgumentError("relayout requires static ownerships")))
+    plan = selection_plan(from,to)
+    plan === nothing &&
+        return :(throw(ArgumentError("no in-lane relayout between these ownerships; communication is required")))
+    singleton = map(==(1),size(from))
+    values = map(enumerate(plan)) do (e,choices)
+        length(choices) == 1 && return :(_value(f,Val($(only(choices)[2]))))
+        c = Symbol(:c_,e)
+        chain = foldr(choices[1:end-1];init=:(_value(f,Val($(choices[end][2]))))) do (coordinate,s),rest
+            checks = [:($c[$a] == oftype($c[$a],$(coordinate[a]))) for a in 1:2 if !singleton[a]]
+            :(ifelse($(foldl((x,y) -> :($x & $y),checks)),_value(f,Val($s)),$rest))
+        end
+        :(let $c = Layouts._coordinate($to,thread,Val($(e-1))); $chain end)
+    end
+    quote
+        Base.@inline
+        Fragment(($(values...),),$to)
     end
 end

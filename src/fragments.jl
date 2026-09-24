@@ -38,8 +38,16 @@ end
 @generated function _to_storage(::Type{D},data::NTuple{N,T}) where {D,N,T}
     D === NTuple{N,T} && return :data
     W = N ÷ _per_word(T); bits = _element_bits(T); per = 32 ÷ bits; U = _carrier(T)
-    words = [foldl((acc,j) -> :($acc | (UInt32(reinterpret($U, data[$(per*(i-1)+j)])) << $(bits*(j-1)))),
-                   2:per; init=:(UInt32(reinterpret($U, data[$(per*(i-1)+1)])))) for i in 1:W]
+    # Adjacent values join into carriers of twice the width, then those: a
+    # value pair produced as one 16-bit register (a paired conversion) then
+    # folds back to that register instead of being split into bytes.
+    function join(values,width)
+        length(values) == 1 && return only(values)
+        wide = width == 8 ? UInt16 : UInt32
+        pairs = [:($wide($(values[2j-1])) | ($wide($(values[2j])) << $width)) for j in 1:length(values)÷2]
+        join(pairs,2width)
+    end
+    words = [join([:(reinterpret($U, data[$(per*(i-1)+j)])) for j in 1:per],bits) for i in 1:W]
     quote
         Base.@inline
         ($(words...),)
@@ -54,6 +62,12 @@ end
         w = getfield(f,:storage)
         ($(values...),)
     end
+end
+# The `I`-th value alone, unpacking only its word.
+@generated function _value(f::Fragment{T,N,L,D},::Val{I}) where {T,N,L,D,I}
+    D === NTuple{N,T} && return :(getfield(f,:storage)[$I])
+    bits = _element_bits(T); per = 32 ÷ bits; U = _carrier(T)
+    :(reinterpret($T,(getfield(f,:storage)[$((I-1)÷per+1)] >> $(bits*((I-1)%per))) % $U))
 end
 @inline Base.getproperty(f::Fragment,s::Symbol) = s === :data ? _values(f) : getfield(f,s)
 Base.propertynames(::Fragment) = (:data,:ownership)
@@ -73,6 +87,29 @@ end
 end
 "The same storage under another ownership with as many slots."
 @inline _with_ownership(f::Fragment{T,N,L,D},o) where {T,N,L,D} = Fragment{T,N,typeof(o),D}(getfield(f,:storage),o)
+
+"""
+    Fragment(fragment, ownership)
+
+The same values, slot for slot, under another ownership with as many slots:
+registers are untouched. For example, a thread's running per-column
+statistics become one row of a warp-wide matrix to reduce across lanes.
+"""
+@inline function Fragment(f::Fragment{T,N},ownership::Layouts.Ownership) where {T,N}
+    N == _register_count(ownership) || throw(DimensionMismatch("value count differs from ownership"))
+    _with_ownership(f,ownership)
+end
+"""
+    reinterpret(T, fragment)
+
+The same bits as values of `T`, which must have the element size of the
+fragment's values, under the same ownership.
+"""
+@inline function Base.reinterpret(::Type{T},f::Fragment{S,N,L,D}) where {T,S,N,L,D}
+    isbitstype(T) && sizeof(T) == sizeof(S) || throw(ArgumentError("reinterpret requires element types of one size"))
+    D === NTuple{N,S} ? Fragment(map(x -> reinterpret(T,x),getfield(f,:storage)),Layouts.layout(f)) :
+        Fragment{T,N,L,D}(getfield(f,:storage),Layouts.layout(f))
+end
 
 """
     Fragment{T}(fragment)

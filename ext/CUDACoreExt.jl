@@ -13,6 +13,19 @@ using PTX: @ptx_str
     words = @rtuple(i -> Tylo._pack_mma_pair(T,f.data[2i-1],f.data[2i]), 1:N÷2)
     Tylo._from_words(T,words,Tylo.Layouts.layout(f))
 end
+# FP32 to FP8 converts pairs with one `cvt` each where the target has it
+# (sm_89 on); a pair's 16 bits are half of a fragment word, so the words
+# form without splitting pairs into bytes.
+@inline _fp8_pair(::Type{Tylo.Float8_E4M3FN},lo,hi) = reinterpret(UInt16,ptx"cvt.rn.satfinite.e4m3x2.f32"(hi,lo))
+@inline _fp8_pair(::Type{Tylo.Float8_E5M2},lo,hi) = reinterpret(UInt16,ptx"cvt.rn.satfinite.e5m2x2.f32"(hi,lo))
+@inline _has_fp8() = (c = CUDACore.compute_capability(); c.major > 8 || (c.major == 8 && c.minor >= 9))
+@device_override @inline function Tylo._convert_fragment(::Type{T}, f::Fragment{Float32,N}) where {T<:Union{Tylo.Float8_E4M3FN,Tylo.Float8_E5M2},N}
+    (N % 4 == 0 && _has_fp8()) ||
+        return Fragment(Tuple(Tylo.Microfloats.cvt(Tylo.Microfloats.SVector{N,T},f.data,RoundNearest,Tylo.SAT)),Tylo.Layouts.layout(f))
+    pairs = @rtuple(i -> _fp8_pair(T,f.data[2i-1],f.data[2i]), 1:N÷2)
+    words = @rtuple(i -> UInt32(pairs[2i-1]) | (UInt32(pairs[2i]) << 16), 1:N÷4)
+    Tylo._from_words(T,words,Tylo.Layouts.layout(f))
+end
 @device_override @inline Tylo._warp_reduce(op::F,x,::Val{W}) where {F,W} = PTX.Warps.warp_reduce(op,x,Val(W))
 # stmatrix exists from sm_90; the compile target decides, folded at compile time.
 @device_override @inline Tylo._stmatrix_available() = CUDACore.compute_capability().major >= 9

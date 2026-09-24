@@ -30,7 +30,8 @@ cases() = ((operand_layout(MMAAtom((16,8,16),BFloat16),Accumulator()),Float32),
         @test !occursin(r"\bcall",body)
         # One access per vector when a plan derives, one per element otherwise;
         # the scalar path declares element alignment, so nothing merges.
-        plan = Tylo.vector_plan(ownership,T,2,A)
+        m,n = size(ownership)
+        plan = Tylo.vector_plan(ownership,T,typeof(@Layout(($m,$n),($n,1))),A)
         expected = plan === nothing ? Tylo._register_count(ownership) : length(plan.groups)
         @test count("ld.global.",body) == expected
         @test count("st.global.",body) == expected

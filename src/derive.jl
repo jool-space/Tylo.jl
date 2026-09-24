@@ -186,6 +186,42 @@ function relayout_permutation(from, to)
 end
 
 """
+    selection_plan(from, to) -> Vector or nothing
+
+For each slot of `to`, the `(coordinate, source slot)` candidates that
+supply it: one when the source slot is the same on every thread, several
+when it depends on the thread, in which case the source's slots must hold
+the same coordinate on every thread so that comparing the target
+coordinate with it selects. Singleton axes of `from` broadcast. `nothing`
+when some thread lacks a value it needs.
+"""
+function selection_plan(from, to)
+    _thread_count(from) == _thread_count(to) || return nothing
+    sf, st = map(Int,size(from)), map(Int,size(to))
+    all(map((a,b) -> a == b || a == 1,sf,st)) || return nothing
+    tf, tt = ownership_table(from), ownership_table(to)
+    project(c) = (sf[1] == 1 ? 0 : c[1], sf[2] == 1 ? 0 : c[2])
+    plan = Vector{Vector{Tuple{Tuple{Int,Int},Int}}}()
+    for e in axes(tt,2)
+        choices = Tuple{Tuple{Int,Int},Int}[]
+        for t in axes(tt,1)
+            c = project(tt[t,e])
+            s = findfirst(==(c),view(tf,t,:))
+            s === nothing && return nothing
+            any(x -> x[2] == s,choices) || push!(choices,(c,s))
+        end
+        if length(choices) > 1
+            # Candidates must name thread-invariant source coordinates.
+            for (c,s) in choices
+                all(t -> tf[t,s] == c,axes(tf,1)) || return nothing
+            end
+        end
+        push!(plan,choices)
+    end
+    plan
+end
+
+"""
     window_plan(ownership, origin, shape) -> (; slots, ownership) or nothing
 
 The slots (1-based) falling inside a logical window, identical on every
@@ -346,31 +382,141 @@ function validate_copy(o,::Type{T},l::Layouts.AbstractLayout) where T
     nothing
 end
 
-"""
-    vector_plan(ownership, T, axis, align) -> (; width, groups) or nothing
+# ── Memory offsets of an ownership in a tile ────────────────────────────
+# A tile's layout as it varies within the tile, read from the layout type:
+# per axis, leaves `(extent, stride)` covering the tile's extent, with a
+# stride that is an `Int` or `(:runtime, axis, leaf)` for a runtime value.
+# Flat modes, windows of flat layouts, the inner modes of a `tile` and the
+# layout under a swizzle qualify.
+function _local_leaves(::Type{Layouts.Layout{S,D}},shape) where {S,D}
+    axes = Vector{Vector{Tuple{Int,Any}}}()
+    for a in 1:2
+        s_t, d_t = S.parameters[a], D.parameters[a]
+        leaves = Tuple{Int,Any}[]
+        if !(s_t <: Tuple)
+            push!(leaves,(shape[a], d_t <: Layouts.StaticInt ? d_t.parameters[1] : (:runtime,a,0)))
+        else
+            volume = 1
+            for (j,(st,dt)) in enumerate(_type_leaves(s_t,d_t))
+                volume >= shape[a] && break
+                st <: Layouts.StaticInt || return nothing
+                n = st.parameters[1]
+                push!(leaves,(min(n,cld(shape[a],volume)), dt <: Layouts.StaticInt ? dt.parameters[1] : (:runtime,a,j)))
+                volume *= n
+            end
+            volume >= shape[a] || return nothing
+        end
+        push!(axes,leaves)
+    end
+    axes
+end
+# The (shape, stride) leaf types of a mode, first fastest.
+_type_leaves(s::Type,d::Type) = s <: Tuple ? reduce(vcat,[_type_leaves(x,y) for (x,y) in zip(s.parameters,d.parameters)];init=Tuple{Any,Any}[]) : Tuple{Any,Any}[(s,d)]
+_flat(::Type{Layouts.Layout{S,D}}) where {S,D} = !any(p -> p <: Tuple,S.parameters)
+_flat(::Type) = false
+_local_leaves(::Type{Layouts.Window{W,L,O}},shape) where {W,L,O} = _flat(L) ? _local_leaves(L,shape) : nothing
+_local_leaves(::Type{Layouts.Composition{F,L}},shape) where {F<:Layouts.Swizzle,L} = _local_leaves(L,shape)
+_local_leaves(::Type,shape) = nothing
+# The offset of a coordinate: a static part and the multiplicity of each runtime stride.
+function _local_offset(leaves,c)
+    static = 0; runtime = Dict{Any,Int}()
+    for a in 1:2
+        x = c[a]
+        for (j,(n,d)) in enumerate(leaves[a])
+            digit = j == length(leaves[a]) ? x : x % n
+            x = x ÷ n
+            d isa Int ? (static += digit*d) : (runtime[d] = get(runtime,d,0) + digit)
+        end
+    end
+    filter!(p -> p.second != 0,runtime)
+    (static,runtime)
+end
+_add_offsets(a,b) = (a[1]+b[1],mergewith(+,a[2],b[2]))
 
-Group each thread's slots into vectors of `width` bytes (16, 8 or 4) that
-are contiguous along logical `axis` and start at coordinates whose byte
-offset is a multiple of the width, identically on every thread, given a tile
-alignment of `align` bytes. In the ownership projected onto the axis, the
-fastest slot mode must run along it with unit stride for a multiple of the
-vector length, and every other stride must be a multiple of that length.
-The widest such grouping wins; `nothing` when even the narrowest
-multi-element vector does not fit.
 """
-function vector_plan(o,::Type{T},axis::Int,align::Int) where T
-    axis in (1,2) || throw(ArgumentError("choose logical axis 1 or 2"))
-    along = _axis(o,axis)
-    value = _pairs(coalesce(mode(along,2)))
-    thread = _pairs(mode(along,1))
+    replica_mask(ownership) -> Int
+
+The thread-index bits along which the ownership replicates every value
+(zero-stride thread modes of power-of-two extent at power-of-two positions).
+A store writes each value once, from the thread whose bits in the mask are
+zero. Other zero-stride modes are not reported (they store redundantly).
+"""
+function replica_mask(o)
+    mask = 0; prefix = 1
+    for (s,d) in _pairs(_threads(o))
+        if d == 0 && s > 1 && ispow2(s) && ispow2(prefix)
+            mask |= (s-1) << trailing_zeros(prefix)
+        end
+        prefix *= s
+    end
+    mask
+end
+
+"""
+    tile_offsets(ownership, layout_type) -> (; threads, slots) or nothing
+
+The storage offsets of an ownership's values in a tile, split into each
+thread's part and each slot's part, when the offset of every value is the
+sum of the two: for flat layouts always, for hierarchical ones when threads
+and slots occupy different digits. Offsets are `(static, runtime multiples)`.
+"""
+function tile_offsets(o,::Type{ML}) where ML
+    leaves = _local_leaves(ML,map(Int,size(o)))
+    leaves === nothing && return nothing
+    table = ownership_table(o)
+    slots = [Layouts._slot_coordinate(o,e) for e in 0:_register_count(o)-1]
+    so = [_local_offset(leaves,c) for c in slots]
+    to = [_local_offset(leaves,table[t,1] .- slots[1]) for t in axes(table,1)]
+    for t in axes(table,1), e in axes(table,2)
+        _local_offset(leaves,table[t,e]) == _add_offsets(to[t],so[e]) || return nothing
+    end
+    (; threads = to, slots = so)
+end
+
+"""
+    vector_plan(ownership, T, layout_type, align) -> (; width, groups) or nothing
+
+Group each thread's values into vectors of `width` bytes (16, 8 or 4, at most
+`align`) whose storage offsets in the tile are consecutive and aligned, the
+same on every thread. Offsets come from composing the tile's layout with the
+ownership, so a vector may gather slots that are far apart in the fragment,
+as a K-permuted layout requires. 8- and 16-bit values group by whole
+register words. `groups` lists each vector's slots (1-based) in storage
+order; the widest grouping wins; `nothing` when no multi-element vector fits.
+"""
+function vector_plan(o,::Type{T},::Type{ML},align::Int) where {T,ML}
+    offsets = tile_offsets(o,ML)
+    offsets === nothing && return nothing
+    per = _element_bits(T) < 32 ? 32 ÷ _element_bits(T) : 1
     slots = _register_count(o)
+    slots % per == 0 || return nothing
+    so = offsets.slots
+    # Units: whole words for packed values, elements otherwise.
+    units = [(per*(u-1)+1):(per*u) for u in 1:slots÷per]
+    for r in units
+        all(i -> so[r[i]] == (so[r[1]][1]+i-1,so[r[1]][2]),eachindex(r)) || return nothing
+    end
     for width in (16,8,4)
         width <= align || continue
         k = width ÷ sizeof(T)
-        k >= 2 && slots % k == 0 || continue
-        value[1][2] == 1 && value[1][1] % k == 0 || continue
-        all(d % k == 0 for (_,d) in value[2:end]) && all(d % k == 0 for (_,d) in thread) || continue
-        return (; width, groups=[collect(g:g+k-1) for g in 1:k:slots])
+        k >= 2 && k % per == 0 || continue
+        n = k ÷ per
+        length(units) % n == 0 || continue
+        all(t -> t[1] % k == 0,offsets.threads) || continue
+        order = sort(units;by = r -> (sort(collect(so[r[1]][2])),so[r[1]][1]))
+        groups = Vector{Vector{Int}}()
+        valid = true
+        for g in 1:n:length(order)
+            members = order[g:g+n-1]
+            start = so[members[1][1]]
+            valid = start[1] % k == 0 &&
+                all(i -> so[members[i][1]] == (start[1]+(i-1)*per,start[2]),eachindex(members))
+            valid || break
+            push!(groups,reduce(vcat,collect.(members)))
+        end
+        valid || continue
+        sort!(groups;by = minimum)
+        return (; width, groups)
     end
     nothing
 end

@@ -46,11 +46,30 @@ Base.:(==)(a::Layout,b::Layout) = shape(a) == shape(b) && strides(a) == strides(
     length(s) == length(c) || throw(ArgumentError("coordinate rank mismatch"))
     +(map(_eval,s,d,c)...)
 end
-@inline _split(::Tuple{},::Tuple{},c) = zero(c)
+# The outermost mode takes the remainder by a static extent, which LLVM
+# merges with the other modes' masks, but a runtime extent's quotient as it
+# is: coordinates are in range, and that remainder would divide.
+@inline _split(s::Tuple{Any},d::Tuple{Any},c) = _outermost(first(s),first(d),c,_volume(first(s)))
+@inline _outermost(s,d,c,n::StaticInt) = _eval(s,d,c % _constant(c,n))
+@inline _outermost(s,d,c,n) = _eval(s,d,c)
 @inline function _split(s::Tuple,d::Tuple,c)
     n = _constant(c,_volume(first(s)))
     _eval(first(s),first(d),c % n) + _split(Base.tail(s),Base.tail(d),c ÷ n)
 end
+# The offset of an index known to be non-negative, such as a tile index:
+# a static power of two splits it with a mask and a shift rather than a
+# signed division. (General coordinates keep `%` and `÷`, which LLVM
+# recombines across nested windows.)
+@inline _offset_nonnegative(l::Layout,c::Integer) = _split_nonnegative(l.shape,l.strides,c)
+@inline _split_nonnegative(s::Tuple{Any},d::Tuple{Any},c) = _eval(first(s),first(d),c)
+@inline function _split_nonnegative(s::Tuple,d::Tuple,c)
+    n = _volume(first(s))
+    _eval(first(s),first(d),_low(c,n)) + _split_nonnegative(Base.tail(s),Base.tail(d),_high(c,n))
+end
+@inline _low(c,n) = c % _constant(c,n)
+@inline _high(c,n) = c ÷ _constant(c,n)
+@inline _low(c::Integer,n::StaticInt) = (m = Int(n); ispow2(m) ? c & oftype(c,m-1) : c % oftype(c,m))
+@inline _high(c::Integer,n::StaticInt) = (m = Int(n); ispow2(m) ? c >> trailing_zeros(m) : c ÷ oftype(c,m))
 @inline _eval(s::Tuple,d::Tuple,c::IntLike) = _split(s,d,c)
 @inline (l::Layout)(c) = _eval(l.shape,l.strides,c)
 

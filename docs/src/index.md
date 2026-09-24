@@ -16,9 +16,10 @@ else derives from them by [layout algebra](layouts.md).
 
 A [`Fragment`](@ref) is one thread's values together with their ownership.
 The verbs connect the three: `load_fragment` and `store!` move a fragment
-between registers and a tile; `mma`, `copy_async!` and `tma_load!` issue an
-atom's instruction; `window`, `permutedims`, broadcasting and `sum`/`maximum`
-work on fragments without leaving the registers. Every size, shape and axis
+between registers and a tile; `tile`, `window` and `bound` pick the part of a
+tile a step works on; `mma`, `copy_async!` and `tma_load!` issue an atom's
+instruction; `window`, `permutedims`, broadcasting and `sum`/`maximum` work
+on fragments without leaving the registers. Every size, shape and axis
 argument is a plain constant, never a `Val`.
 
 ```jldoctest

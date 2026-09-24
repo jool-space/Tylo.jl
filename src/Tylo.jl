@@ -6,7 +6,7 @@ using BFloat16s: BFloat16
 # fragments, memory tiles, atoms with their operands and verbs, and the
 # per-hardware copy, MMA and completion operations.
 export Layouts, Layout, @Layout, Ownership, coordinate, compose, window,
-       Fragment, relayout, GlobalTile, SharedTile, TmemTile, load_fragment, store!,
+       Fragment, relayout, GlobalTile, SharedTile, TmemTile, tile, bound, load_fragment, store!,
        Atom, OperandA, OperandB, Accumulator, ScaleA, ScaleB, operand_layout,
        MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, mma, pack_operand_a,
        CopyAtom, CopyPlan, copy_async!, commit_copies, wait_copies,
@@ -28,7 +28,7 @@ end
 include("tuples.jl")
 include("elements.jl")
 include("layouts/layouts.jl")
-import .Layouts: Layout, @Layout, Ownership, coordinate, compose, window
+import .Layouts: Layout, @Layout, Ownership, coordinate, compose, window, tile
 include("fragments.jl")
 include("tmem.jl")
 include("memory.jl")
