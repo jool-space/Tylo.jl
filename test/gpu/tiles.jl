@@ -3,8 +3,8 @@ using Tylo.Layouts: @Layout, Layout, static
 
 # One thread's 8×8 chunk of a K × 8 matrix, its per-column statistics, and the
 # statistics as one row of a warp-wide matrix.
-const CHUNK = Ownership((8,8),@Layout((1,64),(0,1)))
-const STATS = Ownership((1,8),@Layout((1,8),(0,1)))
+const CHUNK = Ownership((8,8))
+const STATS = Ownership((1,8))
 const WARP = Ownership((32,8),@Layout((32,8),(1,32)))
 
 # Column maxima of the first `batch` columns (absent columns read as zero)
@@ -12,16 +12,16 @@ const WARP = Ownership((32,8),@Layout((32,8),(1,32)))
 function chunks_kernel!(maxima,y,x,batch)
     lane = Int32(threadIdx().x)-Int32(1)
     kmax = size(x,1) % Int32
-    input = @inbounds bound(GlobalTile(pointer(x),Layout((kmax,static(8)),(static(1),kmax)),16),(nothing,batch))
-    output = @inbounds bound(GlobalTile(pointer(y),Layout((kmax,static(8)),(static(1),kmax)),8),(nothing,batch))
-    m = Fragment(ntuple(_ -> 0f0,Val(8)),STATS)
+    input = @inbounds bound(GlobalTile(x,16),(nothing,batch))
+    output = @inbounds bound(GlobalTile(y,8),(nothing,batch))
+    m = zeros(Float32,STATS)
     for chunk in lane:Int32(32):kmax÷Int32(8)-Int32(1)
-        v = Float32.(load_fragment(CHUNK,tile(input,(8,8),(chunk,Int32(0))),Int32(0)))
+        v = Float32.(load_fragment(CHUNK,tile(input,(8,8),(chunk,0))))
         m = maximum(abs,v;dims=1,init=m)
-        store!(tile(output,(8,8),(chunk,Int32(0))),Fragment{Float8_E4M3FN}(v),Int32(0))
+        store!(tile(output,(8,8),(chunk,0)),Fragment{Float8_E4M3FN}(v))
     end
     # Every lane holds the reduced row; one of them writes it.
-    store!(GlobalTile(pointer(maxima),@Layout((1,8),(1,1))),maximum(Fragment(m,WARP);dims=1),lane)
+    store!(GlobalTile(maxima),maximum(Fragment(m,WARP);dims=1),lane)
     nothing
 end
 

@@ -22,12 +22,18 @@ Every distribution is an `Ownership((rows, cols), mapping)`: a layout from
 there. Instruction operands, reduction results, windows and transposes are
 all ownerships of this one type, and the constructor stores the mapping in a
 canonical form, so two ownerships that distribute a tile alike have the same
-type. Two common cases, one row per lane and one row interleaved across a warp:
+type. Common cases:
 
 ```julia
+Ownership((8,8))                             # one thread holds the whole tile
+Ownership((1,8); threads=32)                 # every lane holds all of it
 Ownership((32,n), @Layout((32,n),(1,32)))    # lane t holds row t, n values
 Ownership((1,32n), @Layout((32,n),(1,32)))   # the 32 lanes interleave along one row
 ```
+
+`fill(x, ownership)` and `zeros(T, ownership)` make fragments, and a tile one
+thread holds loads and stores without a thread index:
+`load_fragment(Ownership((8,8)), tile)`.
 
 Here each lane instead owns a 2×2 patch:
 
@@ -216,11 +222,11 @@ operation per value, and `sum(abs2, x; dims=1, init=s)` one fused
 multiply-add:
 
 ```julia
-chunk = Ownership((8,8), @Layout((1,64),(0,1)))   # one thread's 8 k × 8 columns
-stats = Ownership((1,8), @Layout((1,8),(0,1)))    # its per-column values
-s = m = Fragment(ntuple(_ -> 0f0, 8), stats)
+chunk = Ownership((8,8))              # one thread's 8 k × 8 columns
+stats = Ownership((1,8))              # its per-column values
+s = m = zeros(Float32, stats)
 for k in lane:32:chunks-1
-    x = Float32.(load_fragment(chunk, tile(input, (8,8), (k,0)), 0))
+    x = Float32.(load_fragment(chunk, tile(input, (8,8), (k,0))))
     s = sum(abs2, x; dims=1, init=s)
     m = maximum(abs, x; dims=1, init=m)
 end
@@ -238,7 +244,7 @@ reduces them locally:
 warp = Ownership((32,8), @Layout((32,8),(1,32)))
 store!(tile(partials, (1,8), (warp_index,0)), maximum(Fragment(m, warp); dims=1), lane)
 # barrier
-largest = maximum(load_fragment(Ownership((8,8), @Layout((1,64),(0,1))), partials, 0); dims=1)
+largest = maximum(load_fragment(Ownership((8,8)), partials); dims=1)
 ```
 
 `relayout(to, f, thread)` moves values into another ownership when every

@@ -36,9 +36,9 @@ the bounds shifted to their origin, so a loop over sub-tiles checks each
 against the same logical edge:
 
 ```julia
-input = bound(GlobalTile(pointer(x), Layout((kmax, static(8)), (static(1), kmax)), 16), (nothing, batch))
+input = bound(GlobalTile(x, 16), (nothing, batch))   # the array as a K × batch tile
 for k in lane:32:chunks-1
-    x = load_fragment(chunk, tile(input, (8,8), (k,0)), 0)   # absent columns read as zero
+    v = load_fragment(Ownership((8,8)), tile(input, (8,8), (k,0)))   # absent columns read as zero
 end
 ```
 
@@ -48,6 +48,11 @@ modes, so the tile index runs over the outer ones without carries: for a K
 order such as `(8,4,2,K÷64):(1,16,8,64)` the 8×8 tile `k` starts at
 `16(k%4) + 8((k÷4)%2) + 64(k÷8)`, computed with masks and shifts. The tile's
 declared alignment narrows to what its static outer strides keep.
+
+`GlobalTile(A, align)` and `SharedTile(A, align)` take a device array as the
+column-major matrix it is, with `Int32` extents; `SharedTile(T, pointer,
+layout, align)` types a byte pointer, such as a workspace, at construction;
+`permutedims(tile)` reads the same memory transposed, bounds included.
 
 ## Copy completion and buffer reuse
 

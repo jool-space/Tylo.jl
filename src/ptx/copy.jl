@@ -239,6 +239,14 @@ end
         Fragment(($(loads...),),ownership)
     end
 end
+# An ownership held by one thread needs no thread index: it is zero.
+@generated function _only_thread(::O) where O
+    o = _static_instance(O)
+    o !== nothing && _thread_count(o) == 1 ? :(Int32(0)) :
+        :(throw(ArgumentError("several threads hold this ownership; pass the thread index")))
+end
+Base.@propagate_inbounds load_fragment(o::Layouts.Ownership,tile::MemoryTile) = load_fragment(o,tile,_only_thread(o))
+Base.@propagate_inbounds store!(tile::MemoryTile,f::Fragment) = store!(tile,f,_only_thread(Layouts.layout(f)))
 @generated function store!(tile::MemoryTile{T,AS,ML,A,B},f::Fragment{T,N,L},thread::Integer) where {T,AS,ML,A,B,N,L}
     o = _static_instance(L)
     bounded = B !== Nothing

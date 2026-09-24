@@ -89,6 +89,14 @@ end
 @inline _with_ownership(f::Fragment{T,N,L,D},o) where {T,N,L,D} = Fragment{T,N,typeof(o),D}(getfield(f,:storage),o)
 
 """
+    fill(x, ownership)
+    zeros(T, ownership)
+
+A fragment holding `x` (or `zero(T)`) in every slot of `ownership`.
+"""
+Base.@constprop :aggressive @inline Base.fill(x,o::Layouts.Ownership) = Fragment(ntuple(_ -> x,Val(_register_count(o))),o)
+Base.@constprop :aggressive @inline Base.zeros(::Type{T},o::Layouts.Ownership) where T = fill(zero(T),o)
+"""
     Fragment(fragment, ownership)
 
 The same values, slot for slot, under another ownership with as many slots:

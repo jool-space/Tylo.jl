@@ -17,7 +17,14 @@ struct OperandA <: OperandRole end
 struct OperandB <: OperandRole end
 "The m×n accumulator of a matrix multiply."
 struct Accumulator <: OperandRole end
+"""
+    threads(atom_or_plan_or_ownership)
+
+The number of threads that issue an atom or a tiled plan together, or among
+which an ownership distributes its tile.
+"""
 threads(a::Atom) = 32
+threads(o::Layouts.Ownership) = _thread_count(o)
 
 """
     MMAAtom{(m,n,k),TA,TB,TC}()

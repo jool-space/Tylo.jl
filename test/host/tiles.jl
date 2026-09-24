@@ -97,3 +97,42 @@ end
     @test Tylo.replica_mask(Ownership((1,8),@Layout((32,8),(0,1)))) == 31
     @test Tylo.replica_mask(stats) == 0
 end
+
+@testset "Named ownerships and filled fragments" begin
+    one = Ownership((8,8))
+    @test one == Ownership((8,8),@Layout((1,64),(0,1)))
+    @test Tylo.threads(one) == 1
+    @test [Tylo.Layouts.coordinate(one,0,e) for e in (0,1,8,63)] == [(0,0),(1,0),(0,1),(7,7)]
+    replicated = Ownership((1,8);threads=32)
+    @test replicated == Ownership((1,8),@Layout((32,8),(0,1)))
+    @test Tylo.threads(replicated) == 32
+    @test all(Tylo.Layouts.coordinate(replicated,t,3) == (0,3) for t in 0:31)
+    @test fill(0x7f,Ownership((1,8))).data == ntuple(_ -> 0x7f,8)
+    @test zeros(Float32,one).data == ntuple(_ -> 0f0,64)
+    @test Tylo._pack_words(fill(0x7f,Ownership((1,8)))) == (0x7f7f7f7f,0x7f7f7f7f)
+end
+
+@testset "Tiles from arrays and pointers" begin
+    # Host arrays stand in for device arrays: the layout is the array's own.
+    A = zeros(Float32,6,5)
+    p = reinterpret(Core.LLVMPtr{Float32,1},UInt64(1024))
+    t = GlobalTile(p,Tylo._column_major(A))
+    @test size(t) == (6,5)
+    @test all(address(t,(r,c)) == 1024 + 4*(r + 6c) for r in 0:5, c in 0:4)
+    @test typeof(size(t.layout)[1]) == Int32
+    @test size(GlobalTile(p,Tylo._column_major(zeros(Float32,7)))) == (7,1)
+    # A byte pointer, such as a workspace, typed at construction.
+    bytes = reinterpret(Core.LLVMPtr{UInt8,1},UInt64(2048))
+    f = GlobalTile(Float32,bytes,@Layout((8,8),(1,8)),16)
+    @test eltype(f) === Float32 && Tylo.alignment(f) == 16 && address(f,(1,1)) == 2048 + 36
+    # Transposing a tile keeps its memory and exchanges its bounds.
+    s = permutedims(bound(t,(Int32(4),nothing)))
+    @test size(s) == (5,6) && s.bounds == (nothing,Int32(4))
+    @test all(address(s,(c,r)) == address(t,(r,c)) for r in 0:5, c in 0:4)
+end
+
+@testset "Thread-free access of one thread's tile" begin
+    # One thread's ownership resolves to thread zero at generation time; several threads must pass one.
+    @test Tylo._only_thread(Ownership((8,8))) === Int32(0)
+    @test_throws ArgumentError Tylo._only_thread(lane_local(4,2))
+end

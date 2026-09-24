@@ -37,6 +37,33 @@ Base.@constprop :aggressive Base.@propagate_inbounds GlobalTile(p::Core.LLVMPtr{
     align::Integer=sizeof(T)) where T = MemoryTile(p,l,Val(Int(align)))
 Base.@constprop :aggressive Base.@propagate_inbounds SharedTile(p::Core.LLVMPtr{T,3},l::Layouts.AbstractLayout,
     align::Integer=sizeof(T)) where T = MemoryTile(p,l,Val(Int(align)))
+"""
+    GlobalTile(A::DenseArray, align=sizeof(eltype(A)))
+    SharedTile(A::DenseArray, align=sizeof(eltype(A)))
+    GlobalTile(T, pointer, layout, align=sizeof(T))
+    SharedTile(T, pointer, layout, align=sizeof(T))
+
+The tile of a device array as the column-major matrix it is (a vector as one
+column), with `Int32` extents; or a tile of `T` at a pointer of any element
+type, such as a workspace's byte pointer.
+"""
+Base.@constprop :aggressive Base.@propagate_inbounds GlobalTile(A::DenseArray,align::Integer=sizeof(eltype(A))) = GlobalTile(pointer(A),_column_major(A),align)
+Base.@constprop :aggressive Base.@propagate_inbounds SharedTile(A::DenseArray,align::Integer=sizeof(eltype(A))) = SharedTile(pointer(A),_column_major(A),align)
+Base.@constprop :aggressive Base.@propagate_inbounds GlobalTile(::Type{T},p::Core.LLVMPtr{<:Any,1},l::Layouts.AbstractLayout,align::Integer=sizeof(T)) where T =
+    GlobalTile(reinterpret(Core.LLVMPtr{T,1},p),l,align)
+Base.@constprop :aggressive Base.@propagate_inbounds SharedTile(::Type{T},p::Core.LLVMPtr{<:Any,3},l::Layouts.AbstractLayout,align::Integer=sizeof(T)) where T =
+    SharedTile(reinterpret(Core.LLVMPtr{T,3},p),l,align)
+"""
+    permutedims(tile)
+
+The same memory as the transposed tile: coordinate `(r, c)` becomes `(c, r)`,
+bounds included.
+"""
+@inline Base.permutedims(t::MemoryTile{T,AS,L,A},perm=(2,1)) where {T,AS,L,A} = perm == (1,2) ? t :
+    @inbounds MemoryTile(t.ptr,permutedims(t.layout,perm),Val(A),t.bounds === nothing ? nothing : reverse(t.bounds))
+# An array's own extents need no validity check.
+@inline _column_major(A::AbstractVector) = (n = length(A) % Int32; @inbounds Layouts.Layout((n,Layouts.static(1)),(Layouts.static(1),n)))
+@inline _column_major(A::AbstractMatrix) = (m = size(A,1) % Int32; @inbounds Layouts.Layout((m,size(A,2) % Int32),(Layouts.static(1),m)))
 Layouts.layout(t::MemoryTile) = t.layout
 Base.size(t::MemoryTile) = size(t.layout)
 Base.eltype(::Type{<:MemoryTile{T}}) where T = T

@@ -99,6 +99,15 @@ Base.@constprop :aggressive @inline function Ownership(s::Tuple{Integer,Integer}
     c = _canonical_mapping(l)
     Ownership{map(Int,s),typeof(c)}(c)
 end
+"""
+    Ownership((rows, cols); threads=1)
+
+The whole tile held by one thread, slot `r + rows*c` holding `(r, c)`; with
+`threads`, every one of that many threads holds all of it, as a value
+replicated across a warp does. Shape and thread count must be constants.
+"""
+Base.@constprop :aggressive @inline Ownership(s::Tuple{Integer,Integer};threads::Integer=1) =
+    Ownership(s,Layout((static(Int(threads)),static(Int(s[1])*Int(s[2]))),(static(0),static(1))))
 Base.size(::Ownership{S}) where S = S
 Base.:(==)(a::Ownership,b::Ownership) = size(a) == size(b) && a.mapping == b.mapping
 
@@ -111,7 +120,8 @@ end
 @inline function Base.permutedims(l::Layout,perm=(2,1))
     _check_permutation(perm)
     length(shape(l)) == 2 || throw(ArgumentError("axis permutation currently requires two modes"))
-    perm == (1,2) ? l : Layout(reverse(shape(l)),reverse(strides(l)))
+    # A permutation of a valid layout is valid.
+    perm == (1,2) ? l : @inbounds Layout(reverse(shape(l)),reverse(strides(l)))
 end
 @inline function Base.permutedims(l::Window{S},perm=(2,1)) where S
     _check_permutation(perm)
