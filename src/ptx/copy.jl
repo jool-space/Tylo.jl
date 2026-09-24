@@ -146,7 +146,11 @@ _vector_type(::Type{T},k) where T = k == 1 ? T : NTuple{k,VecElement{T}}
 _slot_pointer_expr(split::Bool,o,e,tile=:tile,base=:base) = split ?
     :(_slot_address($tile,$base,$(Layouts._slot_coordinate(o,e)))) :
     :(pointer($tile,Layouts._coordinate(ownership,thread,Val($e))))
-_split_addresses(o,ML) = !(ML <: Layouts.Composition) && tile_offsets(o,ML) !== nothing
+# A swizzle does not add, so swizzled tiles address every slot in full.
+_split_addresses(o,ML) = !_swizzled(ML) && tile_offsets(o,ML) !== nothing
+_swizzled(::Type) = false
+_swizzled(::Type{<:Layouts.Composition}) = true
+_swizzled(::Type{Layouts.Window{S,L,O}}) where {S,L,O} = _swizzled(L)
 _prologue(split::Bool,bounded::Bool,tile=:tile,base=:base) = quote
     $(split || bounded ? :(tc = Layouts._thread_coordinate(ownership,thread)) : nothing)
     $(split ? :($base = pointer($tile,tc)) : nothing)
@@ -230,7 +234,24 @@ function _vector_access_exprs(plan,o,split,bounded,B,::Type{T},AS,packed::Bool,o
     end
     statements, [units[i] for i in sort(collect(keys(units)))]
 end
-@generated function load_fragment(::L,tile::MemoryTile{T,AS,ML,A,B},thread::Integer) where {L,T,AS,ML,A,B}
+# The tile has the ownership's shape and the thread is one of its threads,
+# checked unless elided; the generated bodies below then address freely.
+Base.@propagate_inbounds function load_fragment(o::Layouts.Ownership,tile::MemoryTile,thread::Integer)
+    @boundscheck _check_access(o,tile,thread)
+    _load_fragment(o,tile,thread)
+end
+Base.@propagate_inbounds function store!(tile::MemoryTile,f::Fragment,thread::Integer)
+    eltype(f) === eltype(tile) ||
+        throw(ArgumentError("storing $(eltype(f)) values to a $(eltype(tile)) tile; convert with Fragment{$(eltype(tile))}(f)"))
+    @boundscheck _check_access(Layouts.layout(f),tile,thread)
+    _store!(tile,f,thread)
+end
+@inline function _check_access(o,tile,thread)
+    size(tile) == size(o) || throw(DimensionMismatch("the tile must have the ownership's shape"))
+    0 <= thread < threads(o) || throw(BoundsError())
+    nothing
+end
+@generated function _load_fragment(::L,tile::MemoryTile{T,AS,ML,A,B},thread::Integer) where {L,T,AS,ML,A,B}
     o = _static_instance(L)
     o === nothing && return :(throw(ArgumentError("loads require a static ownership")))
     packed = _element_bits(T) < 32
@@ -280,7 +301,7 @@ end
 end
 Base.@propagate_inbounds load_fragment(o::Layouts.Ownership,tile::MemoryTile) = load_fragment(o,tile,_only_thread(o))
 Base.@propagate_inbounds store!(tile::MemoryTile,f::Fragment) = store!(tile,f,_only_thread(Layouts.layout(f)))
-@generated function store!(tile::MemoryTile{T,AS,ML,A,B},f::Fragment{T,N,L},thread::Integer) where {T,AS,ML,A,B,N,L}
+@generated function _store!(tile::MemoryTile{T,AS,ML,A,B},f::Fragment{T,N,L},thread::Integer) where {T,AS,ML,A,B,N,L}
     o = _static_instance(L)
     bounded = B !== Nothing
     o === nothing && return quote

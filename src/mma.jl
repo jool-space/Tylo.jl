@@ -222,16 +222,14 @@ through `ldmatrix` instead, with the same result.
 function load_fragment end
 """
     store!(destination, fragment, thread)
-    store!(plan::TiledMMA, destination, accumulator, thread)
-    store!(plan::TiledMMA, destination, accumulator, origin, thread)
 
-Store a fragment at its ownership's coordinates in a memory tile: scalar
-stores in general, aligned vectors where the ownership and the tile's
-declared alignment allow them, and `stmatrix` for 8- or 16-bit values whose
-ownership decomposes into [`CopyAtom`](@ref) blocks over a shared tile when
-compiling for sm_90 or later. The tiled forms store a tiled accumulator;
-with an `origin` they select an edge tile of a bounded destination and
-convert to its element type, skipping coordinates outside it.
+Store a fragment at its ownership's coordinates in a memory tile of its
+shape and element type: scalar stores in general, aligned vectors where the
+ownership and the tile's declared alignment allow them, and `stmatrix` for
+8- or 16-bit values whose ownership decomposes into [`CopyAtom`](@ref)
+blocks over a shared tile when compiling for sm_90 or later. A replicated
+value is stored once. A bounded destination (see [`bound`](@ref)) skips the
+coordinates outside it; convert first with `Fragment{T}(fragment)`.
 """
 function store! end
 

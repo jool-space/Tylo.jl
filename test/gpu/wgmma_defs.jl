@@ -25,6 +25,6 @@
         c = weights ./ sum(weights;dims=2)
     end
     dst = GlobalTile(pointer(out),@Layout((64, N), (1, 64)))
-    store!(dst,c,tid)
+    @inbounds store!(dst,c,tid)
     nothing
 end

@@ -105,10 +105,11 @@ end
         end
     end
     result = map(x -> Relu ? max(alpha*x,0f0) : alpha*x,acc)
+    # An edge tile stores through the bounds, converted to the output type.
     @inbounds if !value(config.bounds) || (eltype(d)===Float32 && row+bm<=m && col+bn<=n)
-        store!(config.plan,window(d,(row,col),(bm,bn)),result,tid)
+        store!(window(d,(row,col),(bm,bn)),result,tid)
     else
-        store!(config.plan,d,result,(row,col),tid)
+        store!(tile(bound(d,size(d)),(bm,bn),(row ÷ Int32(bm),col ÷ Int32(bn))),Fragment{eltype(d)}(result),tid)
     end
     nothing
 end

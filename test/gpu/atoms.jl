@@ -12,9 +12,9 @@ function atom_oracle_kernel!(out,a_data,b_data,atom)
     a=GlobalTile(pointer(a_data),@Layout((m,k),(1,m)))
     b=GlobalTile(pointer(b_data),@Layout((k,n),(1,k)))
     c=GlobalTile(pointer(out),@Layout((m,n),(1,m)))
-    fa=load_fragment(operand_layout(atom,OperandA()),a,lane)
-    fb=load_fragment(operand_layout(atom,OperandB()),b,lane)
-    store!(c,mma(atom,fa,fb,zero_accumulator(atom)),lane)
+    fa=@inbounds load_fragment(operand_layout(atom,OperandA()),a,lane)
+    fb=@inbounds load_fragment(operand_layout(atom,OperandB()),b,lane)
+    @inbounds store!(c,mma(atom,fa,fb,zero_accumulator(atom)),lane)
     nothing
 end
 
@@ -44,8 +44,8 @@ function atom_copy_kernel!(raw_a,raw_b,words_a,words_b,a_data,b_data,atom,config
     sb=SharedTile(reinterpret(Core.LLVMPtr{TB,3},pointer(smem)+bytes_a),config.sb)
     a=GlobalTile(pointer(a_data),@Layout((m,k),(1,m)))
     b=GlobalTile(pointer(b_data),@Layout((k,n),(1,k)))
-    ga=load_fragment(operand_layout(atom,OperandA()),a,lane)
-    gb=load_fragment(operand_layout(atom,OperandB()),b,lane)
+    ga=@inbounds load_fragment(operand_layout(atom,OperandA()),a,lane)
+    gb=@inbounds load_fragment(operand_layout(atom,OperandB()),b,lane)
     @inbounds store!(sa,ga,lane)
     @inbounds store!(sb,gb,lane)
     sync_threads()

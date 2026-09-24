@@ -10,8 +10,8 @@ function vector_kernel!(out,inp,ownership,::Val{A}) where A
     # The launch guarantees 256-byte pointers and rows of whole 16-byte vectors.
     src = @inbounds GlobalTile(pointer(inp),@Layout((m,n),(n,1)),A)
     dst = @inbounds GlobalTile(pointer(out),@Layout((m,n),(n,1)),A)
-    f = load_fragment(ownership,src,lane)
-    store!(dst,f,lane)
+    f = @inbounds load_fragment(ownership,src,lane)
+    @inbounds store!(dst,f,lane)
     nothing
 end
 

@@ -23,6 +23,17 @@ end
 # A 19×23 source with a runtime leading dimension `ld`: contiguous along
 # `axis` with a static unit stride (cp.async vectors, as wide as `ld`
 # allows, cut where the bound falls), or every `step`-th element (scalars).
+# The destination is a window of a swizzled tile: vectors still derive.
+@testset "Copies into a swizzled window assembly" begin
+    parent=@Layout((64, 32), (1, 64))
+    dst=Tylo.Layouts.window(compose(Swizzle{3,3,3}(),parent),(Int32(8),Int32(3)),(16,16))
+    src=@Layout(($(Int32(19)),$(Int32(23))),(1,$(Int32(32))))
+    tt=Tuple{CuDeviceVector{BFloat16,1},CuDeviceVector{BFloat16,1},typeof(dst),typeof(src),
+             typeof(distribute((16,16),32;vector=8,axis=1)),Tuple{Int32,Int32},Val{2048},Val{16}}
+    body=entry_body(compile_kernel(boundary_copy_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32).ptx)
+    @test count("cp.async.cg.shared.global",body) == 1
+end
+
 function check_boundary_copy(T,axis,step,ld,origin)
     s=(19,23)
     strides=axis==1 ? (step,ld) : (ld,step)

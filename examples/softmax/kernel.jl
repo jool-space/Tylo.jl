@@ -79,7 +79,7 @@ function mma_softmax_kernel!(output,a_data,b_data,mask,config)
     acc=@inbounds mma(config.plan,sa,sb,zero_accumulator(config.plan),tid)
     result=softmax(mask_accumulator(acc,mask,tid))
     dst=GlobalTile(pointer(output),@Layout((m, n), (1, m)))
-    @inbounds store!(config.plan,dst,result,tid)
+    @inbounds store!(dst,result,tid)
     nothing
 end
 end

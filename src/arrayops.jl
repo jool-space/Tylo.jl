@@ -293,3 +293,33 @@ end
         Fragment(($(values...),),$to)
     end
 end
+
+"""
+    coordinates(ownership, thread)
+    coordinates(fragment, thread)
+
+The zero-based logical coordinate `(row, col)` of each of `thread`'s values,
+as a fragment of the same ownership. Positions are then data for ordinary
+broadcasting: a causal mask is
+
+```julia
+c = coordinates(scores, thread)
+masked = ifelse.((p -> p[2] <= p[1]).(c), scores, -Inf32)
+```
+
+Each coordinate is the thread's part, evaluated once, plus a constant.
+"""
+Base.@propagate_inbounds coordinates(f::Fragment,thread::Integer) = coordinates(Layouts.layout(f),thread)
+@generated function coordinates(::O,thread::Integer) where O<:Layouts.Ownership
+    o = _static_instance(O)
+    o === nothing && return :(throw(ArgumentError("coordinates require a static ownership")))
+    values = [:((tc[1] + oftype(tc[1],$(c[1])),tc[2] + oftype(tc[2],$(c[2]))))
+              for c in (Layouts._slot_coordinate(o,e) for e in 0:_register_count(o)-1)]
+    quote
+        Base.@inline
+        @boundscheck 0 <= thread < $(_thread_count(o)) || throw(BoundsError())
+        tc = Layouts._thread_coordinate($o,thread)
+        Fragment(($(values...),),$o)
+    end
+end
+Base.size(f::Fragment) = size(Layouts.layout(f))

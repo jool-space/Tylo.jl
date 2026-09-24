@@ -16,16 +16,16 @@ function scaled_atom_kernel!(out,a_data,b_data,sa_data,sb_data,atom,::Val{NB}) w
     acc=zero_accumulator(atom)
     # The launch supplies NB complete blocks; block offsets are in bounds by construction.
     @inbounds for word in Int32(0):Int32(NB÷4-1)
-        fsa=load_fragment(operand_layout(atom,ScaleA()),window(sa,(Int32(0),4word),(m,4)),lane)
-        fsb=load_fragment(operand_layout(atom,ScaleB()),window(sb,(4word,Int32(0)),(4,n)),lane)
+        fsa=@inbounds load_fragment(operand_layout(atom,ScaleA()),window(sa,(Int32(0),4word),(m,4)),lane)
+        fsb=@inbounds load_fragment(operand_layout(atom,ScaleB()),window(sb,(4word,Int32(0)),(4,n)),lane)
         for block in Int32(0):Int32(3)
             s=4word+block
-            fa=load_fragment(operand_layout(atom,OperandA()),window(a,(Int32(0),Int32(k)*s),(m,k)),lane)
-            fb=load_fragment(operand_layout(atom,OperandB()),window(b,(Int32(k)*s,Int32(0)),(k,n)),lane)
+            fa=@inbounds load_fragment(operand_layout(atom,OperandA()),window(a,(Int32(0),Int32(k)*s),(m,k)),lane)
+            fb=@inbounds load_fragment(operand_layout(atom,OperandB()),window(b,(Int32(k)*s,Int32(0)),(k,n)),lane)
             acc=mma(atom,fa,fb,acc,fsa,fsb,block)
         end
     end
-    store!(c,acc,lane)
+    @inbounds store!(c,acc,lane)
     nothing
 end
 scaled_name(atom) = join((string(eltype(atom,OperandA())),string(eltype(atom,OperandB()))),'-')

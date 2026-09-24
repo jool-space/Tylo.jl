@@ -21,8 +21,9 @@ function chunks_kernel!(maxima,y,x,batch)
         m = maximum(abs,v;dims=1,init=m)
         store!(tile(output,(8,8),(chunk,0)),Fragment{Float8_E4M3FN}(v))
     end
-    # Every lane holds the reduced row; one of them writes it.
-    store!(GlobalTile(maxima),maximum(Fragment(m,WARP);dims=1),lane)
+    # Every lane holds the reduced row; one of them writes it. The launch
+    # is one warp and `maxima` is 1×8.
+    @inbounds store!(GlobalTile(maxima),maximum(Fragment(m,WARP);dims=1),lane)
     nothing
 end
 

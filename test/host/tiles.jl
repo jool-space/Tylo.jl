@@ -149,4 +149,6 @@ end
     @test tile(b,(16,8),(Int32(2),Int32(1))).bounds == (Int32(5),nothing)
     @test_throws BoundsError tile(b,(16,8),(Int32(0),Int32(3)))           # unbounded columns
     @test_throws BoundsError window(b,(Int32(-8),Int32(0)),(16,8))
+    # Static extents, as `size` gives them, bound too.
+    @test bound(t,size(t)).bounds == (Int32(40),24)
 end

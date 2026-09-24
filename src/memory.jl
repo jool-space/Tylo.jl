@@ -106,7 +106,11 @@ Sub-tiles from `window` and `tile` inherit the bounds, shifted to their
 origin.
 """
 @inline bound(t::MemoryTile{T,AS,L,A},extents::Tuple{Any,Any}) where {T,AS,L,A} =
-    @inbounds MemoryTile(t.ptr,t.layout,Val(A),extents)
+    @inbounds MemoryTile(t.ptr,t.layout,Val(A),map(_extent,extents))
+# Static extents, as `size` gives them for static modes, bound as integers.
+@inline _extent(::Nothing) = nothing
+@inline _extent(n::Integer) = n
+@inline _extent(n::Layouts.StaticInt) = Int(n)
 
 """
     tile(t, shape, index)

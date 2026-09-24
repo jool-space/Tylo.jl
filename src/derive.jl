@@ -422,7 +422,14 @@ end
 _type_leaves(s::Type,d::Type) = s <: Tuple ? reduce(vcat,[_type_leaves(x,y) for (x,y) in zip(s.parameters,d.parameters)];init=Tuple{Any,Any}[]) : Tuple{Any,Any}[(s,d)]
 _flat(::Type{Layouts.Layout{S,D}}) where {S,D} = !any(p -> p <: Tuple,S.parameters)
 _flat(::Type) = false
-_local_leaves(::Type{Layouts.Window{W,L,O}},shape) where {W,L,O} = _flat(L) ? _local_leaves(L,shape) : nothing
+# A window of a flat layout offsets linearly from its origin. A swizzle
+# permutes aligned chunks and keeps the elements inside each, so under a
+# declared alignment no larger than its chunk the unswizzled offsets decide
+# which slots form vectors, windowed or not.
+_local_leaves(::Type{Layouts.Window{W,L,O}},shape) where {W,L,O} = _window_leaves(L,shape)
+_window_leaves(::Type{L},shape) where L<:Layouts.Layout = _flat(L) ? _local_leaves(L,shape) : nothing
+_window_leaves(::Type{Layouts.Composition{F,L}},shape) where {F<:Layouts.Swizzle,L} = _window_leaves(L,shape)
+_window_leaves(::Type,shape) = nothing
 _local_leaves(::Type{Layouts.Composition{F,L}},shape) where {F<:Layouts.Swizzle,L} = _local_leaves(L,shape)
 _local_leaves(::Type,shape) = nothing
 # The offset of a coordinate: a static part and the multiplicity of each runtime stride.

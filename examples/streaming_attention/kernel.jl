@@ -196,10 +196,11 @@ function attention_kernel!(output,qb,kb,vb,mask,m::Int32,n::Int32,config,::Val{C
     g==Int32(0) && ptx"bar.arrive"(Int32(2),Int32(256))
     dst=@inbounds GlobalTile(_head_pointer(output,head),@Layout(($m, 64), (64, 1)),16)
     result=softmax_normalize(out,state)
+    # The last tile of a sequence stores through the bounds.
     @inbounds if row+Int32(64)<=m
-        store!(config.output,window(dst,(row,Int32(0)),(64,64)),result,wtid)
+        store!(window(dst,(row,Int32(0)),(64,64)),result,wtid)
     else
-        store!(config.output,dst,result,(row,Int32(0)),wtid)
+        store!(window(bound(dst,size(dst)),(row,Int32(0)),(64,64)),result,wtid)
     end
     nothing
 end

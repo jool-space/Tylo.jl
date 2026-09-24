@@ -14,7 +14,7 @@ function wgmma_fragment_kernel!(out,input,::Val{N},::Val{A}) where {N,A}
     weights = exp.(f .- maximum(f;dims=A))
     result = weights ./ sum(weights;dims=A)
     result = A == 2 ? result : permutedims(result)
-    store!(GlobalTile(pointer(out),@Layout((64,N),(1,64))),result,thread)
+    @inbounds store!(GlobalTile(pointer(out),@Layout((64,N),(1,64))),result,thread)
     nothing
 end
 @testset "WGMMA values use ordinary fragment operations" begin

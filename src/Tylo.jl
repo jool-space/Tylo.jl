@@ -6,7 +6,7 @@ using BFloat16s: BFloat16
 # fragments, memory tiles, atoms with their operands and verbs, and the
 # per-hardware copy, MMA and completion operations.
 export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, window,
-       Fragment, relayout, GlobalTile, SharedTile, TmemTile, tile, bound, load_fragment, store!,
+       Fragment, coordinates, relayout, GlobalTile, SharedTile, TmemTile, tile, bound, load_fragment, store!,
        Atom, OperandA, OperandB, Accumulator, ScaleA, ScaleB, operand_layout,
        MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, mma, pack_operand_a,
        CopyAtom, copy_async!, commit_copies, wait_copies,
