@@ -6,6 +6,8 @@ using Tylo.Layouts: @Layout
 # Tylo's canonical TMA storage. The reference kernel passes the raw descriptor
 # pointer; the plan carries no runtime state, so binding it here costs nothing.
 const FAB_TMA_PLAN = Tylo.TMATile(BFloat16,(128,64),2)
+# A warp's half of an output band in registers: lane t holds row t, 64 columns.
+const FAB_ROWS = Tylo.distribute((32,64),32;vector=64,axis=2)
 @inline function fab_load_tile(dst_ptr, byteoff::Int, tma, row::UInt32, mbar)
     binding = Tylo.TMABinding(FAB_TMA_PLAN,tma)
     for stripe in 0:1
@@ -27,10 +29,9 @@ end
         Tylo.fence_after_thread_sync()
         output = Tylo.TmemTile(Float32,o_addr,@Layout((32,128),(1,128)))
         for half in 0:1
-            chunk = @inbounds Tylo.partition(Tylo.TmemTransfer((32,64),2),
-                Tylo.window(output,(UInt32(0),UInt32(64half)),(32,64)))
-            values = Tylo.wait_load(Tylo.load_async(chunk))
-            Tylo.store_async!(chunk,values .* alpha)
+            chunk = @inbounds Tylo.window(output,(UInt32(0),UInt32(64half)),(32,64))
+            values = Tylo.wait_load(@inbounds Tylo.load_async(FAB_ROWS,chunk))
+            @inbounds Tylo.store_async!(chunk,values .* alpha)
         end
         Tylo.wait_stores()
         Tylo.fence_before_thread_sync()
@@ -50,9 +51,8 @@ end
     output = Tylo.TmemTile(Float32,o_addr,@Layout((32,128),(1,128)))
 
     for half in 0:1
-        chunk = @inbounds Tylo.partition(Tylo.TmemTransfer((32,64),2),
-                Tylo.window(output,(UInt32(0),UInt32(64half)),(32,64)))
-        values = Tylo.wait_load(Tylo.load_async(chunk))
+        chunk = @inbounds Tylo.window(output,(UInt32(0),UInt32(64half)),(32,64))
+        values = Tylo.wait_load(@inbounds Tylo.load_async(FAB_ROWS,chunk))
         if STAGE == 1 && half == 1
             # Release immediately after the final TMEM read; the next item's
             # work can overlap this item's register arithmetic/global stores.

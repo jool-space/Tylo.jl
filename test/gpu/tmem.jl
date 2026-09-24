@@ -14,21 +14,21 @@ function tmem_roundtrip_kernel!(out,input,::Val{P}) where P
     base = @inbounds slot[1]
     band = @inbounds window(TmemTile(Float32,base,@Layout((128,128),(1,128))),(UInt32(32)*warp,UInt32(0)),(32,128))
     band = P ? permutedims(band) : band
-    plan = P ? TmemTransfer((64,32),1) : TmemTransfer((32,64),2)
+    plan = P ? transfer((64,32),1) : transfer((32,64),2)
     shape = P ? (64,32) : (32,64)
     axis = P ? 1 : 2
     PTX.Utils.@unroll for half in 0:1
-        values = Fragment(ntuple(i -> @inbounds(input[Int(tid)*128+64half+i]),Val(64)),Tylo.Layouts.layout(plan))
-        @inbounds store_async!(partition(plan,window(band,P ? (64half,0) : (0,64half),shape)),values)
+        values = Fragment(ntuple(i -> @inbounds(input[Int(tid)*128+64half+i]),Val(64)),plan)
+        @inbounds store_async!(window(band,P ? (64half,0) : (0,64half),shape),values)
     end
     wait_stores()
     PTX.Utils.@unroll for half in 0:1
-        values = @inbounds wait_load(load_async(partition(plan,window(band,P ? (64half,0) : (0,64half),shape))))
+        values = @inbounds wait_load(load_async(plan,window(band,P ? (64half,0) : (0,64half),shape)))
         packed = Fragment{BFloat16}(values .* 0.25f0)
-        bf = @inbounds partition(plan,window(reinterpret_tile(BFloat16,band;dims=axis),P ? (64half,0) : (0,64half),shape))
-        store_async!(bf,packed)
+        bf = @inbounds window(reinterpret_tile(BFloat16,band;dims=axis),P ? (64half,0) : (0,64half),shape)
+        @inbounds store_async!(bf,packed)
         wait_stores()
-        words = ptx"tcgen05.ld.sync.aligned.32x32b.x32.b32"(bf.address)
+        words = ptx"tcgen05.ld.sync.aligned.32x32b.x32.b32"(@inbounds(Tylo.tmem_location(bf,(0,0))).address)
         ptx"tcgen05.wait::ld.sync.aligned"()
         store!(pointer(out)+Int(tid)*256+128half,Tylo._from_words(BFloat16,words,lane_local(2length(words),2)))
     end

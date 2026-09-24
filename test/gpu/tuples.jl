@@ -30,7 +30,7 @@ end
 
 @testset "Static range tuple code generation" begin
     for (ownership,n) in ((operand_layout(MMAAtom((16,8,16),BFloat16),Accumulator()),4),
-                           (Tylo.Layouts.layout(Tylo.TmemTransfer((32,64),2)),64))
+                           (transfer((32,64),2),64))
         codes = map((:literal,:rtuple)) do mode
             tt = Tuple{CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},typeof(ownership),Val{n},Val{mode}}
             code = compile_kernel(rtuple_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
@@ -47,7 +47,7 @@ end
 if runtime_supported(@__FILE__)
 @testset "Static range tuple coordinates on device" begin
     for (ownership,n) in ((operand_layout(MMAAtom((16,8,16),BFloat16),Accumulator()),4),
-                           (Tylo.Layouts.layout(Tylo.TmemTransfer((32,64),2)),64))
+                           (transfer((32,64),2),64))
         input = CuArray(collect(Float32,1:32n))
         output = similar(input)
         expected = Float32[]

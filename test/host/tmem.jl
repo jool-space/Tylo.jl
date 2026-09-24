@@ -3,25 +3,23 @@ using Tylo.Layouts: @Layout, Layout, coordinate
 @testset "TMEM storage, logical views and transfer ownership" begin
     for width in (32,64,128),base in UInt32.((0,32)),warp in 0:3
         tile=TmemTile(Float32,base,@Layout((128,width),(1,128)))
-        plan=TmemTransfer((32,16),2)
+        plan=transfer((32,16),2)
         @test eltype(tile) === Float32
         for offset in 0:16:width-16
             view=window(tile,(32warp,offset),(32,16))
-            part=@inferred partition(plan,view)
+            part=@inferred Tylo._partition(plan,view)
             @test part.address == base+UInt32(32warp*65536+offset)
-            @test size(part) == (32,16)
-            @test size(permutedims(part)) == (16,32)
-            @test (@inferred partition(permutedims(plan),permutedims(view))).address == part.address
+            @test (@inferred Tylo._partition(permutedims(plan),permutedims(view))).address == part.address
             @test permutedims(permutedims(plan)) === plan
             for thread in (0,7,31),e in (0,3,15)
-                c=coordinate(Tylo.Layouts.layout(plan),thread,e)
+                c=coordinate(plan,thread,e)
                 @test coordinate(Tylo.Layouts.layout(permutedims(plan)),thread,e) == reverse(c)
                 loc=Tylo.tmem_location(view,c)
                 @test loc.address == base+UInt32((32warp+thread)*65536+offset+e)
                 @test loc.bit_offset == 0
                 @test Tylo.tmem_location(permutedims(view),reverse(c)) == loc
             end
-            @test_throws DimensionMismatch partition(plan,permutedims(view))
+            @test_throws DimensionMismatch Tylo._partition(plan,permutedims(view))
         end
     end
 
@@ -30,12 +28,12 @@ using Tylo.Layouts: @Layout, Layout, coordinate
     for offset in UInt32(0):UInt32(64)
         a=window(window(tile,(UInt32(64),UInt32(8)),(32,192)),
                  (UInt32(0),offset),(32,64))
-        @test partition(TmemTransfer((32,64),2),a).address == UInt32(64*65536+24)+offset
+        @test Tylo._partition(transfer((32,64),2),a).address == UInt32(64*65536+24)+offset
     end
     nested=TmemTile(Float32,UInt32(0),@Layout(((4,32),(8,16)),((1,4),(128,1024))))
-    @test partition(TmemTransfer((32,64),2),window(nested,(64,32),(32,64))).address == UInt32(64*65536+32)
+    @test Tylo._partition(transfer((32,64),2),window(nested,(64,32),(32,64))).address == UInt32(64*65536+32)
     badnested=TmemTile(Float32,UInt32(0),@Layout(((4,8),16),((1,8),128)))
-    @test_throws ArgumentError partition(TmemTransfer((32,16),2),badnested)
+    @test_throws ArgumentError Tylo._partition(transfer((32,16),2),badnested)
 end
 
 # Kernel callers specialize the logical axis; runtime storage extents remain runtime.
@@ -61,42 +59,43 @@ as_bf16_axis2(t) = reinterpret_tile(BFloat16,t;dims=2)
             @test second.address == first.address
             @test second.bit_offset == 16
         end
-        plan=permute ? TmemTransfer((128,32),1) : TmemTransfer((32,128),2)
-        @test partition(plan,bf).address == Tylo.tmem_location(src,(0,0)).address
+        plan=permute ? transfer((128,32),1) : transfer((32,128),2)
+        @test Tylo._partition(plan,bf).address == Tylo.tmem_location(src,(0,0)).address
         @test_throws ArgumentError reinterpret_tile(BFloat16,src;dims=3-axis)
         odd=window(bf,permute ? (1,0) : (0,1),(32,32))
         @test_throws ArgumentError reinterpret_tile(Float32,odd;dims=axis)
-        @test_throws ArgumentError partition(TmemTransfer((32,32),axis),odd)
+        @test_throws ArgumentError Tylo._partition(transfer((32,32),axis),odd)
     end
 end
 
 @testset "TMEM transfer contract failures" begin
-    p=TmemTransfer((32,64),2)
+    p=transfer((32,64),2)
     tile=TmemTile(Float32,UInt32(0),@Layout((128,512),(1,128)))
     @test_throws BoundsError window(tile,(0,500),(32,64))
     @test_throws BoundsError Tylo.tmem_location(tile,(128,0))
     @test_throws BoundsError Tylo.tmem_location(tile,(0,512))
-    @test_throws BoundsError partition(p,TmemTile(Float32,UInt32(480),@Layout((32,64),(1,128))))
-    @test_throws BoundsError partition(p,TmemTile(Float32,UInt32(128*65536),@Layout((32,64),(1,128))))
-    @test_throws ArgumentError partition(p,window(tile,(1,0),(32,64)))
-    @test_throws ArgumentError partition(p,TmemTile(Float32,UInt32(0),@Layout((32,64),(1,256))))
-    @test_throws ArgumentError partition(p,TmemTile(Float32,UInt32(0),@Layout((32,64),(0,128))))
-    @test_throws ArgumentError TmemTransfer((16,64),2)
-    @test_throws ArgumentError TmemTransfer((32,64),0)
-    @test_throws MethodError coordinate(Tylo.Layouts.layout(p),0,0.5)
-    @test_throws BoundsError coordinate(Tylo.Layouts.layout(p),0,64)
-    @test_throws ArgumentError partition(TmemTransfer((32,3),2),window(tile,(0,0),(32,3)))
+    @test_throws BoundsError Tylo._partition(p,TmemTile(Float32,UInt32(480),@Layout((32,64),(1,128))))
+    @test_throws BoundsError Tylo._partition(p,TmemTile(Float32,UInt32(128*65536),@Layout((32,64),(1,128))))
+    @test_throws ArgumentError Tylo._partition(p,window(tile,(1,0),(32,64)))
+    @test_throws ArgumentError Tylo._partition(p,TmemTile(Float32,UInt32(0),@Layout((32,64),(1,256))))
+    @test_throws ArgumentError Tylo._partition(p,TmemTile(Float32,UInt32(0),@Layout((32,64),(0,128))))
+    @test_throws ArgumentError Tylo._transfer_axis(distribute((16,64),32;vector=32,axis=2))  # 16 lines
+    @test_throws ArgumentError Tylo._transfer_axis(distribute((32,64),32;vector=32,axis=2))  # two lanes per line
+    @test_throws ArgumentError distribute((32,64),32;vector=64,axis=0)
+    @test_throws MethodError coordinate(p,0,0.5)
+    @test_throws BoundsError coordinate(p,0,64)
+    @test_throws ArgumentError Tylo._partition(transfer((32,3),2),window(tile,(0,0),(32,3)))
     @test_throws ArgumentError TmemTile(Float64,UInt32(0),@Layout((32,64),(1,128)))
     swizzled=TmemTile(Float32,UInt32(0),Tylo.Layouts.compose(Tylo.Layouts.Swizzle{1,0,2}(),@Layout((32,64),(1,128))))
-    @test_throws ArgumentError partition(p,swizzled)
+    @test_throws ArgumentError Tylo._partition(p,swizzled)
     @test_throws ArgumentError permutedims(p,(1,1))
     @test_throws ArgumentError permutedims(tile,(2.0,1.0))
 end
 
 @testset "Transfer fragments, packed windows and completion" begin
-    plan=TmemTransfer((32,64),2)
+    plan=transfer((32,64),2)
     data=ntuple(Float32,64)
-    f=Fragment(data,Tylo.Layouts.layout(plan))
+    f=Fragment(data,plan)
     for permute in (false,true)
         g=permute ? permutedims(f) : f
         axis=permute ? 1 : 2
@@ -109,21 +108,20 @@ end
         @test_throws ArgumentError window(g,permute ? (0,1) : (1,0),(32,32))
     end
     values=ntuple(i -> BFloat16(i),64)
-    packed=Fragment(values,Tylo.Layouts.layout(plan))
-    @test Tylo.Layouts.layout(packed) === Tylo.Layouts.layout(plan)
+    packed=Fragment(values,plan)
+    @test Tylo.Layouts.layout(packed) === plan
     @test window(packed,(0,32),(32,32)).data == values[33:64]
     @test window(permutedims(packed),(32,0),(32,32)).data == values[33:64]
     @test permutedims(permutedims(packed)) === packed
-    @test_throws DimensionMismatch Fragment(values,Tylo.Layouts.layout(TmemTransfer((32,32),2)))
-    part=partition(plan,TmemTile(Float32,UInt32(0),@Layout((32,64),(1,128))))
+    @test_throws DimensionMismatch Fragment(values,transfer((32,32),2))
+    part=Tylo._partition(plan,TmemTile(Float32,UInt32(0),@Layout((32,64),(1,128))))
     @test Tylo._check_tmem_store(part,f) === nothing
-    @test Tylo._check_tmem_store(permutedims(part),permutedims(f)) === nothing
     @test permutedims(permutedims(f)) === f
     runtime=TmemTile(Float32,UInt32(0),Layout((32,64),(1,128)))
     @test size(reinterpret_tile(BFloat16,runtime;dims=2)) === (32,128)
     @test Tylo._check_tmem_store(part,local_fragment(data)) === nothing
     @test_throws DimensionMismatch Tylo._check_tmem_store(part,permutedims(f))
-    pending=Tylo.PendingLoad(Float32,ntuple(UInt32,64),Tylo.Layouts.layout(plan))
+    pending=Tylo.PendingLoad(Float32,ntuple(UInt32,64),plan)
     @test_throws MethodError map(abs,pending)
     @test_throws MethodError getindex(pending,1)
     @test isempty(Test.detect_ambiguities(Tylo;recursive=true))

@@ -33,7 +33,7 @@ end
         shape = axis == 2 ? (32,n) : (n,32)
         strides = axis == 2 ? (1,128) : (128,1)
         tile = TmemTile(T,UInt32(0),Tylo.Layouts.Layout(shape,strides))
-        part = @inferred partition(TmemTransfer(shape,axis),tile)
+        part = @inferred Tylo._partition(transfer(shape,axis),tile)
         @test eltype(part) === T
         @test size(part) == shape
         @test part.address === UInt32(0)

@@ -109,3 +109,5 @@ end
     :($(Ownership(A == 2 ? (1,32N) : (32N,1),Layout((static(32),static(N)),(static(1),static(32))))))
 Base.@constprop :aggressive @inline lane_local(n,axis) = _lane_local(Val(n),Val(axis))
 Base.@constprop :aggressive @inline striped(n,axis) = _striped(Val(n),Val(axis))
+# The `.32x32b` TMEM transfer ownership: lane t holds line t, values along `axis`.
+Base.@constprop :aggressive @inline transfer(shape,axis) = distribute(shape,32;vector=shape[axis],axis)

@@ -202,7 +202,7 @@ end
             shape = axis == 2 ? (4,32) : (32,4)
             strides = axis == 2 ? (128,1) : (1,128)
             tile = TmemTile(T,UInt32(0),Tylo.Layouts.Layout(shape,strides))
-            access = partition(TmemTransfer(shape,3-axis),tile)
+            access = Tylo._partition(transfer(shape,3-axis),tile)
             @test Tylo._check_tmem_store(access,packed) === nothing
         end
     end

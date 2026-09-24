@@ -21,6 +21,7 @@ struct Fragment{T,N,L,D}
 end
 _register_count(l::Layouts.Ownership) = Int(size(l.mapping)[2])
 Layouts.layout(f::Fragment) = getfield(f,:ownership)
+Layouts.layout(o::Layouts.Ownership) = o
 Base.eltype(::Type{<:Fragment{T}}) where T = T
 Base.eltype(f::Fragment) = eltype(typeof(f))
 

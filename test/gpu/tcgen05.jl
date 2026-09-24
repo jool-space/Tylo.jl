@@ -40,7 +40,7 @@ function tcgen05_gemm_kernel!(out,a_data,b_data,atom,variant::Val)
     end
     barrier_wait(pointer(mbar),UInt32(0))
     fence_after_thread_sync()
-    band = @inbounds partition(TmemTransfer((32,128),2),window(d,(Int32(32)*warp,Int32(0)),(32,128)))
+    band = @inbounds Tylo._partition(transfer((32,128),2),window(d,(Int32(32)*warp,Int32(0)),(32,128)))
     values = wait_load(load_async(band))
     c = GlobalTile(pointer(out),@Layout((128,128),(1,128)))
     @inbounds store!(window(c,(Int32(32)*warp,Int32(0)),(32,128)),values,lane)

@@ -17,7 +17,7 @@ function tmem_correction_kernel!(base::UInt32, alpha::Float32)
     output = @inbounds window(TmemTile(Float32,base,@Layout((128,128),(1,128))),(UInt32(32)*warp,UInt32(0)),(32,128))
     fence_after_thread_sync()
     PTX.Utils.@unroll for half in 0:1
-        chunk = @inbounds partition(TmemTransfer((32,64),2),window(output,(0,64half),(32,64)))
+        chunk = @inbounds Tylo._partition(transfer((32,64),2),window(output,(0,64half),(32,64)))
         values = wait_load(load_async(chunk))
         store_async!(chunk,values .* alpha)
     end
@@ -29,7 +29,7 @@ end
 function tmem_epilogue_kernel!(out, base::UInt32, alpha::Float32)
     tid = UInt32(threadIdx().x)-UInt32(1)
     output = @inbounds window(TmemTile(Float32,base,@Layout((128,64),(1,128))),(UInt32(32)*(tid >> UInt32(5)),UInt32(0)),(32,64))
-    values = @inbounds wait_load(load_async(partition(TmemTransfer((32,64),2),output)))
+    values = @inbounds wait_load(load_async(Tylo._partition(transfer((32,64),2),output)))
     PTX.Utils.@unroll for half in 0:1
         part = window(values,(0,32half),(32,32))
         store!(pointer(out)+Int(tid)*128+64half,Fragment{BFloat16}(part .* alpha))

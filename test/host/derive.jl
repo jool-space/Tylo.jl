@@ -23,7 +23,7 @@ tiled(w,r) = Tylo.Layouts.layout(zero_accumulator(TiledMMA(atom,w,r,16)))
 ownerships = Any[operand_layout(atom,OperandA()),operand_layout(atom,OperandB()),operand_layout(atom,Accumulator()),
     operand_layout(MMAAtom((16,8,32),Float8_E4M3FN),OperandA()),operand_layout(MMAAtom((16,8,8),Float32),OperandB()),
     lane_local(3,2),lane_local(4,1),striped(2,1),striped(5,2),
-    Tylo.Layouts.layout(Tylo.TmemTransfer((32,4),2)),Tylo.Layouts.layout(Tylo.TmemTransfer((8,32),1)),
+    transfer((32,4),2),transfer((8,32),1),
     wgmma_c(8),wgmma_c(24),wgmma_c(64),
     tiled((1,1),(1,2)),tiled((2,2),(2,3)),tiled((1,2),(1,1)),tiled((2,1),(3,1)),
     permutedims(lane_local(3,2)),permutedims(operand_layout(atom,Accumulator())),
@@ -39,7 +39,7 @@ ownerships = Any[operand_layout(atom,OperandA()),operand_layout(atom,OperandB())
     end
     @test Tylo.ownership_table(lane_local(3,2)) == [(t,e) for t in 0:31, e in 0:2]
     @test Tylo.ownership_table(striped(2,1)) == [(t+32e,0) for t in 0:31, e in 0:1]
-    @test Tylo.ownership_table(Tylo.Layouts.layout(Tylo.TmemTransfer((32,4),2))) == [(t,e) for t in 0:31, e in 0:3]
+    @test Tylo.ownership_table(transfer((32,4),2)) == [(t,e) for t in 0:31, e in 0:3]
     @test Tylo.ownership_table(permutedims(lane_local(3,2))) == [(e,t) for t in 0:31, e in 0:2]
     for o in ownerships
         @test mapped_table(o) == Tylo.ownership_table(o)
@@ -60,12 +60,12 @@ end
             Tylo._register_count(a) == Tylo._register_count(b) && Tylo.ownership_table(a) == Tylo.ownership_table(b)
         @test Tylo.same_distribution(a,b) == expected
     end
-    @test Tylo.same_distribution(lane_local(4,2),Tylo.Layouts.layout(Tylo.TmemTransfer((32,4),2)))
+    @test Tylo.same_distribution(lane_local(4,2),transfer((32,4),2))
     @test !Tylo.same_distribution(lane_local(4,2),lane_local(4,1))
     @test Tylo.same_distribution(permutedims(lane_local(4,2)),lane_local(4,1))
     # Canonical forms: one type per distribution.
     @test permutedims(lane_local(4,2)) === lane_local(4,1)
-    @test Tylo.Layouts.layout(Tylo.TmemTransfer((32,4),2)) === lane_local(4,2)
+    @test transfer((32,4),2) === lane_local(4,2)
     @test permutedims(permutedims(operand_layout(atom,Accumulator()))) === operand_layout(atom,Accumulator())
 end
 
@@ -143,16 +143,16 @@ end
     # pack_operand_a pairs (c1,c2),(c3,c4) of the left atom then the right atom.
     @test permutation == [1,2,3,4,5,6,7,8]
     @test Tylo.relayout_permutation(operand_layout(atom,OperandA()),operand_layout(atom,OperandB())) === nothing
-    @test Tylo.relayout_permutation(lane_local(4,2),Tylo.Layouts.layout(Tylo.TmemTransfer((32,4),2))) == [1,2,3,4]
+    @test Tylo.relayout_permutation(lane_local(4,2),transfer((32,4),2)) == [1,2,3,4]
     @test Tylo.relayout_permutation(lane_local(4,2),lane_local(2,2)) === nothing
 
     w = Tylo.window_plan(lane_local(8,2),(0,2),(32,4))
     @test w.slots == [3,4,5,6]
     @test Tylo.same_distribution(w.ownership,lane_local(4,2))
     @test Tylo.window_plan(lane_local(8,2),(1,0),(31,8)) === nothing
-    t = Tylo.window_plan(Tylo.Layouts.layout(Tylo.TmemTransfer((8,32),1)),(2,0),(4,32))
+    t = Tylo.window_plan(transfer((8,32),1),(2,0),(4,32))
     @test t.slots == [3,4,5,6]
-    @test Tylo.same_distribution(t.ownership,Tylo.Layouts.layout(Tylo.TmemTransfer((4,32),1)))
+    @test Tylo.same_distribution(t.ownership,transfer((4,32),1))
     c = Tylo.window_plan(operand_layout(atom,Accumulator()),(8,0),(8,8))
     @test c.slots == [3,4]
     @test Tylo.ownership_table(c.ownership) == [isa_c(t,e) for t in 0:31, e in 0:1]

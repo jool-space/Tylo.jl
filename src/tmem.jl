@@ -77,67 +77,35 @@ function _tmem_affine(l::Layouts.Window)
     origin + sum(map((c,d) -> c*Layouts._constant(c,d),l.origin,ds)),ds
 end
 
-"""
-    TmemTransfer((rows, cols), axis)
-
-A warp-collective TMEM/register transfer using the `.32x32b` instruction,
-over a logical partition of the given shape. Each thread holds values along
-logical `axis`; the other axis has extent 32. Both arguments must be
-constants. `Tylo.Layouts.layout(plan)` is the resulting register ownership;
-`permutedims(plan)` exchanges its logical axes.
-
-Bind it to a storage view with `partition(plan, tile)`. Supported payloads
-are powers of two from 1 through 128 words per thread: FP32 and packed
-BF16/FP16 loads and stores.
-Instruction shape, ownership and storage compatibility are checked explicitly.
-"""
-struct TmemTransfer{S,Axis}
-    @inline function TmemTransfer{S,Axis}() where {S,Axis}
-        S isa Tuple && length(S) == 2 && all(n -> n isa Int && n > 0,S) &&
-            Axis isa Int && Axis in (1,2) && S[3-Axis] == 32 ||
-            throw(ArgumentError("TMEM transfer needs 32 threads along one logical axis"))
-        new{S,Axis}()
-    end
-end
-Base.@constprop :aggressive @inline TmemTransfer(shape::Tuple{Integer,Integer},axis::Integer) =
-    TmemTransfer{map(Int,shape),Int(axis)}()
-Base.size(::TmemTransfer{S}) where S = S
-# Lane t holds the values of logical line t along the other axis.
-function _transfer_ownership(::TmemTransfer{S,A}) where {S,A}
-    L, s = Layouts.Layout, Layouts.static
-    Layouts.Ownership(S,A == 2 ? L((s(32),s(S[2])),(s(1),s(32))) : L((s(32),s(S[1])),(s(S[1]),s(1))))
-end
-@generated Layouts.layout(p::P) where P<:TmemTransfer = :($(_transfer_ownership(P())))
-@inline function Base.permutedims(p::TmemTransfer{S,A},perm=(2,1)) where {S,A}
-    Layouts._check_permutation(perm)
-    perm == (1,2) ? p : TmemTransfer{reverse(S),3-A}()
+# The `.32x32b` transfer: lane `t` of a warp holds line `t` of a tile of 32
+# lines, its values along the other axis. As an ownership that is
+# `distribute((32, n), 32; vector=n, axis=2)`, or its transpose along axis 1;
+# any ownership with the same distribution is accepted.
+@generated function _transfer_axis(::O) where O<:Layouts.Ownership
+    o = _static_instance(O)
+    o === nothing && return :(throw(ArgumentError("TMEM transfers require a static ownership")))
+    m, n = map(Int,size(o))
+    m == 32 && same_distribution(o,Layouts._distribution((32,n),32,n,2)) && return :(Val(2))
+    n == 32 && same_distribution(o,Layouts._distribution((m,32),32,m,1)) && return :(Val(1))
+    :(throw(ArgumentError("a TMEM transfer gives lane t line t of 32 lines: distribute((32, n), 32; vector=n, axis=2) or its transpose")))
 end
 
-struct TmemPartition{T,Words,P}
+# A transfer bound to storage: the band's first word address and the ownership.
+struct TmemPartition{T,Words,O}
     address::UInt32
-    transfer::P
+    ownership::O
 end
 Base.eltype(::Type{<:TmemPartition{T}}) where T = T
 Base.eltype(p::TmemPartition) = eltype(typeof(p))
-Layouts.layout(p::TmemPartition) = Layouts.layout(p.transfer)
-Base.size(p::TmemPartition) = size(p.transfer)
-@inline Base.permutedims(p::TmemPartition{T,W},perm=(2,1)) where {T,W} =
-    TmemPartition{T,W,typeof(permutedims(p.transfer,perm))}(p.address,permutedims(p.transfer,perm))
+Layouts.layout(p::TmemPartition) = p.ownership
+Base.size(p::TmemPartition) = size(p.ownership)
 
-"""
-    partition(transfer::TmemTransfer, tile::TmemTile)
-
-Bind a transfer to a logical storage view with matching shape and ownership.
-Use `window` to select a warp's region before partitioning. The transfer must
-cover one aligned 32-lane hardware band and contiguous storage positions.
-The executing warp must match that band's index within its warpgroup, and
-all 32 threads must use the same partition. Types do not prove participation.
-
-Bounds checks may be omitted with `@inbounds` after establishing the storage
-contract; unsupported instruction widths/layouts are always rejected.
-"""
-Base.@propagate_inbounds function partition(p::TmemTransfer{S,A},t::TmemTile{T}) where {S,A,T}
-    size(t) == S || throw(DimensionMismatch("transfer and TMEM view shapes differ"))
+# The tile must cover one aligned 32-lane hardware band with the ownership's
+# lines on consecutive lanes and its values in consecutive columns, a power
+# of two from 1 to 128 words.
+Base.@propagate_inbounds _partition(o::Layouts.Ownership,t::TmemTile) = _partition(o,t,_transfer_axis(o))
+Base.@propagate_inbounds function _partition(o::Layouts.Ownership{S},t::TmemTile{T},::Val{A}) where {S,T,A}
+    size(t) == S || throw(DimensionMismatch("the TMEM tile must have the ownership's shape"))
     packing = _tmem_packing(T)
     S[A] % packing == 0 || throw(ArgumentError("transfer requires complete TMEM words"))
     words = S[A] ÷ packing
@@ -153,8 +121,30 @@ Base.@propagate_inbounds function partition(p::TmemTransfer{S,A},t::TmemTile{T})
             throw(ArgumentError("TMEM transfer must cover an aligned hardware lane band"))
         column + UInt32(words) <= UInt32(512) || throw(BoundsError(t,S))
     end
-    TmemPartition{T,words,typeof(p)}(loc.address,p)
+    TmemPartition{T,words,typeof(o)}(loc.address,o)
 end
+
+"""
+    load_async(ownership, tile::TmemTile)
+
+Issue a warp-collective `.32x32b` TMEM load of `tile`, whose values the
+warp holds in `ownership`: lane `t` holds line `t` of 32, as
+`distribute((32, n), 32; vector=n, axis=2)` or its transpose. The tile covers
+one aligned 32-lane hardware band, the executing warp's, with its values in
+consecutive columns: 1 to 128 words per lane, FP32 or packed BF16/FP16. All
+32 lanes execute with the same tile. The result is pending: [`wait_load`](@ref)
+returns the fragment.
+"""
+Base.@propagate_inbounds load_async(o::Layouts.Ownership,t::TmemTile) = load_async(_partition(o,t))
+"""
+    store_async!(tile::TmemTile, fragment)
+
+Issue a warp-collective `.32x32b` TMEM store of a fragment in a transfer
+ownership (see [`load_async`](@ref)) to a tile of its shape: FP32 to FP32
+tiles, BF16/FP16 packed two per word. The storage remains in use until
+[`wait_stores`](@ref)`()`.
+"""
+Base.@propagate_inbounds store_async!(t::TmemTile,f::Fragment) = store_async!(_partition(Layouts.layout(f),t),f)
 
 """
     reinterpret_tile(T, tile::TmemTile; dims)
