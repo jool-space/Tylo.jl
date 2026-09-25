@@ -17,7 +17,7 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
        reinterpret_tile, load_async, wait_load, store_async!, wait_stores,
        SoftmaxState, softmax_update, softmax_merge, softmax_normalize,
        Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU,
-       machine_code, @machine_code, audit
+       machine_code, @machine_code, audit, tune
 
 # Inspection, validation and less common operations are public, used qualified.
 @static if VERSION >= v"1.11.0-DEV.469"
@@ -26,7 +26,7 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
         :Tcgen05Operand,:tmem_allocate!,:tmem_deallocate!,:tmem_relinquish_permit,
         :fence_after_thread_sync,:fence_before_thread_sync,:softmax_logsumexp,:convert_element,:threads,
         :MachineCode,:Finding,:registers,:spill_bytes,:local_bytes,:kernel_calls,:wgmma_groups,
-        :memory_instructions,:sass_instructions,:entry_ptx,:trace))
+        :memory_instructions,:sass_instructions,:entry_ptx,:trace,:Tuning,:Trial,:best))
 end
 
 include("tuples.jl")
@@ -48,6 +48,7 @@ include("wgmma.jl")
 include("tcgen05.jl")
 include("derive.jl")
 include("machine.jl")
+include("tune.jl")
 
 # GPU implementations load with PTX.jl. CPU layout/fragment operations have
 # no dependency on a CUDA compiler, device, or instruction implementation.

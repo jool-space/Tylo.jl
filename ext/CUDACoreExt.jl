@@ -106,4 +106,47 @@ function Tylo.machine_code(@nospecialize(f),@nospecialize(types::Type{<:Tuple});
 end
 Tylo._machine_code_call(f,args::Tuple;kwargs...) =
     Tylo.machine_code(f,Tuple{map(a -> Core.Typeof(CUDACore.cudaconvert(a)),args)...};kwargs...)
+
+# The machine code of a kernel compiled by `@cuda launch=false`.
+Tylo.machine_code(k::CUDACore.HostKernel{F,TT}) where {F,TT} = Tylo.machine_code(k.f,TT)
+
+function Tylo.tune(prepare,candidates;samples::Integer=15,audit=true,target::Real=2e-4)
+    trials = Tylo.Trial[]
+    timed = []
+    for c in candidates
+        prepared = try
+            prepare(c)
+        catch err
+            err isa ArgumentError || rethrow()
+            push!(trials,Tylo.Trial(c,:invalid,sprint(showerror,err),NaN,NaN,0))
+            continue
+        end
+        kernel, launch = prepared isa Tuple ? prepared : (nothing,prepared)
+        registers = kernel === nothing ? 0 : CUDACore.registers(kernel)
+        if kernel !== nothing && audit !== false
+            findings = audit === true ? Tylo.audit(Tylo.machine_code(kernel)) : Tylo.audit(Tylo.machine_code(kernel);audit...)
+            if !isempty(findings)
+                push!(trials,Tylo.Trial(c,:audited,join(unique(string.(getfield.(findings,:kind))),", "),NaN,NaN,registers))
+                continue
+            end
+        end
+        launch(); CUDACore.synchronize()
+        once = CUDACore.@elapsed launch()
+        repeats = clamp(ceil(Int,target/max(once,1e-7)),1,1000)
+        push!(timed,(; c, launch, repeats, registers, times=Float64[]))
+    end
+    # Rotating the order each round spreads clock and thermal drift over all.
+    for round in 1:samples, i in 1:length(timed)
+        x = timed[mod1(i+round,length(timed))]
+        t = CUDACore.@elapsed for _ in 1:x.repeats
+            x.launch()
+        end
+        push!(x.times,t/x.repeats)
+    end
+    for x in timed
+        times = sort(x.times)
+        push!(trials,Tylo.Trial(x.c,:timed,"",times[cld(length(times),2)],first(times),x.registers))
+    end
+    Tylo.Tuning(Tylo._ranked(trials))
+end
 end

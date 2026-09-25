@@ -2,7 +2,7 @@
 CurrentModule = Tylo
 ```
 
-# Machine code
+# Machine code and tuning
 
 Tylo's operations promise particular instructions: a vector of the widest
 width the layouts allow, one `ldmatrix` per block group, WGMMA that runs
@@ -79,3 +79,32 @@ report. [`registers`](@ref), [`spill_bytes`](@ref),
 [`wgmma_groups`](@ref) and [`kernel_calls`](@ref) read them; `code.sass`
 and `code.ptx` are there to search. Tylo's own tests audit every kernel
 they compile, and check the instructions each plan promises this way.
+
+## Tuning
+
+Tile sizes, warp layouts and stage counts are types, so every configuration
+of a kernel is its own specialization, compiled on demand. [`tune`](@ref)
+searches them: it builds each candidate, rejects those whose constructors
+refuse them (an `ArgumentError`) or whose machine code fails the audit,
+times the rest on the device, and ranks them. `examples/gemm/tune.jl` tunes
+the tiled GEMM:
+
+```julia
+tuning = tune(candidates) do c
+    config = gemm_config(BFloat16; c...)
+    kernel = @cuda launch=false tiled_gemm_kernel!(args..., config)
+    kernel, () -> kernel(args..., config; threads, blocks, shmem)
+end
+```
+
+```
+Tuning: 48 of 48 candidates timed
+      265.5 μs          124 regs  (block = (64, 128, 32), warps = (2, 2), stages = 2, swizzled = true)
+     266.18 μs    1.0×  128 regs  (block = (128, 64, 32), warps = (2, 2), stages = 2, swizzled = true)
+     ...
+      313.38 μs   1.18×   72 regs  (block = (64, 64, 32), warps = (2, 2), stages = 2, swizzled = true)
+     ...
+```
+
+On a GB10 at 2048³ the fastest of 48 configurations is 18% faster than the
+example's default, `(64, 64, 32)` with 2×2 warps.
