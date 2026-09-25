@@ -72,6 +72,47 @@ sptr(::Type{T},a) where T = reinterpret(Core.LLVMPtr{T,3},UInt64(a))
     end
 end
 
+# MN-major (transposed) B for 16-bit inputs, as attention's V: K runs over
+# rows, N over one or two swizzle rows of elements.
+@testset "WGMMA MN-major B descriptors (PTX ISA canonical layouts)" begin
+    for T in (BFloat16,Float16), W in (32,64,128), stripes in (1,2)
+        row = W ÷ sizeof(T)
+        b = SharedTile(sptr(T,0x800),shared_layout(TMATile(T,(64,stripes*row),2,W)))
+        for k in (16,32,64), n in unique((8,row,stripes*row))
+            n <= 256 || continue
+            p = WGMMAAtom(T,n,k)
+            for kk in 0:16:64-k, cc in 0:row:stripes*row-n
+                o = operand(p,OperandB(),b,(Int32(kk),Int32(cc)))
+                @test typeof(o).parameters[3] === :MN
+                for j in 0:k÷16-1
+                    d = decode_wgmma(Tylo._k_step(o,Val(j)))
+                    @test d.swizzle == W && d.base == 0 && d.reserved == 0
+                    @test reads_tile(d,:MN,b,T,n,16,(kk+16j,cc),1)
+                end
+            end
+        end
+    end
+end
+
+# A in registers (PTX ISA Figure 151, m64nNk16): for each instruction's 16
+# columns, thread t holds a0a1 at row r and columns c, c+1, a2a3 at row r+8,
+# and a4..a7 the same 8 columns further, with r = 16(t÷32) + (t%32)÷4 and
+# c = 2(t%4). It is the accumulator's layout for as many columns, so an FP32
+# result converts to the next product's A in place.
+@testset "WGMMA register A layout (PTX ISA figure)" begin
+    for T in (BFloat16,Float16), k in (16,32,64)
+        o = operand_layout(WGMMAAtom(T,64,k),OperandA())
+        @test o == operand_layout(WGMMAAtom(T,k,16),Accumulator())
+        for t in 0:127, e in 0:k÷2-1
+            j, i = e ÷ 8, e % 8
+            r = 16(t ÷ 32) + (t % 32) ÷ 4 + 8((i ÷ 2) % 2)
+            c = 16j + 2(t % 4) + i % 2 + 8(i ÷ 4)
+            @test Tylo.Layouts.coordinate(o,t,e) == (r,c)
+        end
+    end
+    @test_throws ArgumentError operand_layout(WGMMAAtom(Float8_E4M3FN,64,64),OperandA())
+end
+
 # Shared operands for tcgen05: K-major and MN-major, one row-width group or
 # several side by side, for every input kind.
 function tcgen05_tile(::Type{T},W,role,major,groups,base) where T

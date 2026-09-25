@@ -8,6 +8,11 @@ and `k` covers one, two or four instructions (16, 32 or 64 for 16-bit
 inputs; 32, 64 or 128 for FP8). n=8:8:256. Each instruction updates one of
 `partials` independent accumulators cyclically. Partials must divide the
 instruction count; total registers per thread must not exceed 128.
+Shared operands are K-major, or, for 16-bit inputs, MN-major (transposed
+by the hardware). A 16-bit A may also come from registers: a `Fragment` in
+`operand_layout(atom, OperandA())`, the accumulator's layout for 64×k, so
+an FP32 result converted to BF16 is the next product's A without moving
+values between threads.
 `partials=4` at n=8,k=64 preserves Cohere's four independent K chains.
 Use `finish_mma` to sum partials after waiting. No allocation or CTA barrier.
 The sizes must be constants. The finished accumulator is a `Fragment` in
@@ -54,9 +59,20 @@ function _operand_layout(::WGMMAAtom{T,N},::Accumulator) where {T,N}
                                ((s(128),s(1),s(16)),(s(64),s(8),s(512)))))
 end
 
-# The role and complete plan travel with the descriptor, preventing A/B swaps
-# or reuse with a different instruction shape in the typed issue method.
-struct WGMMAOperand{P,Role}
+# A 16-bit A in registers holds 64×K in the accumulator's layout: for each
+# instruction's 16 columns, the pairs a0a1 (row r), a2a3 (row r+8), a4a5 and
+# a6a7 (the next 8 columns), as in the PTX ISA's register fragment figure.
+function _operand_layout(::WGMMAAtom{T,N,K},::OperandA) where {T,N,K}
+    sizeof(T) == 2 || throw(ArgumentError("only 16-bit A operands come from registers"))
+    L, s = Layouts.Layout, Layouts.static
+    Layouts.Ownership((64,K),L(((s(4),s(8),s(4)),(s(2),s(2),s(K÷8))),
+                               ((s(128),s(1),s(16)),(s(64),s(8),s(512)))))
+end
+
+# The role, the plan, the major order and the byte step between the plan's
+# instructions travel with the descriptor, preventing A/B swaps or reuse
+# with a different instruction shape in the typed issue method.
+struct WGMMAOperand{P,Role,Major,Step}
     descriptor::UInt64
 end
 
@@ -112,13 +128,20 @@ function validate_wgmma(p::WGMMAAtom{T,N,K},role::Role,l::Layouts.AbstractLayout
     A = Role === OperandA ? 2 : 1
     s = swizzled_structure(typeof(l),T,A)
     s === nothing && throw(ArgumentError("operand storage is not a canonical swizzled encoding"))
-    s.major === :K || throw(ArgumentError("shared/shared WGMMA operands are K-major"))
+    s.major === :K || sizeof(T) == 2 || throw(ArgumentError("only 16-bit WGMMA operands may be MN-major"))
     row = s.row_elements
-    K <= row || throw(ArgumentError("the plan's K does not fit one swizzle row"))
     k,r = origin[A],origin[3-A]
     outer = Role === OperandA ? 64 : N
-    k >= 0 && k % _instruction_k(T) == 0 && k % row + K <= row && k+K <= size(l)[A] && r >= 0 && r % 8 == 0 && r+outer <= size(l)[3-A] ||
-        throw(ArgumentError("WGMMA origin or extent is not descriptor-compatible"))
+    if s.major === :K
+        K <= row || throw(ArgumentError("the plan's K does not fit one swizzle row"))
+        k >= 0 && k % _instruction_k(T) == 0 && k % row + K <= row && k+K <= size(l)[A] && r >= 0 && r % 8 == 0 && r+outer <= size(l)[3-A] ||
+            throw(ArgumentError("WGMMA origin or extent is not descriptor-compatible"))
+    else
+        # MN-major: K runs over rows of the swizzle pattern, the outer extent
+        # over groups of one row's elements.
+        k >= 0 && k % 8 == 0 && k+K <= size(l)[A] && r >= 0 && r % row == 0 && r+outer <= size(l)[3-A] &&
+            r+outer <= row*s.groups || throw(ArgumentError("WGMMA origin or extent is not descriptor-compatible"))
+    end
     nothing
 end
 

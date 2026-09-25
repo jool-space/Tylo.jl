@@ -79,8 +79,16 @@ end
         for kk in 0:16:64-k
             @test validate_wgmma(p,OperandB(),b,(kk,256-n)) === nothing
         end
-        @test_throws ArgumentError validate_wgmma(p,OperandA(),b)
-        @test_throws ArgumentError validate_wgmma(p,OperandB(),a)
+        # Swapped, each tile is MN-major for the other role: valid for
+        # 16-bit inputs where the outer extent fits the contiguous rows.
+        @test validate_wgmma(p,OperandA(),b) === nothing
+        if n <= 64
+            @test validate_wgmma(p,OperandB(),a) === nothing
+        else
+            @test_throws ArgumentError validate_wgmma(p,OperandB(),a)
+        end
+        f = WGMMAAtom(Float8_E4M3FN,n,2k)                  # FP8 operands are K-major only
+        @test_throws ArgumentError validate_wgmma(f,OperandA(),shared_layout(TMATile(Float8_E4M3FN,(64,256),1)))
         @test_throws ArgumentError validate_wgmma(p,OperandA(),a,(1,0))
         @test_throws ArgumentError validate_wgmma(p,OperandA(),a,(0,8))
         @test_throws ArgumentError validate_wgmma(p,OperandA(),a,(72,0))
