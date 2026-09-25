@@ -27,6 +27,7 @@ end
     Tylo._from_words(T,words,Tylo.Layouts.layout(f))
 end
 @device_override @inline Tylo._smem_address(p::Core.LLVMPtr{T,3}) where T = PTX.smem_addr_u32(p)
+@device_override @inline Tylo._ex2(x::Float32) = ccall("llvm.nvvm.ex2.approx.ftz.f",llvmcall,Float32,(Float32,),x)
 @device_override @inline Tylo._warp_reduce(op::F,x,::Val{W}) where {F,W} = PTX.Warps.warp_reduce(op,x,Val(W))
 # stmatrix exists from sm_90; the compile target decides, folded at compile time.
 @device_override @inline Tylo._stmatrix_available() = CUDACore.compute_capability().major >= 9

@@ -74,3 +74,29 @@ end
         @test size(Tylo.Layouts.layout(other.sum)) == (axis == 2 ? (1,4) : (4,1))
     end
 end
+
+# The scaled update, FlashAttention's form: attention-sized scores keep FP32
+# accuracy, masked rows stay empty, and it agrees with scaling first.
+@testset "Scaled online softmax" begin
+    scale = Float32(1/sqrt(128))
+    rng = MersenneTwister(4)
+    for width in (1,4,16)
+        scores = Float32.(30 .* randn(rng,48))
+        scores[5] = -Inf32
+        s = SoftmaxState(local_fragment((0f0,)))
+        e = SoftmaxState(local_fragment((0f0,)))
+        for first in 1:width:length(scores)
+            f = local_fragment(Tuple(scores[first:min(first+width-1,end)]))
+            u = softmax_update(s,f;scale)
+            v = softmax_update(e,f .* scale)
+            @test all(isapprox.(u.weights.data,v.weights.data;rtol=2e-6,atol=1e-30))
+            @test only(u.rescale.data) ≈ only(v.rescale.data) rtol=2e-6
+            s, e = u.state, v.state
+        end
+        reference = exp.(Float64.(scores) .* scale .- maximum(Float64.(scores) .* scale))
+        @test only(s.maximum.data) == maximum(scores .* scale)
+        @test only(s.sum.data) ≈ sum(reference) rtol=1e-5
+    end
+    masked = softmax_update(SoftmaxState(local_fragment((0f0,))),local_fragment((-Inf32,-Inf32));scale)
+    @test masked.weights.data == (0f0,0f0) && only(masked.state.maximum.data) == -Inf32 && only(masked.state.sum.data) == 0f0
+end

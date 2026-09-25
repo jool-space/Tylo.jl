@@ -29,6 +29,10 @@ end
 # exponential is `exp2` of a scaled argument, which the GPU evaluates with
 # one `ex2` instruction (2 ulp) instead of a range-reduced series.
 @inline _softmax_exp(x::Float32) = exp2(x * 1.442695f0)
+# 2^x for weights, flushing subnormal results to zero: on the device the
+# single `ex2.approx.ftz` instruction (CUDACoreExt), where exp2 would add a
+# rescaling of arguments below -126 to every element.
+@inline _ex2(x::Float32) = exp2(x)
 @inline _softmax_exp(x) = exp(x)
 @inline _softmax_rescale(old_maximum, new_maximum) =
     ifelse(old_maximum == -Inf32, 0f0, _softmax_exp(old_maximum - new_maximum))
@@ -37,19 +41,42 @@ end
 
 """
     softmax_update(state, scores) -> (; state, weights, rescale)
+    softmax_update(state, scores; scale) -> (; state, weights, rescale)
 
-Update running statistics with a score tile. `weights` are unnormalized
-`exp(scores - new_maximum)` in the original fragment distribution. Multiply
-an existing weighted numerator by `rescale` before adding this tile's weighted
-values. Statistics use FP32 weights, before any conversion for another MMA.
-Empty chunks produce zero weights; an empty previous state has zero rescale.
-Distributed reductions require all lanes to participate. The state retains
-the reduction axis selected by `SoftmaxState(scores; dims)`.
+Update running statistics with a score tile, or with `scale · scores`
+(`scale` positive; attention's `1/√d`). `weights` are unnormalized
+`exp(scores - new_maximum)`, or `exp(scale · scores - new_maximum)`, in the
+original fragment distribution.
+Multiply an existing weighted numerator by `rescale` before adding this
+tile's weighted values. Statistics use FP32 weights, before any conversion
+for another MMA. Empty chunks produce zero weights; an empty previous state
+has zero rescale. Distributed reductions require all lanes to participate.
+The state retains the reduction axis selected by `SoftmaxState(scores; dims)`.
+
+Without `scale`, each weight is `exp2((s - m) · log2 e)`, whose difference
+is exact for nearby scores. With it, as in FlashAttention, each weight
+costs one fused multiply-add and one `ex2`: the scale and the change to
+base 2 fold into one factor, and a row that is entirely masked (maximum
+`-Inf`) is handled once per row rather than per element. The exponent then
+carries an absolute error of about `|scale · s| · 2⁻²³`, negligible for
+attention's scaled scores, larger for scores in the thousands.
 """
-@inline function softmax_update(state::SoftmaxState{D}, scores) where D
+@inline function softmax_update(state::SoftmaxState{D}, scores; scale::Union{Nothing,Float32}=nothing) where D
+    scale === nothing || return _softmax_update(state,scores,scale)
     new_maximum = max.(state.maximum, maximum(scores; dims=D))
     rescale = _softmax_rescale.(state.maximum, new_maximum)
     weights = _softmax_weight.(scores, new_maximum)
+    normalizer = muladd.(rescale, state.sum, sum(weights; dims=D))
+    (; state=SoftmaxState(new_maximum, normalizer; dims=D), weights, rescale)
+end
+@inline function _softmax_update(state::SoftmaxState{D}, scores, scale::Float32) where D
+    new_maximum = max.(state.maximum, maximum(scores; dims=D) .* scale)
+    rescale = _softmax_rescale.(state.maximum, new_maximum)
+    # exp(scale·s - m) = exp2(s·(scale·log2 e) - m·log2 e); a masked row's
+    # offset is 0, so its -Inf scores give exp2(-Inf) = 0.
+    factor = scale * 1.442695f0
+    offset = map(m -> ifelse(m == -Inf32, 0f0, m * 1.442695f0), new_maximum)
+    weights = ((s, o) -> _ex2(muladd(s, factor, -o))).(scores, offset)
     normalizer = muladd.(rescale, state.sum, sum(weights; dims=D))
     (; state=SoftmaxState(new_maximum, normalizer; dims=D), weights, rescale)
 end

@@ -89,7 +89,7 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,::Val{Stages}
             out = zero_accumulator(pv)
             for j in Int32(0):blocks-Int32(1)
                 wait(full(slot_of(j)),phase_of(j))
-                update = softmax_update(state,finish_mma(wait_mma(scores_async(j))) .* scale)
+                update = softmax_update(state,finish_mma(wait_mma(scores_async(j)));scale)
                 state = update.state
                 out = Tylo.WGMMAAccumulator(pv,(finish_mma(out) .* update.rescale).data)
                 out = wait_mma(output_async(out,update.weights,j))
@@ -106,7 +106,7 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,::Val{Stages}
             turn()
             first_scores = scores_async(Int32(0))
             pass(false)
-            update = softmax_update(state,finish_mma(wait_mma(first_scores)) .* scale)
+            update = softmax_update(state,finish_mma(wait_mma(first_scores));scale)
             state, p = update.state, update.weights
             out = zero_accumulator(pv)
             for j in Int32(1):blocks-Int32(1)
@@ -115,7 +115,7 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,::Val{Stages}
                 scores = scores_async(j)
                 pending = output_async(out,p,j-Int32(1))
                 pass(false)
-                update = softmax_update(state,finish_mma(wait_mma(scores;newer=2)) .* scale)
+                update = softmax_update(state,finish_mma(wait_mma(scores;newer=2));scale)
                 state = update.state
                 out = Tylo.WGMMAAccumulator(pv,(finish_mma(wait_mma(pending)) .* update.rescale).data)
                 p = update.weights
@@ -143,8 +143,9 @@ d×seq×(batch·heads), d = 128, sequence lengths multiples of 128. With
 `overlap`, each block's softmax runs while the tensor cores multiply the
 previous block's probabilities by V, and with `pingpong` the two consumers
 take turns at the tensor cores. On an H100 NVL neither pays yet: the two
-consumers already overlap each other's softmax, and the simple schedule is
-the fastest (see run.jl).
+consumers already overlap each other's softmax, the overlapped schedules
+hold two score tiles and spill a few registers, and the simple schedule is
+as fast or faster (see run.jl).
 """
 function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages::Integer=2,overlap::Bool=false,pingpong::Bool=overlap,o=nothing) where T
     d, sq, bh = size(q); skv = size(k,2)

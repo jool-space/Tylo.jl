@@ -11,8 +11,9 @@ include("../../examples/hopper_attention/kernel.jl")
                    binding(TMATile(T,(128,128),2)),Int32,Float32,Val{stages},Val{overlap},Val{pingpong}}
         code = compile_kernel(attention_kernel!,tt;arch=CUDACore.SMVersion(9,0,:arch),threads=384)
         save_code("hopper-attention-s$stages-$(overlap ? "overlap" : "serial")$(pingpong ? "-pingpong" : "")",code)
-        # Ping-pong holds one more value than 168 registers allow: 4 bytes spill.
-        @test isempty(audit(code;spills=!pingpong,local_memory=!pingpong))
+        # The overlapped schedules hold two score tiles at once, a few
+        # registers more than they get: 12 bytes spill.
+        @test isempty(audit(code;spills=!overlap,local_memory=!overlap))
         w = Tylo.wgmma_groups(code)
         @test w.instructions > 0 && w.fences == w.arrives
         # P from registers, V transposed: every P V instruction.
