@@ -21,8 +21,8 @@ function tcgen05_gemm_kernel!(out,a_data,b_data,atom,variant::Val)
     b = GlobalTile(pointer(b_data),@Layout((64,128),(1,64)))
     for i in tid:Int32(128):Int32(128*64-1)
         r,c = i % Int32(128),i ÷ Int32(128)
-        unsafe_store!(pointer(sa,(r,c)),unsafe_load(pointer(a,(r,c))))
-        unsafe_store!(pointer(sb,(c,r)),unsafe_load(pointer(b,(c,r))))
+        @inbounds sa[(r,c)] = a[(r,c)]
+        @inbounds sb[(c,r)] = b[(c,r)]
     end
     if tid == Int32(0)
         barrier_init(pointer(mbar),1)

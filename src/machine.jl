@@ -58,7 +58,8 @@ function _machine_code_call end
     Finding
 
 One way a kernel's machine code falls short of what Tylo's kernels promise:
-`kind` is `:call`, `:local_memory`, `:spill` or `:wgmma_serialized`;
+`kind` is `:call`, `:local_memory`, `:spill`, `:unaligned` or
+`:wgmma_serialized`;
 `message` says what; `sources` lists the Julia frames responsible, when
 they can be traced, as `"file.jl:line (function)"` chains; `hint` says how
 such code is usually fixed, when the cause is a known one.
@@ -71,7 +72,7 @@ struct Finding
 end
 
 """
-    audit(code::MachineCode; calls=true, local_memory=true, spills=true, wgmma=true) -> Vector{Finding}
+    audit(code::MachineCode; calls=true, local_memory=true, spills=true, alignment=true, wgmma=true) -> Vector{Finding}
 
 Check the machine code against the properties Tylo's kernels promise, and
 return what fails (empty when it all holds):
@@ -85,12 +86,15 @@ return what fails (empty when it all holds):
 - `local_memory`: no per-thread local memory, which lives in DRAM:
   arrays that did not become registers, or tuples indexed dynamically.
 - `spills`: ptxas spilled no registers.
+- `alignment`: no value wider than a byte is loaded or stored with
+  alignment 1, which moves it byte by byte. `unsafe_load` and
+  `unsafe_store!` on a `Core.LLVMPtr` assume alignment 1 unless given one.
 - `wgmma`: every WGMMA stays asynchronous. ptxas serializes them, waiting
   after each instruction, when it cannot prove the pipeline safe, and says
   so only in a performance warning; the SASS then has more
   `WARPGROUP.ARRIVE`s than the PTX has `wgmma.fence`s.
 """
-function audit(code::MachineCode; calls::Bool=true, local_memory::Bool=true, spills::Bool=true, wgmma::Bool=true)
+function audit(code::MachineCode; calls::Bool=true, local_memory::Bool=true, spills::Bool=true, alignment::Bool=true, wgmma::Bool=true)
     findings = Finding[]
     if calls
         targets = kernel_calls(code)
@@ -118,7 +122,8 @@ function audit(code::MachineCode; calls::Bool=true, local_memory::Bool=true, spi
             hint = isempty(kernel_calls(code)) ?
                 "Values that did not become registers: an array or tuple indexed with a runtime index, or a closure or tuple the compiler did not unroll." :
                 "The exception reporting ptxas inlined keeps a local buffer; it goes away with the calls."
-            push!(findings,Finding(:local_memory,"$bytes bytes of local memory declared, $accesses local loads and stores",String[],hint))
+            sources = bytes > 0 ? _local_origins(code) : String[]
+            push!(findings,Finding(:local_memory,"$bytes bytes of local memory declared, $accesses local loads and stores",sources,hint))
         end
     end
     if spills
@@ -126,6 +131,17 @@ function audit(code::MachineCode; calls::Bool=true, local_memory::Bool=true, spi
         stores + loads > 0 &&
             push!(findings,Finding(:spill,"ptxas spilled registers ($stores bytes stored, $loads loaded)",String[],
                 "Too many values live at once for the register budget: fewer accumulators, smaller tiles, or a larger budget (fewer threads)."))
+    end
+    # Split accesses show as byte-wide ones in the PTX; only then is the IR
+    # worth reading.
+    if alignment && occursin(r"\b(?:ld|st)(?:\.\w+)*\.[bsu]8\b",entry_ptx(code))
+        # Byte elements, alone or in vectors, move byte by byte anyway.
+        sites = trace(code,r"(?:= load (?!i8,|<\d+ x i8>)[^,]+, ptr|store (?!i8 |<\d+ x i8> )[^,]+, ptr)[^\n]*, align 1\b")
+        if !isempty(sites)
+            n = sum(last,sites)
+            push!(findings,Finding(:unaligned,"$n loads and stores of wider values with alignment 1, moved byte by byte",first.(sites),
+                "unsafe_load and unsafe_store! on a Core.LLVMPtr assume alignment 1 unless given one: pass Val(sizeof(T)), or the alignment the pointer has, as the last argument."))
+        end
     end
     if wgmma
         w = wgmma_groups(code)
@@ -229,10 +245,57 @@ function _wgmma_warning(code::MachineCode)
     m === nothing ? nothing : "$(m[1]): $(strip(m[2]))"
 end
 
-# Trace calls through the annotated LLVM IR of the kernel function: the
-# inlining comments (`; │┌ @ file.jl:12 within `f``) before each call give
-# the chain of frames it came from. Maps a callee (without its numeric
-# suffix) to one line per distinct origin.
+"""
+    trace(code::MachineCode, pattern::Regex) -> Vector{Pair{String,Int}}
+
+Where the kernel's LLVM instructions matching `pattern` come from: each
+distinct origin, as a `"kernel.jl:12 (f) → lib.jl:40 (g) → int.jl:88 (+)"`
+chain, with how many matching instructions it produced, most first. The
+instructions are those of the optimized LLVM IR, before PTX, for instance
+`r"load i8, ptr addrspace\\(3\\)"` for byte loads from shared memory or
+`r"= alloca"` for what may become local memory.
+"""
+function trace(code::MachineCode,pattern::Regex)
+    ir = try
+        code.annotated()
+    catch
+        return Pair{String,Int}[]
+    end
+    counts = Dict{String,Int}()
+    _trace(ir) do line, chain
+        occursin(pattern,line) && (counts[chain] = get(counts,chain,0)+1)
+    end
+    sort!(collect(counts);by=p -> (-p.second,p.first))
+end
+
+# Allocas sit in the entry block with the kernel's own location; the
+# instructions that use them say where the memory comes from.
+function _local_origins(code::MachineCode)
+    ir = try
+        code.annotated()
+    catch
+        return String[]
+    end
+    _local_origins(ir)
+end
+function _local_origins(ir::AbstractString)
+    names = String[]
+    _trace(ir) do line, chain
+        m = match(r"^\s*(%[\w.\"$:]+) = alloca\b",line)
+        m === nothing || push!(names,m[1])
+    end
+    isempty(names) && return String[]
+    uses = Regex(join(("\\Q$(n)\\E(?![\\w.\"])" for n in names),"|"))
+    origins = String[]
+    _trace(ir) do line, chain
+        occursin(r"= alloca\b",line) && return
+        occursin(uses,line) && !(chain in origins) && push!(origins,chain)
+    end
+    origins
+end
+
+# Trace calls through the annotated LLVM IR of the kernel function. Maps a
+# callee (without its numeric suffix) to one line per distinct origin.
 function _trace_calls(code::MachineCode)
     ir = try
         code.annotated()
@@ -243,6 +306,19 @@ function _trace_calls(code::MachineCode)
 end
 function _trace_calls(ir::AbstractString)
     origins = Dict{String,Vector{String}}()
+    _trace(ir) do line, chain
+        m = match(r"\bcall\b[^@]*@\"?([A-Za-z_][\w.$]*)\"?\(",line)
+        (m === nothing || startswith(m[1],"llvm.")) && return
+        list = get!(origins,_base_name(m[1]),String[])
+        chain in list || push!(list,chain)
+    end
+    origins
+end
+# Walk the kernel function's instructions in `code_llvm` output with source
+# annotations: the inlining comments (`; │┌ @ file.jl:12 within `f``) before
+# an instruction give the chain of frames it came from. `f(line, chain)` is
+# called for each instruction.
+function _trace(f,ir::AbstractString)
     stack = String[]
     inside = false
     for line in eachline(IOBuffer(ir))
@@ -268,15 +344,12 @@ function _trace_calls(ir::AbstractString)
             push!(stack,_innermost(m[2]))
             continue
         end
-        inside || continue
-        m = match(r"\bcall\b[^@]*@\"?([A-Za-z_][\w.$]*)\"?\(",line)
-        (m === nothing || startswith(m[1],"llvm.")) && continue
-        chain = _describe(filter(!isempty,stack))
-        list = get!(origins,_base_name(m[1]),String[])
-        chain in list || push!(list,chain)
+        (inside && startswith(line,"  ")) || continue
+        f(line,_describe(filter(!isempty,stack)))
     end
-    origins
+    nothing
 end
+
 # A comment line can hold several frames, `a.jl:1 within `f` @ b.jl:2`,
 # the last of which may lack its function; it is the previous one's.
 function _innermost(frames)
@@ -287,8 +360,8 @@ function _innermost(frames)
     fn === nothing ? last_piece : "$(last_piece) within `$(fn[1])`"
 end
 # "file.jl:12 within `f`" frames, innermost last: the kernel's own line, the
-# innermost frame outside Julia's Base and standard libraries, and the
-# innermost frame, each once.
+# innermost frame of code being written (outside Julia and installed
+# packages), and the innermost frame, each once.
 function _describe(frames)
     isempty(frames) && return "unknown origin"
     parsed = map(frames) do f
@@ -296,11 +369,15 @@ function _describe(frames)
         m === nothing ? (f,"","") : (String(m[1]),String(m[2]),something(m[3],"?"))
     end
     label((file,line,fn)) = isempty(line) ? file : "$(basename(file)):$line ($fn)"
-    user = findlast(p -> isabspath(p[1]) && !_in_julia(p[1]),parsed)
+    user = findlast(p -> isabspath(p[1]) && !_in_julia(p[1]) && !_in_packages(p[1]),parsed)
+    user === nothing && (user = findlast(p -> isabspath(p[1]) && !_in_julia(p[1]),parsed))
     picks = unique(filter(!isnothing,[1,user,length(parsed)]))
     join(map(i -> label(parsed[i]),picks)," → ")
 end
 _in_julia(path) = startswith(path,normpath(joinpath(Sys.BINDIR,"..","share","julia")))
+# Installed (not developed) packages: CUDACore, LLVM.jl, ... Code being
+# written lives elsewhere, so it is the frame worth naming.
+_in_packages(path) = any(d -> startswith(path,joinpath(d,"packages")),DEPOT_PATH)
 
 function Base.show(io::IO,::MIME"text/plain",code::MachineCode)
     print(io,"MachineCode for ",code.arch,": ",code.entry)

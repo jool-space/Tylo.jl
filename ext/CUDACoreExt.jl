@@ -96,11 +96,12 @@ function Tylo.machine_code(@nospecialize(f),@nospecialize(types::Type{<:Tuple});
         write(path,image)
         read(`$(CUDACore.CUDA_Compiler.nvdisasm()) $path`,String)
     end
-    annotated = () -> begin
+    cached = Ref{Union{Nothing,String}}(nothing)
+    annotated = () -> something(cached[],begin
         io = IOBuffer()
         CUDACore.invoke_frozen(CUDACore.GPUCompiler.code_llvm,io,job;debuginfo=:source,dump_module=true)
-        String(take!(io))
-    end
+        cached[] = String(take!(io))
+    end)
     Tylo.MachineCode(String(entry),gpu,ptx,image,sass,log,annotated)
 end
 Tylo._machine_code_call(f,args::Tuple;kwargs...) =

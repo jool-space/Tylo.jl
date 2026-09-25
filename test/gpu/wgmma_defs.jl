@@ -11,8 +11,8 @@
     tid = Int32(threadIdx().x)-Int32(1)
     for i in tid:Int32(128):Int32(8191)
         r,k = i÷Int32(64),i%Int32(64)
-        unsafe_store!(pointer(a,(r,k)),T(Float32((r+Int32(3)*k)%Int32(19)-Int32(9))))
-        unsafe_store!(pointer(b,(k,r)),T(Float32((Int32(2)*r+k)%Int32(17)-Int32(8))))
+        @inbounds a[(r,k)] = T(Float32((r+Int32(3)*k)%Int32(19)-Int32(9)))
+        @inbounds b[(k,r)] = T(Float32((Int32(2)*r+k)%Int32(17)-Int32(8)))
     end
     ptx"fence.proxy.async.shared::cta"()
     sync_threads()
@@ -44,8 +44,8 @@ end
     tid == Int32(0) && initialize!(stage,128)
     for i in tid:Int32(128):Int32(8191)
         r,k = i÷Int32(64),i%Int32(64)
-        unsafe_store!(pointer(a,(r,k)),T(Float32((r+Int32(3)*k)%Int32(19)-Int32(9))))
-        unsafe_store!(pointer(b,(k,r)),T(Float32((Int32(2)*r+k)%Int32(17)-Int32(8))))
+        @inbounds a[(r,k)] = T(Float32((r+Int32(3)*k)%Int32(19)-Int32(9)))
+        @inbounds b[(k,r)] = T(Float32((Int32(2)*r+k)%Int32(17)-Int32(8)))
     end
     fence_async_shared()
     sync_threads()

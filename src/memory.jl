@@ -78,6 +78,27 @@ alignment(::Type{<:MemoryTile{T,AS,L,A}}) where {T,AS,L,A} = A
     t.ptr + _byte_offset(Val(AS),T,t.layout,c)
 end
 """
+    tile[(r, c)]
+    tile[(r, c)] = value
+
+One element, at a zero-based coordinate as for [`window`](@ref) and
+`pointer(tile, (r, c))`, loaded or stored with the element's alignment. The
+coordinate must lie inside the tile and its bounds (checked unless elided
+with `@inbounds`). Fragments move many elements at once; this is for the
+odd element and for tests.
+"""
+Base.@propagate_inbounds function Base.getindex(t::MemoryTile{T},c::Tuple{Integer,Integer}) where T
+    @boundscheck _element_inside(t,c) || throw(BoundsError(t,c))
+    unsafe_load(pointer(t,c),1,Val(sizeof(T)))
+end
+Base.@propagate_inbounds function Base.setindex!(t::MemoryTile{T},x,c::Tuple{Integer,Integer}) where T
+    @boundscheck _element_inside(t,c) || throw(BoundsError(t,c))
+    unsafe_store!(pointer(t,c),convert(T,x),1,Val(sizeof(T)))
+    t
+end
+@inline _element_inside(t::MemoryTile,c) =
+    all(map((x,n,b) -> 0 <= x < n && (b === nothing || x < b),c,size(t),t.bounds === nothing ? (nothing,nothing) : t.bounds))
+"""
     window(tile, origin, shape)
 
 The `shape` sub-tile at a possibly runtime `origin`, addressing the same

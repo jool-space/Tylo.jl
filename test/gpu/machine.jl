@@ -97,3 +97,23 @@ if runtime_supported(@__FILE__)
     @test isempty(audit(@machine_code clean_scale!(y,x)))
 end
 end
+
+const UNALIGNED_LINE = 106
+function unaligned_sum!(y,x)
+    scratch = CuStaticSharedArray(Float32,32)
+    p = reinterpret(Core.LLVMPtr{Float32,3},pointer(scratch))
+    i = threadIdx().x
+    unsafe_store!(p,@inbounds(x[i]),i)                 # alignment 1 unless given one
+    sync_threads()
+    @inbounds y[i] = unsafe_load(p,i%Int32(32)+Int32(1),Val(4))
+    nothing
+end
+@testset "Unaligned accesses" begin
+    vector = CuDeviceVector{Float32,1}
+    code = compile_kernel(unaligned_sum!,Tuple{vector,vector};arch=CUDACore.SMVersion(12,1,:arch),threads=32)
+    split = only(filter(f -> f.kind === :unaligned,audit(code)))
+    @test occursin("1 loads and stores",split.message)
+    @test only(split.sources) == "machine.jl:$(UNALIGNED_LINE) (unaligned_sum!) → base.jl:39 (macro expansion)" ||
+          startswith(only(split.sources),"machine.jl:$(UNALIGNED_LINE) (unaligned_sum!)")
+    @test occursin("Val(sizeof(T))",split.hint)
+end

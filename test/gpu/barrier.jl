@@ -41,7 +41,7 @@ function barrier_copies!(out,src)
     wait(bar,0)
     for i in tid:Int32(128):Int32(32*64-1)
         r,c = i ÷ Int32(64),i % Int32(64)
-        @inbounds out[i+Int32(1)] = unsafe_load(pointer(tile,(r,c)))
+        @inbounds out[i+Int32(1)] = tile[(r,c)]
     end
     nothing
 end

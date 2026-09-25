@@ -51,11 +51,11 @@ function atom_copy_kernel!(raw_a,raw_b,words_a,words_b,a_data,b_data,atom,config
     sync_threads()
     for i in lane:Int32(32):Int32(m*k-1)
         r,c=i%Int32(m),i÷Int32(m)
-        @inbounds raw_a[r+1,c+1]=unsafe_load(pointer(sa,(r,c)))
+        @inbounds raw_a[r+1,c+1]=sa[(r,c)]
     end
     for i in lane:Int32(32):Int32(k*n-1)
         r,c=i%Int32(k),i÷Int32(k)
-        @inbounds raw_b[r+1,c+1]=unsafe_load(pointer(sb,(r,c)))
+        @inbounds raw_b[r+1,c+1]=sb[(r,c)]
     end
     fa=@inbounds load_fragment(operand_layout(atom,OperandA()),sa,lane)
     fb=@inbounds load_fragment(operand_layout(atom,OperandB()),sb,lane)

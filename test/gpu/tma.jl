@@ -23,7 +23,7 @@ function tma_roundtrip!(out,binding,origin,iterations::Int32)
         m,n = size(tile)
         for i in tid:Int32(32):Int32(m*n-1)
             r,c = i%Int32(m),i÷Int32(m)
-            @inbounds out[r+Int32(1),c+Int32(1)] = unsafe_load(pointer(tile,(r,c)))
+            @inbounds out[r+Int32(1),c+Int32(1)] = tile[(r,c)]
         end
         sync_threads() # every consumer finished before phase reuse
     end
@@ -43,7 +43,7 @@ function tma_store_kernel!(src,binding,origin)
     m,n = size(tile)
     for i in tid:Int32(32):Int32(m*n-1)
         r,c = i%Int32(m),i÷Int32(m)
-        @inbounds unsafe_store!(pointer(tile,(r,c)),src[r+Int32(1),c+Int32(1)])
+        @inbounds tile[(r,c)] = src[r+Int32(1),c+Int32(1)]
     end
     fence_async_shared()
     sync_threads()
