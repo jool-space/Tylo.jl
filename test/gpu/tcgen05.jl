@@ -36,7 +36,7 @@ function tcgen05_gemm_kernel!(out,a_data,b_data,atom,variant::Val)
         oa = @inbounds operand(atom,OperandA(),sa)
         ob = @inbounds operand(atom,OperandB(),sb)
         @inbounds mma(atom,d,oa,ob,64,false)
-        commit_mma(pointer(mbar))
+        commit_mma(Barrier(pointer(mbar)))
     end
     barrier_wait(pointer(mbar),UInt32(0))
     fence_after_thread_sync()

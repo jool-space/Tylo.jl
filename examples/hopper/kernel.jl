@@ -8,17 +8,17 @@ function hopper_gemm_kernel!(out,a,b,plan,total_k::Int32,::Val{Stages}) where St
     bytes = transfer_bytes(a)+transfer_bytes(b)
     workspace = @inbounds CuDynamicSharedArray(UInt8,1056+Stages*bytes)
     raw = pointer(workspace)
-    ready = reinterpret(Core.LLVMPtr{UInt64,3},raw)
-    done = ready+16
+    ready(s) = Barrier(raw,s)          # stage s holds data
+    done(s) = Barrier(raw+16,s)        # stage s is free again
     start = raw+32
     buffers = start+((UInt32(0)-PTX.smem_addr_u32(start)) & UInt32(1023))
     tid = Int32(threadIdx().x)-Int32(1)
     if tid == 128
         for s in Int32(0):Int32(Stages-1)
-            ptx"mbarrier.init.shared.b64"(ready+s*Int32(8),UInt32(1))
-            ptx"mbarrier.init.shared.b64"(done+s*Int32(8),UInt32(128))
+            initialize!(ready(s),1)
+            initialize!(done(s),128)
         end
-        ptx"fence.proxy.async.shared::cta"()
+        fence_barrier_init()
     end
     sync_threads()
     count = cld(total_k,Int32(64))
@@ -26,26 +26,23 @@ function hopper_gemm_kernel!(out,a,b,plan,total_k::Int32,::Val{Stages}) where St
         for i in Int32(0):count-Int32(1)
             slot = i%Int32(Stages)
             if i >= Int32(Stages)
-                parity = UInt32(((i÷Int32(Stages))-Int32(1))&Int32(1))
-                while !ptx"mbarrier.try_wait.parity.shared.b64"(done+slot*Int32(8),parity) end
+                wait(done(slot),(i÷Int32(Stages))-Int32(1))
             end
             ptr = buffers+slot*Int32(bytes)
-            bar = ready+slot*Int32(8)
-            ptx"mbarrier.arrive.expect_tx.shared.b64"(bar,UInt32(bytes))
-            @inbounds tma_load!(shared_tile(a,ptr),a,(Int32(0),i*Int32(64)),bar)
-            @inbounds tma_load!(shared_tile(b,ptr+transfer_bytes(a)),b,(i*Int32(64),Int32(0)),bar)
+            arrive!(ready(slot),bytes)
+            @inbounds tma_load!(shared_tile(a,ptr),a,(0,64i),ready(slot))
+            @inbounds tma_load!(shared_tile(b,ptr+transfer_bytes(a)),b,(64i,0),ready(slot))
         end
     elseif tid < 128
         acc = zero_accumulator(plan)
         for i in Int32(0):count-Int32(1)
             slot = i%Int32(Stages)
-            parity = UInt32((i÷Int32(Stages))&Int32(1))
-            while !ptx"mbarrier.try_wait.parity.shared.b64"(ready+slot*Int32(8),parity) end
+            wait(ready(slot),i÷Int32(Stages))
             ptr = buffers+slot*Int32(bytes)
             @inbounds ad = operand(plan,OperandA(),shared_tile(a,ptr))
             @inbounds bd = operand(plan,OperandB(),shared_tile(b,ptr+transfer_bytes(a)))
             acc = wait_mma(mma_async(plan,ad,bd,acc))
-            ptx"mbarrier.arrive.shared.b64"(done+slot*Int32(8))
+            arrive!(done(slot))
         end
         dst = GlobalTile(pointer(out),@Layout((64, n), (1, 64)))
         store!(dst,finish_mma(acc),tid)
@@ -53,8 +50,8 @@ function hopper_gemm_kernel!(out,a,b,plan,total_k::Int32,::Val{Stages}) where St
     sync_threads()
     if tid == 128
         for s in Int32(0):Int32(Stages-1)
-            ptx"mbarrier.inval.shared.b64"(ready+s*Int32(8))
-            ptx"mbarrier.inval.shared.b64"(done+s*Int32(8))
+            invalidate!(ready(s))
+            invalidate!(done(s))
         end
     end
     nothing

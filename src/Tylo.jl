@@ -10,6 +10,7 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
        Atom, OperandA, OperandB, Accumulator, ScaleA, ScaleB, operand_layout,
        MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, mma, pack_operand_a,
        CopyAtom, copy_async!, commit_copies, wait_copies,
+       Barrier, initialize!, arrive!, expect_bytes!, invalidate!, fence_barrier_init, fence_async_shared,
        TMATile, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes, tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores,
        WGMMAAtom, operand, mma_async, wait_mma, finish_mma,
        Tcgen05Atom, accumulator, commit_mma,
@@ -32,6 +33,7 @@ import .Layouts: Layout, @Layout, Ownership, distribute, coordinate, compose, wi
 include("fragments.jl")
 include("tmem.jl")
 include("memory.jl")
+include("barrier.jl")
 include("copy.jl")
 include("mma.jl")
 include("copyatoms.jl")

@@ -90,18 +90,18 @@ may not.
 function prepare_tma end
 
 """
-    tma_load!(dst, binding, origin, barrier)
+    tma_load!(dst, binding, origin, barrier::Barrier)
 
-Issue one copy from a zero-based LOGICAL global origin (a pair of Int32
-values, or a triple whose third coordinate selects the matrix of a
-three-dimensional binding) to the canonical shared tile. One elected thread executes. The caller initializes the 8-byte-aligned
-shared mbarrier, publishes its initialization to the async proxy, and supplies
-an expected transaction count including `transfer_bytes(binding)`. Wait for
-that barrier phase before reading; release consumers before reusing storage.
-No implicit arrival, wait, thread rendezvous, or proxy fence is inserted.
-Out-of-bounds elements are zero-filled. The inner origin starts a 16-byte
-chunk (a multiple of 16 one-byte elements); the hardware rejects other
-origins.
+Issue one TMA copy of the binding's box at a zero-based logical `origin` (a
+pair of integers, or a triple whose third coordinate selects the matrix of
+a three-dimensional binding) into the canonical shared tile `dst`. One
+thread issues it. The copy completes on `barrier`, whose current phase
+must expect its [`transfer_bytes`](@ref) (`arrive!(barrier, bytes)`);
+[`wait`](@ref Base.wait(::Barrier,::Integer)) for that phase before reading
+`dst`. Elements outside the tensor's bounds arrive as zeros. The inner
+origin starts a 16-byte chunk; the hardware rejects other origins.
+Nothing else is inserted: initialize and publish the barrier first, and
+release the consumers of `dst` before reusing it.
 """
 function tma_load! end
 
@@ -115,7 +115,7 @@ are not written. The copy belongs to the issuing thread's current bulk
 group: [`commit_tma_stores`](@ref) closes the group, and
 [`wait_tma_reads`](@ref) or [`wait_tma_stores`](@ref) observes it. Shared
 data written through ordinary stores becomes visible to the copy only after
-`fence.proxy.async.shared::cta` and a rendezvous of the writing threads with
+[`fence_async_shared`](@ref) and a rendezvous of the writing threads with
 the issuing thread; Tylo inserts neither.
 """
 function tma_store! end

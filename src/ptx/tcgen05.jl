@@ -146,9 +146,8 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
         nothing
     end
 end
-@inline commit_mma(barrier::Core.LLVMPtr{UInt64,PTX.AS.Shared}) = commit_mma(_smem_address(barrier))
-@inline commit_mma(barrier::UInt32) =
-    ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cta.b64"(barrier)
+@inline commit_mma(barrier::Barrier) =
+    ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cta.b64"(_smem_address(barrier.ptr))
 
 @inline function _check_tmem_columns(c)
     ispow2(c) && 32 <= c <= 512 || throw(ArgumentError("TMEM allocations are powers of two from 32 to 512 columns"))
@@ -162,3 +161,6 @@ end
     ptx"tcgen05.dealloc.cta_group::1.sync.aligned.b32"(address,columns % UInt32)
 end
 @inline tmem_relinquish_permit() = ptx"tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"()
+Base.@propagate_inbounds operand(a::Tcgen05Atom,role::Union{OperandA,OperandB},t::SharedTile,origin::Tuple{Integer,Integer}) =
+    operand(a,role,t,map(x -> x % Int32,origin))
+Base.@propagate_inbounds operand(o::Tcgen05Operand,origin::Tuple{Integer,Integer}) = operand(o,map(x -> x % Int32,origin))

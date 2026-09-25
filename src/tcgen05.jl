@@ -115,10 +115,11 @@ struct Tcgen05Operand{P,Role,Major,T,L}
 end
 Base.size(o::Tcgen05Operand) = size(o.layout)
 """
-    commit_mma(barrier)
+    commit_mma(barrier::Barrier)
 
-Arrive on a shared mbarrier once all prior `tcgen05.mma` instructions issued
-by this thread have completed. Single thread; no wait is implied.
+Arrive on `barrier` once all prior `tcgen05.mma` instructions issued by
+this thread have completed: one of the phase's expected arrivals. Single
+thread; no wait is implied.
 """
 function commit_mma end
 """

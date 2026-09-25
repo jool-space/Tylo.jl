@@ -12,7 +12,7 @@ const FAB_ROWS = Tylo.distribute((32,64),32;vector=64,axis=2)
     binding = Tylo.TMABinding(FAB_TMA_PLAN,tma)
     for stripe in 0:1
         tile = Tylo.shared_tile(binding,dst_ptr+byteoff+stripe*FAB_STRIPE_BYTES)
-        @inbounds Tylo.tma_load!(tile,binding,(reinterpret(Int32,row),Int32(64stripe)),mbar)
+        @inbounds Tylo.tma_load!(tile,binding,(reinterpret(Int32,row),64stripe),Tylo.Barrier(mbar))
     end
 end
 
@@ -98,7 +98,7 @@ end
     a = @inbounds Tylo.operand(ops.q,(Int32(256STAGE),Int32(0)))
     b = @inbounds Tylo.operand(ops.k,(Int32(0),Int32(512KIDX)))
     @inbounds Tylo.mma(FAB_QK_ATOM,s,a,b,FAB_HD,false)
-    Tylo.commit_mma(bars.s_full[STAGE])
+    Tylo.commit_mma(Tylo.Barrier(bars.s_full[STAGE]))
 end
 
 @inline function fab_pv_mma(dbg::FabDbg, ::Val{SPLITP}, ::Val{STAGE}, ::Val{VIDX},
@@ -120,6 +120,6 @@ end
         b = @inbounds Tylo.operand(ops.v,(Int32(512VIDX + W*g),Int32(0)))
         @inbounds Tylo.mma(FAB_PV_ATOM,o,a,b,W,!(first_accum & (g == 0)))
     end
-    Tylo.commit_mma(bars.pv_done[STAGE])
+    Tylo.commit_mma(Tylo.Barrier(bars.pv_done[STAGE]))
     return ph_pq ⊻ UInt32(1), ph_or
 end

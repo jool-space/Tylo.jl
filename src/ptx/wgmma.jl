@@ -58,3 +58,5 @@ end
 end
 # Reconstitute an isbits static plan, including validated constructor semantics.
 _plan(::Type{WGMMAAtom{T,N,K,P}}) where {T,N,K,P} = WGMMAAtom{T,N,K,P}()
+Base.@propagate_inbounds operand(p::WGMMAAtom,role::Union{OperandA,OperandB},t::SharedTile,origin::Tuple{Integer,Integer}) =
+    operand(p,role,t,map(x -> x % Int32,origin))

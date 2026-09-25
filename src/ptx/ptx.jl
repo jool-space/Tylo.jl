@@ -95,6 +95,7 @@ end
 @inline fence_after_thread_sync() = ptx"tcgen05.fence::after_thread_sync"()
 @inline fence_before_thread_sync() = ptx"tcgen05.fence::before_thread_sync"()
 
+include("barrier.jl")
 include("copy.jl")
 include("mma.jl")
 include("rows.jl")

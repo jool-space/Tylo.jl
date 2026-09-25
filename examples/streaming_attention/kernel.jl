@@ -107,21 +107,16 @@ end
 # Stage s holds K then V of tiles t ≡ s (mod STAGES), after the two Q tiles.
 @inline k_pointer(base,t)=base+2TILE_BYTES+(t&Int32(3))*2TILE_BYTES
 @inline v_pointer(base,t)=base+3TILE_BYTES+(t&Int32(3))*2TILE_BYTES
-@inline function expect!(full,t,bytes)
-    ptx"mbarrier.arrive.expect_tx.shared.b64"(full+(t&Int32(3))*Int32(8),UInt32(bytes))
-end
+# Tile t lands in stage t%4, whose barrier completes once per four tiles.
+@inline stage(full,t)=Barrier(full,t&Int32(3))
 @inline function load_tile!(kb,vb,base,full,t,head)
-    bar=full+(t&Int32(3))*Int32(8)
+    bar=stage(full,t)
     key=t*Int32(64)
     @inbounds tma_load!(shared_tile(kb,k_pointer(base,t)),kb,(Int32(0),key,head),bar)
     @inbounds tma_load!(shared_tile(vb,v_pointer(base,t)),vb,(key,Int32(0),head),bar)
     nothing
 end
-@inline function wait_tile(full,t)
-    bar=full+(t&Int32(3))*Int32(8)
-    parity=UInt32((t>>2)&Int32(1))
-    while !ptx"mbarrier.try_wait.parity.shared.b64"(bar,parity) end
-end
+@inline wait_tile(full,t)=wait(stage(full,t),t>>2)
 
 # Physical arrays: Q(64,M,H), K(64,N,H), V(ldv,64,H) behind TMA bindings,
 # output(64,M,H), mask(N,M) or nothing. n is the logical key count. No
@@ -137,25 +132,25 @@ function attention_kernel!(output,qb,kb,vb,mask,m::Int32,n::Int32,config,::Val{C
     head=Int32(blockIdx().y)-Int32(1)
     memory=@inbounds CuDynamicSharedArray(UInt8,shared_bytes(config))
     raw=pointer(memory)
-    full=reinterpret(Core.LLVMPtr{UInt64,3},raw)
+    full=raw               # STAGES barriers
     base=raw+64+((UInt32(0)-PTX.smem_addr_u32(raw+64))&UInt32(1023))
     limit=Causal ? min(n,row0+Int32(128)) : n
     tiles=(limit+Int32(63))÷Int32(64)
     if tid==Int32(0)
         for s in Int32(0):STAGES-Int32(1)
-            ptx"mbarrier.init.shared.b64"(full+s*Int32(8),UInt32(1))
+            initialize!(Barrier(full,s),1)
         end
-        ptx"fence.proxy.async.shared::cta"()
+        fence_barrier_init()
     end
     sync_threads()
     if tid==Int32(0)
         # Both Q tiles and tile 0 complete the first stage's barrier.
-        expect!(full,Int32(0),2TILE_BYTES+(tiles>Int32(0) ? 2TILE_BYTES : Int32(0)))
-        @inbounds tma_load!(shared_tile(qb,base),qb,(row0,Int32(0),head),full)
-        @inbounds tma_load!(shared_tile(qb,base+TILE_BYTES),qb,(row0+Int32(64),Int32(0),head),full)
+        arrive!(stage(full,Int32(0)),2TILE_BYTES+(tiles>Int32(0) ? 2TILE_BYTES : Int32(0)))
+        @inbounds tma_load!(shared_tile(qb,base),qb,(row0,Int32(0),head),stage(full,Int32(0)))
+        @inbounds tma_load!(shared_tile(qb,base+TILE_BYTES),qb,(row0+Int32(64),Int32(0),head),stage(full,Int32(0)))
         tiles>Int32(0) && load_tile!(kb,vb,base,full,Int32(0),head)
         for t in Int32(1):min(tiles,Int32(3))-Int32(1)
-            expect!(full,t,2TILE_BYTES)
+            arrive!(stage(full,t),2TILE_BYTES)
             load_tile!(kb,vb,base,full,t,head)
         end
     end
@@ -179,7 +174,7 @@ function attention_kernel!(output,qb,kb,vb,mask,m::Int32,n::Int32,config,::Val{C
         if tid==Int32(128) && b+Int32(3)<tiles
             # Stage (b+3)&3 held tile b-1, whose last readers were both
             # groups' blocks b, and group 1's has just finished.
-            expect!(full,b+Int32(3),2TILE_BYTES)
+            arrive!(stage(full,b+Int32(3)),2TILE_BYTES)
             load_tile!(kb,vb,base,full,b+Int32(3),head)
         end
         key=b*Int32(64)

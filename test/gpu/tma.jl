@@ -4,22 +4,22 @@ function tma_roundtrip!(out,binding,origin,iterations::Int32)
     align = 8*swizzle_bytes(binding)
     smem = @inbounds CuDynamicSharedArray(UInt8,bytes+align+32)
     raw = pointer(smem)
-    bar = reinterpret(Core.LLVMPtr{UInt64,3},raw)
+    bar = Barrier(raw)
     start = raw+32
     start += (UInt32(0)-PTX.smem_addr_u32(start)) & UInt32(align-1)
     tile = shared_tile(binding,start)
     tid = Int32(threadIdx().x)-Int32(1)
     if tid == 0
-        ptx"mbarrier.init.shared.b64"(bar,UInt32(1))
-        ptx"fence.proxy.async.shared::cta"()
+        initialize!(bar,1)
+        fence_barrier_init()
     end
     sync_threads()
     for phase in Int32(0):iterations-Int32(1)
         if tid == 0
-            ptx"mbarrier.arrive.expect_tx.shared.b64"(bar,UInt32(bytes))
+            arrive!(bar,bytes)
             @inbounds tma_load!(tile,binding,origin,bar)
         end
-        while !ptx"mbarrier.try_wait.parity.shared.b64"(bar,UInt32(phase&Int32(1))) end
+        wait(bar,phase)
         m,n = size(tile)
         for i in tid:Int32(32):Int32(m*n-1)
             r,c = i%Int32(m),i÷Int32(m)
@@ -27,7 +27,7 @@ function tma_roundtrip!(out,binding,origin,iterations::Int32)
         end
         sync_threads() # every consumer finished before phase reuse
     end
-    tid == 0 && ptx"mbarrier.inval.shared.b64"(bar)
+    tid == 0 && invalidate!(bar)
     nothing
 end
 # Generic-proxy writes through the layout, published to the async proxy,
@@ -45,7 +45,7 @@ function tma_store_kernel!(src,binding,origin)
         r,c = i%Int32(m),i÷Int32(m)
         @inbounds unsafe_store!(pointer(tile,(r,c)),src[r+Int32(1),c+Int32(1)])
     end
-    ptx"fence.proxy.async.shared::cta"()
+    fence_async_shared()
     sync_threads()
     if tid == 0
         @inbounds tma_store!(binding,tile,origin)
