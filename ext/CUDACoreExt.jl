@@ -26,6 +26,7 @@ end
     words = @rtuple(i -> UInt32(pairs[2i-1]) | (UInt32(pairs[2i]) << 16), 1:N÷4)
     Tylo._from_words(T,words,Tylo.Layouts.layout(f))
 end
+@device_override @inline Tylo._smem_address(p::Core.LLVMPtr{T,3}) where T = PTX.smem_addr_u32(p)
 @device_override @inline Tylo._warp_reduce(op::F,x,::Val{W}) where {F,W} = PTX.Warps.warp_reduce(op,x,Val(W))
 # stmatrix exists from sm_90; the compile target decides, folded at compile time.
 @device_override @inline Tylo._stmatrix_available() = CUDACore.compute_capability().major >= 9

@@ -31,6 +31,10 @@ struct MemoryTile{T,AS,L<:Layouts.AbstractLayout,A,B}
         new{T,AS,typeof(l),A,B}(ptr,l,bounds)
     end
 end
+# The 32-bit shared-window address of a shared pointer. A shared pointer's
+# value is that address, which host code (descriptor tests) reads directly;
+# kernels convert with the instruction CUDACoreExt supplies.
+@inline _smem_address(p::Core.LLVMPtr{T,3}) where T = reinterpret(UInt64,p) % UInt32
 const GlobalTile{T,L,A} = MemoryTile{T,1,L,A}
 const SharedTile{T,L,A} = MemoryTile{T,3,L,A}
 Base.@constprop :aggressive Base.@propagate_inbounds GlobalTile(p::Core.LLVMPtr{T,1},l::Layouts.AbstractLayout,

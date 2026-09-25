@@ -19,12 +19,12 @@ Base.@propagate_inbounds function operand(p::WGMMAAtom{T,N,K},role::Role,
     s.major === :K || throw(ArgumentError("shared/shared WGMMA operands are K-major"))
     K <= s.row_elements || throw(ArgumentError("the plan's K does not fit one swizzle row"))
     @boundscheck begin
-        PTX.smem_addr_u32(t.ptr) % UInt32(8s.swizzle_bytes) == 0 || throw(ArgumentError("WGMMA storage alignment"))
+        _smem_address(t.ptr) % UInt32(8s.swizzle_bytes) == 0 || throw(ArgumentError("WGMMA storage alignment"))
         validate_wgmma(p,role,t.layout,origin)
     end
     # Non-K origin is aligned to a full eight-row swizzle cycle. Start address
     # is unswizzled; hardware applies the descriptor's swizzle to each access.
-    start = PTX.smem_addr_u32(t.ptr) + (_unswizzled(t.layout)(origin)*Int32(sizeof(T))) % UInt32
+    start = _smem_address(t.ptr) + (_unswizzled(t.layout)(origin)*Int32(sizeof(T))) % UInt32
     desc = PTX.wgmma_descriptor(start;leading_byte_offset=16,stride_byte_offset=s.stride_bytes,
         swizzle=_wgmma_swizzle(s.swizzle_bytes))
     WGMMAOperand{typeof(p),Role}(desc)
@@ -39,7 +39,7 @@ end
     init = [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
     ops = [begin
         name = Symbol(:part,j%P)
-        :($name = $instruction($name,PTX.step_desc(a.descriptor,$(32j)),PTX.step_desc(b.descriptor,$(32j)),Val(true)))
+        :($name = $instruction($name,_k_step(a,Val($j)),_k_step(b,Val($j)),Val(true)))
     end for j in 0:K÷16-1]
     vals = [:($(Symbol(:part,j))[$i]) for j in 0:P-1 for i in 1:N÷2]
     quote
@@ -51,6 +51,8 @@ end
         PendingWGMMA{typeof(p),$R}(($(vals...),))
     end
 end
+# The descriptor of the `j`-th K=16 instruction: 32 bytes further along K.
+@inline _k_step(o::WGMMAOperand,::Val{J}) where J = PTX.step_desc(o.descriptor,32J)
 @inline function wait_mma(c::PendingWGMMA{P}) where P
     WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val(:wait),c.data))
 end

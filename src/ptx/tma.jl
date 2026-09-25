@@ -33,7 +33,7 @@ end
 Base.@propagate_inbounds function _check_tma(t::SharedTile{T,L},b::TMABinding{TMATile{T,S,A,W}},origin) where {T,L,S,A,W}
     L === typeof(shared_layout(b.plan)) || throw(ArgumentError("the shared layout is not the plan's canonical storage"))
     @boundscheck begin
-        PTX.smem_addr_u32(t.ptr) % UInt32(8W) == 0 || throw(ArgumentError("TMA storage alignment"))
+        _smem_address(t.ptr) % UInt32(8W) == 0 || throw(ArgumentError("TMA storage alignment"))
         (origin[A]*Int32(sizeof(T))) % Int32(16) == 0 || throw(ArgumentError("the inner origin must start a 16-byte chunk"))
     end
     nothing

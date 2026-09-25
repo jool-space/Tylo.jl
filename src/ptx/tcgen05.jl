@@ -18,23 +18,27 @@ Base.@propagate_inbounds function operand(a::A,role::Role,t::SharedTile{T,L},
     kaxis = _k_axis(role)
     chunk = Int32(16 ÷ sizeof(T))
     @boundscheck begin
-        PTX.smem_addr_u32(t.ptr) % UInt32(8s.swizzle_bytes) == 0 || throw(ArgumentError("tcgen05 operand storage must be aligned to eight swizzle rows"))
+        _smem_address(t.ptr) % UInt32(8s.swizzle_bytes) == 0 || throw(ArgumentError("tcgen05 operand storage must be aligned to eight swizzle rows"))
         origin[kaxis] >= 0 && origin[3-kaxis] >= 0 && origin[3-kaxis] % Int32(8) == 0 &&
             (s.major === :K ? origin[kaxis] % chunk == 0 : origin[kaxis] % Int32(8) == 0 && origin[3-kaxis] % Int32(s.row_elements) == 0) ||
             throw(ArgumentError("operand origin must start a swizzle chunk"))
         origin[3-kaxis] + outer <= size(t)[3-kaxis] || throw(BoundsError(t,origin))
         s.major === :K || origin[3-kaxis] + outer <= s.row_elements*s.groups || throw(BoundsError(t,origin))
     end
-    address = PTX.smem_addr_u32(t.ptr)
+    address = _smem_address(t.ptr)
     # Bounds checks on: PTX.jl's checked builder validates the address window
     # and alignment. Elided: the constant fields with the address masked in.
     base = _descriptor_fields(Val(s.leading_bytes),Val(s.stride_bytes),Val(s.swizzle_bytes)) | UInt64((address & UInt32(0x3FFF0)) >> 4)
     @boundscheck base = PTX.tcgen05_descriptor(address;leading_bytes=s.leading_bytes,
                                                stride_bytes=s.stride_bytes,swizzle=_tcgen05_swizzle(s.swizzle_bytes))
     layout = _unswizzled(t.layout)
-    Tcgen05Operand{typeof(a),Role,s.major,T,typeof(layout)}(base,base + _units(layout,origin,T),layout,origin)
+    Tcgen05Operand{typeof(a),Role,s.major,T,typeof(layout)}(base,_advance(base,_units(layout,origin,T)),layout,origin)
 end
-@inline _units(layout,c,::Type{T}) where T = ((layout(c) % UInt32) * UInt32(sizeof(T)) >> 4) % UInt64
+# Descriptor units of 16 bytes. (`>>` binds tighter than `*` in Julia.)
+@inline _units(layout,c,::Type{T}) where T = ((layout(c) % UInt32) * UInt32(sizeof(T))) >> 4
+# A descriptor moved by `units`: the start address is the low field, so the
+# sum stays in the low word and the high word (strides, mode) is untouched.
+@inline _advance(d::UInt64,units::UInt32) = (d & 0xffffffff00000000) | UInt64((d % UInt32) + units)
 # Descriptor offsets come from the unswizzled layout: at chunk-aligned
 # origins the swizzle is the identity, and the hardware applies it to every
 # access itself. Stepping through the plain affine map keeps each K step a
@@ -64,14 +68,14 @@ Base.@propagate_inbounds function operand(o::Tcgen05Operand{P,Role,Major,T,L},or
             throw(ArgumentError("operand origin must start a swizzle chunk"))
         origin[3-kaxis] + outer <= size(o.layout)[3-kaxis] || throw(BoundsError(o,origin))
     end
-    Tcgen05Operand{P,Role,Major,T,L}(o.base,o.base + _units(o.layout,origin,T),o.layout,origin)
+    Tcgen05Operand{P,Role,Major,T,L}(o.base,_advance(o.base,_units(o.layout,origin,T)),o.layout,origin)
 end
 # A K step: through the layout in general, so stripes and row groups land
 # where the layout puts them; by a constant when the K axis is one flat
 # mode, so a runtime origin costs one add per instruction.
 @inline function _step(o::Tcgen05Operand{P,Role,Major,T},::Val{DK}) where {P,Role,Major,T,DK}
     c = _k_axis(Role) == 1 ? (o.origin[1]+Int32(DK),o.origin[2]) : (o.origin[1],o.origin[2]+Int32(DK))
-    o.base + _units(o.layout,c,T)
+    _advance(o.base,_units(o.layout,c,T))
 end
 _flat_k_stride(::Type,kaxis) = nothing
 function _flat_k_stride(::Type{Layouts.Layout{S,D}},kaxis) where {S,D}
@@ -81,9 +85,13 @@ end
 _flat_k_stride(::Type{Layouts.Window{S,L,O}},kaxis) where {S,L,O} = _flat_k_stride(L,kaxis)
 function _step_expr(name,::Type{O},::Type{T},DK) where {O<:Tcgen05Operand,T}
     stride = _flat_k_stride(O.parameters[5],_k_axis(O.parameters[2]))
-    stride === nothing ? :(_step($name,Val($DK))) : :($name.at + $(UInt64(DK*stride*sizeof(T) ÷ 16)))
+    stride === nothing ? :(_step($name,Val($DK))) : :(_advance($name.at,$(UInt32(DK*stride*sizeof(T) ÷ 16))))
 end
 _step_expr(name,::Type{<:TmemTile},::Type,DK) = :(_step($name,Val($DK)))
+# The operand of the instruction `DK` elements along K: a descriptor for a
+# shared operand, a TMEM address for a TMEM A.
+@generated _k_step(o::O,::Val{DK}) where {O<:Union{Tcgen05Operand,TmemTile},DK} =
+    :(Base.@inline; $(_step_expr(:o,O,O <: TmemTile ? O.parameters[1] : O.parameters[4],DK)))
 @inline _k_extent(o::Tcgen05Operand{P,Role}) where {P,Role} = Int(size(o.layout)[_k_axis(Role)]) - Int(o.origin[_k_axis(Role)])
 @inline _tmem_offset(::Layouts.Layout,::Type) = UInt32(0)
 @inline _tmem_offset(w::Layouts.Window,::Type{T}) where T =
@@ -127,7 +135,7 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
     idesc = instruction_descriptor(inst;a_major=amajor,b_major=bmajor)
     instruction = Meta.parse("ptx\"tcgen05.mma.cta_group::1.kind::$(_tcgen05_kind(eltype(inst,OperandA())))\"")
     TA = eltype(inst,OperandA())
-    issues = [:($instruction(dstart,$(_step_expr(:a,OA,TA,kk*katom)),$(_step_expr(:b,OB,eltype(inst,OperandB()),kk*katom)),
+    issues = [:($instruction(dstart,_k_step(a,Val($(kk*katom))),_k_step(b,Val($(kk*katom))),
                              $idesc,$(kk == 0 ? :accumulate : true)))
               for kk in 0:K÷katom-1]
     quote
@@ -138,7 +146,7 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
         nothing
     end
 end
-@inline commit_mma(barrier::Core.LLVMPtr{UInt64,PTX.AS.Shared}) = commit_mma(PTX.smem_addr_u32(barrier))
+@inline commit_mma(barrier::Core.LLVMPtr{UInt64,PTX.AS.Shared}) = commit_mma(_smem_address(barrier))
 @inline commit_mma(barrier::UInt32) =
     ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cta.b64"(barrier)
 
@@ -147,7 +155,7 @@ end
 end
 @inline function tmem_allocate!(slot::Core.LLVMPtr{UInt32,PTX.AS.Shared},columns::Integer)
     _check_tmem_columns(columns)
-    ptx"tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"(PTX.smem_addr_u32(slot),columns % UInt32)
+    ptx"tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"(_smem_address(slot),columns % UInt32)
 end
 @inline function tmem_deallocate!(address::UInt32,columns::Integer)
     _check_tmem_columns(columns)

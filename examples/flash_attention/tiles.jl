@@ -109,7 +109,8 @@ end
     p = Tylo.TmemTile(BFloat16,tmem + UInt32(STAGE*128),@Layout((128,FAB_BN),(1,128)))
     NG = SPLITP ? 2 : 4        # publish groups per tile (halves / quarters)
     W = FAB_BN ÷ NG            # key rows per group
-    for g in 0:(NG - 1)
+    # Unrolled in full, whatever LLVM's heuristics make of the loop's body.
+    PTX.Utils.@unroll 4 for g in 0:(NG - 1)
         fab_wait(dbg, bars.p_q[STAGE, g], ph_pq, Val(5))
         if g == 0
             ph_or = fab_wait(dbg, bars.o_resc[STAGE, PAR], ph_or, Val(6))
