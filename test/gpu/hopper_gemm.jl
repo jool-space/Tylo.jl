@@ -24,13 +24,17 @@ end
 if capability_is(v"9.0")
 @testset "Warp-specialized Hopper GEMM on Hopper" begin
     rng = MersenneTwister(5)
-    for (m,n,k) in ((256,256,256),(384,512,640)), (w,stages) in ((128,3),(256,4))
+    # 2048×2304 has 144 tiles of 128×256: more than an H100's SMs, so
+    # persistent CTAs walk two tiles, carrying the pipeline across them.
+    for T in (BFloat16,Float8_E4M3FN), (m,n,k) in ((256,256,256),(384,512,640),(2048,2304,256)),
+            (w,stages) in ((128,3),(256,4)), persistent in (false,true)
         n % w == 0 || continue
-        ha = BFloat16.(randn(rng,Float32,k,m) ./ sqrt(Float32(k)))
-        hb = BFloat16.(randn(rng,Float32,k,n))
-        _, launch, c = hopper_gemm(CuArray(ha),CuArray(hb);n=w,stages)
+        ha = T.(randn(rng,Float32,k,m) ./ sqrt(Float32(k)))
+        hb = T.(randn(rng,Float32,k,n))
+        k % (128 ÷ sizeof(T)) == 0 || continue
+        _, launch, c = hopper_gemm(CuArray(ha),CuArray(hb);n=w,stages,group=1,persistent)
         launch(); synchronize()
-        expected = transpose(Float64.(ha))*Float64.(hb)                # M×N
+        expected = transpose(Float64.(Float32.(ha)))*Float64.(Float32.(hb))   # M×N
         actual = permutedims(Float64.(Array(c)))
         @test all(abs.(actual .- expected) .<= 0.02 .+ 0.01 .* abs.(expected))
     end

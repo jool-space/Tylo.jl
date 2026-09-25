@@ -26,19 +26,30 @@ function hopper_gemm_kernel!(c,a,b,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{Stag
         fence_barrier_init()
     end
     sync_threads()
-    tm, tn = tile_order(Int32(blockIdx().x)-Int32(1),size(c,2) % Int32 ÷ Int32(128),Val(Group))
-    row, col = tm*Int32(128), tn*Int32(N)
+    m, n = size(c,2) % Int32, size(c,1) % Int32
+    tiles_m, tiles_n = m ÷ Int32(128), n ÷ Int32(N)
+    tiles = tiles_m*tiles_n
     count = k ÷ Int32(KS)
     @inline stage(i) = buffers+(i%Int32(Stages))*Int32(bytes)
+    # A CTA walks tiles blockIdx, blockIdx+gridDim, ... (one when the grid
+    # covers them all). Loads and MMAs count stages across tiles, so the
+    # producer fills the next tile's stages while the consumers store.
     if warpgroup == Int32(0)
         release_registers(Val(40))
         if tid == Int32(0)
-            for i in Int32(0):count-Int32(1)
-                slot = i%Int32(Stages)
-                i >= Int32(Stages) && wait(empty(slot),((i÷Int32(Stages))-Int32(1))&Int32(1))
-                arrive!(full(slot),bytes)
-                @inbounds tma_load!(shared_tile(a,stage(i)),a,(row,Int32(KS)*i),full(slot))
-                @inbounds tma_load!(shared_tile(b,stage(i)+transfer_bytes(a)),b,(Int32(KS)*i,col),full(slot))
+            i = Int32(0)
+            t = Int32(blockIdx().x)-Int32(1)
+            while t < tiles
+                tm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
+                for kk in Int32(0):count-Int32(1)
+                    slot = i%Int32(Stages)
+                    i >= Int32(Stages) && wait(empty(slot),((i÷Int32(Stages))-Int32(1))&Int32(1))
+                    arrive!(full(slot),bytes)
+                    @inbounds tma_load!(shared_tile(a,stage(i)),a,(tm*Int32(128),Int32(KS)*kk),full(slot))
+                    @inbounds tma_load!(shared_tile(b,stage(i)+transfer_bytes(a)),b,(Int32(KS)*kk,tn*Int32(N)),full(slot))
+                    i += Int32(1)
+                end
+                t += gridDim().x
             end
         end
     else
@@ -46,41 +57,49 @@ function hopper_gemm_kernel!(c,a,b,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{Stag
         rows = (warpgroup-Int32(1))*Int32(64)
         @inline operands(i) = @inbounds (operand(atom,OperandA(),shared_tile(a,stage(i)),(rows,Int32(0))),
                                  operand(atom,OperandB(),shared_tile(b,stage(i)+transfer_bytes(a))))
-        wait(full(Int32(0)),Int32(0))
-        acc = mma_async(atom,operands(Int32(0))...,zero_accumulator(atom))
-        for i in Int32(1):count-Int32(1)
-            wait(full(i%Int32(Stages)),(i÷Int32(Stages))&Int32(1))
-            acc = wait_mma(mma_async(atom,operands(i)...,acc),1)
-            arrive!(empty((i-Int32(1))%Int32(Stages)))   # stage i-1's group is complete
-        end
-        result = finish_mma(wait_mma(acc))
-        arrive!(empty((count-Int32(1))%Int32(Stages)))
-        m, n = size(c,2) % Int32, size(c,1) % Int32
         out = @inbounds GlobalTile(pointer(c),Layout((m,n),(n,static(1))),4)
-        @inbounds store!(window(out,(row+rows,col),(64,N)),Fragment{BFloat16}(result),tid%Int32(128))
+        i = Int32(0)
+        t = Int32(blockIdx().x)-Int32(1)
+        while t < tiles
+            tm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
+            wait(full(i%Int32(Stages)),(i÷Int32(Stages))&Int32(1))
+            acc = mma_async(atom,operands(i)...,zero_accumulator(atom))
+            for kk in Int32(1):count-Int32(1)
+                j = i+kk
+                wait(full(j%Int32(Stages)),(j÷Int32(Stages))&Int32(1))
+                acc = wait_mma(mma_async(atom,operands(j)...,acc),1)
+                arrive!(empty((j-Int32(1))%Int32(Stages)))   # stage j-1's group is complete
+            end
+            result = finish_mma(wait_mma(acc))
+            arrive!(empty((i+count-Int32(1))%Int32(Stages)))
+            i += count
+            @inbounds store!(window(out,(tm*Int32(128)+rows,tn*Int32(N)),(64,N)),Fragment{BFloat16}(result),tid%Int32(128))
+            t += gridDim().x
+        end
     end
     nothing
 end
 
-# The tile of CTA `id`: groups of `Group` row tiles, each walked down its rows
-# first, so that the CTAs running at once share A and B tiles through L2.
-@inline function tile_order(id::Int32,tiles_m::Int32,::Val{Group}) where Group
-    width = Int32(Group)*unchecked_div(gridDim().x,tiles_m) # CTAs per group of row tiles
-    first = unchecked_div(id,width)*Int32(Group)
+# Tile `t` in groups of `Group` row tiles, each walked down its rows first,
+# so that the CTAs running at once share A and B tiles through L2.
+@inline function tile_order(t::Int32,tiles_m::Int32,tiles_n::Int32,::Val{Group}) where Group
+    width = Int32(Group)*tiles_n                            # tiles per group of rows
+    first = unchecked_div(t,width)*Int32(Group)
     height = min(tiles_m-first,Int32(Group))
-    within = unchecked_rem(id,width)
+    within = unchecked_rem(t,width)
     first+unchecked_rem(within,height), unchecked_div(within,height)
 end
 
 """
-    hopper_gemm(a, b; n=256, stages=4, group=16) -> (kernel, launch, c)
+    hopper_gemm(a, b; n=256, stages=4, group=8, persistent=true) -> (kernel, launch, c)
 
 Prepare C = Aᵀ B for `a` (K×M) and `b` (K×N) on the device, BF16, FP16 or FP8: the tile
-width `n`, the number of shared stages and the number of row tiles
-grouped for L2 reuse are the configuration. Returns the
+width `n`, the number of shared stages, the number of row tiles grouped
+for L2 reuse, and whether one CTA per SM walks the tiles (`persistent`) or
+one CTA per tile runs are the configuration. Returns the
 compiled kernel, a launcher, and C as an N×M matrix (row-major M×N).
 """
-function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=16,c=nothing) where T
+function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,persistent::Bool=true,c=nothing) where T
     k, m = size(a); kb, nt = size(b)
     ks = 128 ÷ sizeof(T)                                  # one swizzle row of K per stage
     k == kb && k % ks == 0 && m % 128 == 0 && nt % n == 0 ||
@@ -94,6 +113,8 @@ function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Intege
     (m÷128) % group == 0 || throw(ArgumentError("row tiles must be a multiple of the group"))
     kernel = @cuda launch=false minthreads=384 hopper_gemm_kernel!(c,ta,tb,atom,Int32(k),Val(stages),Val(group))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
-    launch() = GC.@preserve ta tb kernel(c,ta,tb,atom,Int32(k),Val(stages),Val(group);threads=384,blocks=(m÷128)*(nt÷n),shmem)
+    tiles = (m÷128)*(nt÷n)
+    blocks = persistent ? min(tiles,CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)) : tiles
+    launch() = GC.@preserve ta tb kernel(c,ta,tb,atom,Int32(k),Val(stages),Val(group);threads=384,blocks,shmem)
     kernel, launch, c
 end

@@ -15,7 +15,7 @@ function main(::Type{T},m,n,k) where T
     library(); CUDACore.synchronize()
     expected = Float32.(Array(reference))
     println(CUDACore.name(device()),": C = AᵀB, ",T," inputs, BF16 C, ",(m,n,k))
-    candidates = [:cublaslt; [(; n=w, stages=s, group=g) for w in (128,256) for s in 3:5 for g in (1,4,8,16)]]
+    candidates = [:cublaslt; [(; n=w, stages=s, group=g, persistent=p) for w in (128,256) for s in 3:5 for g in (1,8) for p in (false,true)]]
     tuning = tune(candidates) do cand
         cand === :cublaslt && return library
         kernel, launch, c = hopper_gemm(a,b;cand...)
