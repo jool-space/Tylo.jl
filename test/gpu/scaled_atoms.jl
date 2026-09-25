@@ -39,8 +39,7 @@ scaled_name(atom) = join((string(eltype(atom,OperandA())),string(eltype(atom,Ope
         code=compile_kernel(scaled_atom_kernel!,tt;arch,threads=32)
         save_code("scaled-atom-$(scaled_name(atom))-b$nb-$arch",code)
         body=entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         @test occursin("mma.sync.aligned.m16n8k32.row.col.kind::mxf8f6f4.block_scale",body)
     end
 end

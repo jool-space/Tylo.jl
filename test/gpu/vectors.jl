@@ -26,8 +26,7 @@ cases() = ((operand_layout(MMAAtom((16,8,16),BFloat16),Accumulator()),Float32),
         code = compile_kernel(vector_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
         save_code("vectors-$(nameof(typeof(ownership)))-$T-$A",code)
         body = entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         # One access per vector when a plan derives, one per element otherwise;
         # the scalar path declares element alignment, so nothing merges.
         m,n = size(ownership)

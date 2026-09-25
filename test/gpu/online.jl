@@ -28,8 +28,7 @@ begin # assembly checks
     for arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
         code=compile_kernel(streaming_softmax_kernel!,tt;arch,threads=128)
         save_code("softmax-streaming-$arch",code)
-        @test !occursin(".local .",entry_body(code.ptx))
-        @test !occursin(r"\bcall",entry_body(code.ptx))
+        @test isempty(audit(code))
     end
 end
 end

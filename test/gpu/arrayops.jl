@@ -38,8 +38,7 @@ begin # assembly checks
         tt=Tuple{CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},typeof(patch),Val{4},Val{permute}}
         code=compile_kernel(array_pointwise!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
         body=entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         @test !occursin("shfl.sync",body)
     end
     for (kind,n,shuffles) in ((Val(:local),3,0),(Val(:warp),3,15),(MMAAtom((16,8,16),BFloat16),4,12))
@@ -49,8 +48,7 @@ begin # assembly checks
             code=compile_kernel(array_softmax!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
             save_code("array-softmax-$(kind isa Val ? typeof(kind).parameters[1] : nameof(typeof(kind)))-$permute",code)
             body=entry_body(code.ptx)
-            @test !occursin(".local .",body)
-            @test !occursin(r"\bcall",body)
+            @test isempty(audit(code))
             @test count("shfl.sync.bfly",body) == shuffles
             push!(codes,body)
         end

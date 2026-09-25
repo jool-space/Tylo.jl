@@ -1,0 +1,81 @@
+```@meta
+CurrentModule = Tylo
+```
+
+# Machine code
+
+Tylo's operations promise particular instructions: a vector of the widest
+width the layouts allow, one `ldmatrix` per block group, WGMMA that runs
+asynchronously. Whether a kernel keeps those promises is decided by the
+machine code, after LLVM and ptxas, and Julia can inspect every stage of
+it from the REPL. [`machine_code`](@ref) compiles a kernel without
+launching it, and [`audit`](@ref) checks the result:
+
+```julia
+julia> x = CuArray(rand(Float32, 64)); y = similar(x);
+
+julia> @machine_code roots!(y, x, Int32(3))
+MachineCode for sm_121a: _Z6roots_13CuDeviceArrayI7Float32Li1ELi1EES1_5Int32
+  36 registers, 1040 SASS instructions
+  memory: LD.E.U8 ×72, ST.E.U8 ×72, LDS ×20, ATOM.E.CAS.STRONG.GPU ×2, LDG.E ×1, STG.E ×1
+  ✗ calls julia_overflow_case
+      from roots.jl:2 (roots!) → range.jl:367 (steprange_last)
+      hint: A StepRange (a:step:b) with runtime bounds checks its step and computes
+            its last element out of line. Iterate a unit range and scale the index,
+            or loop with while.
+  ✗ calls julia_throw_complex_domainerror
+      from roots.jl:3 (roots!) → math.jl:645 (sqrt)
+      hint: sqrt, log or ^ of a value not known to be nonnegative throws a
+            DomainError. When it is, use Core.Intrinsics.sqrt_llvm.
+  ✗ 0 bytes of local memory declared, 5 local loads and stores
+      hint: The exception reporting ptxas inlined keeps a local buffer; it goes
+            away with the calls.
+```
+
+for
+
+```julia
+function roots!(y, x, step)
+    for i in threadIdx().x:step:length(x)
+        @inbounds y[i] = sqrt(x[i])
+    end
+end
+```
+
+`machine_code(f, types; arch)` does the same for device-side argument
+types, without a GPU when `arch` names the target, which is how a test
+checks code for hardware it does not have:
+
+```julia
+code = machine_code(kernel!, Tuple{CuDeviceMatrix{Float32,1}, WGMMAAtom{BFloat16,64,64,1}};
+                    arch=CUDACore.SMVersion(9, 0, :arch), threads=128)
+@test isempty(audit(code))
+```
+
+## What the audit checks
+
+- **Calls.** A kernel should call nothing. Every call is out-of-line code,
+  and in a kernel with WGMMA, any call makes ptxas serialize all of it.
+  Julia brings calls in for exceptions (a bounds check, a `DivideError`
+  from `÷` by a runtime value, a `DomainError` from `sqrt`, an
+  `InexactError` from `Int32(x)`) and for Base helpers marked
+  `@noinline`, such as a `StepRange`'s. The audit traces each call to the
+  kernel's line, the innermost frame outside Base, and the Base frame that
+  made it, and says how such calls are usually removed.
+- **Local memory.** Values that did not become registers live in DRAM:
+  tuples indexed at run time, arrays the compiler could not scalarize.
+- **Spills.** ptxas ran out of registers.
+- **WGMMA serialization.** ptxas keeps WGMMA asynchronous only when it can
+  prove the pipeline safe; otherwise it waits after every instruction and
+  says so only as a performance warning. The audit counts
+  `WARPGROUP.ARRIVE`s in the SASS against `wgmma.fence`s in the PTX, and
+  reports the reason ptxas gave.
+
+## Looking closer
+
+A [`MachineCode`](@ref) holds the PTX, the cubin, its SASS and ptxas's
+report. [`registers`](@ref), [`spill_bytes`](@ref),
+[`memory_instructions`](@ref) (which widths loads and stores became),
+[`wgmma_groups`](@ref) and [`kernel_calls`](@ref) read them; `code.sass`
+and `code.ptx` are there to search. Tylo's own tests audit every kernel
+they compile, and check the instructions each plan promises this way.

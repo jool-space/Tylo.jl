@@ -113,8 +113,7 @@ begin # assembly checks
         code=compile_kernel(atom_oracle_kernel!,tt;arch,threads=32)
         save_code("atom-oracle-$(oracle_name(atom))-$arch",code)
         body=entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         @test occursin("mma.sync.aligned.m16n8k$(size(atom)[3])",body)
     end
 end
@@ -132,8 +131,7 @@ end
         code=compile_kernel(atom_copy_kernel!,tt;arch,threads=32)
         save_code("atom-copy-$(oracle_name(atom))-$(case[1])$(case[2])$(case[3] ? "s" : "")-$arch",code)
         body=entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         expected=String[]
         for plan in copy_plans(atom,case)
             plan === nothing && continue

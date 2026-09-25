@@ -89,8 +89,7 @@ begin # assembly checks
     for arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
         code=compile_kernel(tiled_gemm_kernel!,tt;arch,threads=128)
         save_code("ragged-gemm-$arch",code);body=entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         @test occursin("cp.async.cg.shared.global",body)
         @test occursin("mma.sync.aligned.m16n8k16",body)
     end

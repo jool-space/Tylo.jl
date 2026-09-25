@@ -32,8 +32,7 @@ end
     code = compile_kernel(chunks_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
     save_code("tiles-chunks",code)
     body = entry_body(code.ptx)
-    @test !occursin(".local .",body)
-    @test !occursin(r"\bcall",body)
+    @test isempty(audit(code))
     @test count("ld.global.v4",body) == 8          # one 16-byte vector per column
     @test count("st.global.v2",body) + count("st.global.b64",body) == 8   # eight E4M3 per column
     @test count("cvt.rn.satfinite.e4m3x2.f32",body) == 32
@@ -76,10 +75,10 @@ end
 
 @testset "Bounds inside a vector" begin
     tt = Tuple{CuDeviceMatrix{BFloat16,1},CuDeviceMatrix{BFloat16,1},Int32}
-    checked = entry_body(compile_kernel(straddle_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32).ptx)
-    unchecked = entry_body(compile_kernel(straddle_unchecked_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32).ptx)
+    checked = compile_kernel(straddle_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
+    unchecked = compile_kernel(straddle_unchecked_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
     wide = r"ld\.global\.(v4\.b32|v2\.b64)"
-    @test count(wide,checked) == count(wide,unchecked) == 1
-    @test occursin("trap",checked) || occursin(r"\bcall",checked)
-    @test !occursin("trap",unchecked) && !occursin(r"\bcall",unchecked)
+    @test count(wide,entry_body(checked.ptx)) == count(wide,entry_body(unchecked.ptx)) == 1
+    @test occursin("trap",entry_body(checked.ptx)) || !isempty(audit(checked))
+    @test !occursin("trap",entry_body(unchecked.ptx)) && isempty(audit(unchecked))
 end

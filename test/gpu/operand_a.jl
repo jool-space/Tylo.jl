@@ -58,7 +58,8 @@ begin # assembly checks
         code=compile_kernel(conversion_probe!,tt;arch,threads=32)
         save_code("operand-a-$T-$arch",code);body=entry_body(code.ptx)
         @test occursin(T==BFloat16 ? "cvt.rn.bf16x2.f32" : "cvt.rn.f16x2.f32",body)
-        @test !occursin(r"shfl|ldmatrix|\.shared|\.local|\bcall",body)
+        @test !occursin(r"shfl|ldmatrix|\.shared",body)
+        @test isempty(audit(code))
     end
 end
 end

@@ -35,8 +35,7 @@ end
             tt = Tuple{CuDeviceVector{Float32,1},CuDeviceVector{Float32,1},typeof(ownership),Val{n},Val{mode}}
             code = compile_kernel(rtuple_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
             body = entry_body(code.ptx)
-            @test !occursin(r"\bcall",body)
-            @test !occursin(".local .",body)
+            @test isempty(audit(code))
             save_code("rtuple-$n-$mode",code)
             code
         end

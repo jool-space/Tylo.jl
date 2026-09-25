@@ -24,8 +24,7 @@ end
                                   arch=CUDACore.SMVersion(12,1,:arch))
             save_code("wgmma-fragments-n$n-a$axis",code)
             body = entry_body(code.ptx)
-            @test !occursin(".local .",body)
-            @test !occursin(r"\bcall",body)
+            @test isempty(audit(code))
             @test occursin("shfl.sync.bfly",body)
         end
         if runtime_supported(@__FILE__)
@@ -49,12 +48,9 @@ end
             save_code("hopper-softmax-$(T)-n$n-k$k",code)
             body = entry_body(code.ptx)
             @test occursin("wgmma.mma_async",body)
-            arrives, fences = wgmma_arrives(code)
-            @test arrives == fences
             @test occursin("shfl.sync.bfly",body)
             @test first(findfirst("wgmma.wait_group",body)) < first(findfirst("shfl.sync.bfly",body))
-            @test !occursin(r"\bcall",body)
-            @test !occursin(".local .",body)
+            @test isempty(audit(code))
         end
         if capability_is(v"9.0")
             out = CuArray{Float32}(undef,64,n)

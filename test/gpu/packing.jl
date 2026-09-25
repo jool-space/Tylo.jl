@@ -29,8 +29,7 @@ end
             save_code("packing-$(T)-w$w",code)
             body = entry_body(code.ptx)
             @test occursin(T === BFloat16 ? "cvt.rn.bf16x2.f32" : "cvt.rn.f16x2.f32",body)
-            @test !occursin(".local .",body)
-            @test !occursin(r"\bcall",body)
+            @test isempty(audit(code))
         end
         if runtime_supported(@__FILE__)
             values = randn(MersenneTwister(47),Float32,32*2w)
@@ -95,8 +94,7 @@ end
             @test count("cvt.rn.satfinite.$(names[T]).$(names[S])",body) == (packs ? 2w : 0)
             @test occursin("cvt.rn.$(names[H]).$(names[T])",body) == widens
             if ptx_isa >= v"9.2"
-                @test !occursin(".local .",body)
-                @test !occursin(r"\bcall",body)
+                @test isempty(audit(native))
             end
             # sm_80 has none of these instructions and takes the generic path.
             generic = compile_kernel(fp8_packing_kernel!,tt;arch=CUDACore.SMVersion(8,0),threads=32)
@@ -160,8 +158,7 @@ end
             @test occursin("tcgen05.ld.sync.aligned.32x32b.x$w.b32",body)
             @test occursin("tcgen05.st.sync.aligned.32x32b.x$w.b32",body)
             @test occursin("tcgen05.wait::ld.sync.aligned",body)
-            @test !occursin(r"\bcall",body)
-            @test !occursin(".local .",body)
+            @test isempty(audit(code))
         end
         if capability_major(10)
             values = T.(randn(MersenneTwister(623),Float32,128*w*(4÷sizeof(T))))

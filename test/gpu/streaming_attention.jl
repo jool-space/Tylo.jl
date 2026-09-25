@@ -14,8 +14,7 @@ begin # assembly checks
         @test count("cp.async.bulk.tensor.3d",body)==2+2+2+2 # Q, tile 0, the prologue loop, the main loop's prefetch
         @test count("bar.sync",body)==3 && count("bar.arrive",body)==2
         @test occursin("cvt.rn.bf16x2.f32",body)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
     end
 
 end

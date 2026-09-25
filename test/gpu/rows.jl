@@ -23,8 +23,7 @@ begin # assembly checks
         code=compile_kernel(row_probe!,tt;arch,threads=32)
         save_code("rows-$(nameof(typeof(kind)))-$n-$arch",code)
         body=entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         @test count("shfl.sync.bfly",body) == nshfl
     end
 end

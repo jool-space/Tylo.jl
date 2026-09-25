@@ -139,10 +139,8 @@ ptxas keeps WGMMA asynchronous only when it can prove the pipeline safe.
 Any function call in the kernel, even on another warp's path (an
 out-of-line error helper, a `StepRange`'s overflow check), makes it wait
 after every instruction instead, and says so only as a performance
-warning. The SASS shows it: an asynchronous kernel has one
-`WARPGROUP.ARRIVE` per `wgmma.fence` in its PTX, while a serialized kernel
-has one per instruction. Tylo's tests check this for every WGMMA kernel
-they compile.
+warning. [`audit`](@ref) reports it, and traces the calls to their lines
+(see [Machine code](machine.md)).
 
 ## tcgen05 and tensor memory (Blackwell)
 

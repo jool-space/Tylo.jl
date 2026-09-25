@@ -20,6 +20,7 @@ makedocs(;
         "Fragments" => "fragments.md",
         "Hardware operations" => "operations.md",
         "A complete kernel" => "kernel.md",
+        "Machine code" => "machine.md",
         "Design" => "design.md",
         "Status" => "status.md",
         "API reference" => "api.md",

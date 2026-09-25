@@ -22,8 +22,7 @@ end
     @test count(r"st\.global\.(v4\.b32|v2\.b64)", body) == 1
     @test count("shfl.sync.bfly", body) == 10
     @test count("cvt.rn.bf16x2.f32", body) == 4
-    @test !occursin(r"\bcall", body)
-    @test !occursin(".local .", body)
+    @test isempty(audit(code))
 end
 
 if runtime_supported(@__FILE__)

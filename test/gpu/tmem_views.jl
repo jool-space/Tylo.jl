@@ -40,8 +40,7 @@ end
         code=compile_kernel(tmem_view_kernel!,Tuple{tt.parameters...,Val{p},Val{h}};
                             arch=CUDACore.SMVersion(12,1,:arch))
         save_code("tmem-views-permuted$p-nested$h",code)
-        @test !occursin(r"\bcall",entry_body(code.ptx))
-        @test !occursin(".local .",entry_body(code.ptx))
+        @test isempty(audit(code))
         @test !occursin("tcgen05.",code.ptx)
         @test occursin("cvt.rn.bf16x2.f32",code.ptx)
     end

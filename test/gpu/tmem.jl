@@ -46,8 +46,7 @@ end
             Tuple{CuDeviceVector{UInt16,1},CuDeviceVector{Float32,1},Val{p}})
         save_code(p ? "tmem-roundtrip-permuted" : "tmem-roundtrip",code)
         @test !isempty(code.image)
-        @test !occursin(".local .",entry_body(code.ptx))
-        @test !occursin(r"\bcall",entry_body(code.ptx))
+        @test isempty(audit(code))
     end
 end
 

@@ -15,10 +15,7 @@ begin # assembly checks
         save_code("hopper-$(T)-n$n-p$partials-s$stages",code)
         body = entry_body(code.ptx)
         @test !isempty(code.image)
-        @test !occursin(".local .",body)
-        @test count(r"\bcall",body) == 0
-        arrives, fences = wgmma_arrives(code)
-        @test arrives == fences
+        @test isempty(audit(code))
         for instruction in ("cp.async.bulk.tensor.2d", "mbarrier.arrive.expect_tx", "wgmma.fence.sync.aligned",
                             "wgmma.mma_async.sync.aligned.m64n$(n)k16", "wgmma.commit_group.sync.aligned",
                             "wgmma.wait_group.sync.aligned 0")
@@ -71,9 +68,7 @@ begin # assembly checks
             arch=CUDACore.SMVersion(9,0,:arch))
         save_code("hopper-origin-$(T)-n$n-k$k-p$partials",code)
         @test !isempty(code.image)
-        arrives, fences = wgmma_arrives(code)
-        @test arrives == fences
-        @test !occursin(".local .",entry_body(code.ptx))
+        @test isempty(audit(code))
     end
 end
 end
@@ -85,14 +80,12 @@ end
         body = entry_body(code.ptx)
         @test count("wgmma.mma_async",body) == 4 && count("wgmma.commit_group",body) == 4
         @test count("wgmma.fence",body) == 4
-        arrives, fences = wgmma_arrives(code)
-        @test arrives == fences
         @test count("wgmma.wait_group.sync.aligned 1",body) == 3
         @test count("wgmma.wait_group.sync.aligned 0",body) == 1
         commits = [first(r) for r in findall("wgmma.commit_group",body)]
         waits = [first(r) for r in findall("wgmma.wait_group",body)]
         @test issorted(vcat(commits[1:2],waits[1],commits[3],waits[2],commits[4],waits[3:4]))
-        @test !occursin(".local .",body) && !occursin(r"\bcall",body)
+        @test isempty(audit(code))
     end
 end
 if capability_is(v"9.0")

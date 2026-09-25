@@ -59,4 +59,50 @@ function Adapt.adapt_structure(to::CUDACore.KernelAdaptor,b::Tylo.HostTMA{P,A,D,
     Adapt.adapt(to,b.storage)
     Tylo.TMABinding(b.plan,b.descriptor,Val(R))
 end
+
+# Machine code: compile as `@cuda` would, then assemble with ptxas in
+# verbose mode, whose report (registers, spills, WGMMA serialization) CUDACore
+# keeps only at debug level, and disassemble the cubin.
+function Tylo.machine_code(@nospecialize(f),@nospecialize(types::Type{<:Tuple});arch=nothing,threads=nothing,maxregs=nothing)
+    options = Pair{Symbol,Any}[:kernel => true]
+    arch === nothing || push!(options,:arch => arch)
+    threads === nothing || push!(options,:minthreads => threads)
+    maxregs === nothing || push!(options,:maxregs => maxregs)
+    config = CUDACore.compiler_config(arch === nothing ? CUDACore.device() : nothing;options...)
+    job = CUDACore.GPUCompiler.CompilerJob(CUDACore.GPUCompiler.methodinstance(typeof(f),types),config)
+    # Without debug information: its strings name Julia functions, which a
+    # search of the PTX would otherwise match.
+    stripped = CUDACore.GPUCompiler.CompilerJob(job.source,CUDACore.GPUCompiler.CompilerConfig(config;strip=true))
+    asm, _ = CUDACore.GPUCompiler.JuliaContext() do ctx
+        CUDACore.invoke_frozen(CUDACore.GPUCompiler.compile,:asm,stripped)
+    end
+    ptx = String(asm)
+    entry = something(match(r"\.visible \.entry\s+([\w$]+)",ptx),(;captures=["?"])).captures[1]
+    target = match(r"^\.target\s+(sm_\w+)"m,ptx)
+    target === nothing && error("no target in the PTX")
+    gpu = String(target[1])
+    image, log = mktempdir() do dir
+        input, output = joinpath(dir,"kernel.ptx"), joinpath(dir,"kernel.cubin")
+        write(input,ptx)
+        buffer = IOBuffer()
+        process = run(pipeline(ignorestatus(`$(CUDACore.CUDA_Compiler.ptxas()) --verbose --gpu-name $gpu --output-file $output $input`);
+                               stdout=buffer,stderr=buffer))
+        log = String(take!(buffer))
+        success(process) || error("ptxas failed for $entry:\n$log")
+        read(output), log
+    end
+    sass = mktempdir() do dir
+        path = joinpath(dir,"kernel.cubin")
+        write(path,image)
+        read(`$(CUDACore.CUDA_Compiler.nvdisasm()) $path`,String)
+    end
+    annotated = () -> begin
+        io = IOBuffer()
+        CUDACore.invoke_frozen(CUDACore.GPUCompiler.code_llvm,io,job;debuginfo=:source,dump_module=true)
+        String(take!(io))
+    end
+    Tylo.MachineCode(String(entry),gpu,ptx,image,sass,log,annotated)
+end
+Tylo._machine_code_call(f,args::Tuple;kwargs...) =
+    Tylo.machine_code(f,Tuple{map(a -> Core.Typeof(CUDACore.cudaconvert(a)),args)...};kwargs...)
 end

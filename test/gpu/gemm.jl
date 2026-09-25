@@ -16,8 +16,7 @@ begin # assembly checks
             save_code("gemm-$(T)-$(swizzled)-$(arch)",code)
             body = entry_body(code.ptx)
             @test !isempty(code.image)
-            @test count(r"\bcall",body) == 0
-            @test occursin(".local .",body) == false
+            @test isempty(audit(code))
             @test occursin("cp.async.cg.shared.global",body)
             @test occursin("cp.async.commit_group",body)
             @test occursin("cp.async.wait_group 1",body)

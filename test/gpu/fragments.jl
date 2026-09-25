@@ -44,8 +44,7 @@ end
         code = compile_kernel(f,tt)
         save_code(name,code)
         @test !isempty(code.image)
-        @test !occursin(".local .",entry_body(code.ptx))
-        @test !occursin(r"\bcall",entry_body(code.ptx))
+        @test isempty(audit(code))
         @test occursin("tcgen05.wait::ld.sync.aligned",code.ptx)
         @test occursin("tcgen05.ld.sync.aligned.32x32b.x64",code.ptx)
         body = entry_body(code.ptx)
@@ -57,8 +56,7 @@ end
         Tuple{CuDeviceVector{UInt16,1},CuDeviceVector{Float32,1},Float32};
         arch=CUDACore.SMVersion(12,1,:arch))
     save_code("fragments",code)
-    @test !occursin(".local .",entry_body(code.ptx))
-    @test !occursin(r"\bcall",entry_body(code.ptx))
+    @test isempty(audit(code))
     @test occursin("cvt.rn.bf16x2.f32",code.ptx)
     @test occursin("st.global.v4.b32",code.ptx)
 end

@@ -47,14 +47,15 @@ function barrier_copies!(out,src)
 end
 
 @testset "Barrier assembly" begin
-    body = entry_body(compile_kernel(barrier_copies!,Tuple{CuDeviceVector{BFloat16,1},CuDeviceVector{BFloat16,1}};
-                                     arch=CUDACore.SMVersion(12,1,:arch)).ptx)
+    code = compile_kernel(barrier_copies!,Tuple{CuDeviceVector{BFloat16,1},CuDeviceVector{BFloat16,1}};
+                          arch=CUDACore.SMVersion(12,1,:arch))
+    body = entry_body(code.ptx)
     @test occursin("mbarrier.init.shared.b64",body)
     @test occursin("fence.mbarrier_init.release.cluster",body)
     @test occursin("cp.async.mbarrier.arrive.noinc.shared.b64",body)
     @test occursin("mbarrier.try_wait.parity.shared.b64",body)
     @test count("cp.async.cg.shared.global",body) == 2
-    @test !occursin(r"\bcall",body)
+    @test isempty(audit(code))
 end
 
 if runtime_supported(@__FILE__)

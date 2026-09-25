@@ -54,12 +54,7 @@ end
 # Compile a kernel for an explicit target without a device, as `ptxas`
 # evidence. Kernels compiled this way are never loaded.
 function compile_kernel(f, tt; arch=CUDACore.SMVersion(10,0,:arch), threads=128)
-    config = CUDACore.compiler_config(nothing;kernel=true,arch,minthreads=threads)
-    job = CompilerJob(methodinstance(typeof(f),tt),config)
-    image = CUDACore.invoke_frozen(CUDACore.compile,job).image
-    io = IOBuffer()
-    CUDACore.invoke_frozen(CUDACore.GPUCompiler.code_native,io,job;dump_module=true)
-    (;image,ptx=String(take!(io)))
+    Tylo.machine_code(f,tt;arch,threads)
 end
 
 function save_code(name, code)
@@ -72,18 +67,6 @@ function save_code(name, code)
     write(joinpath(dir,name*".cubin"),code.image)
 end
 
-# SASS of a compiled image, with the disassembler ptxas ships with.
-function sass(image)
-    mktemp() do path,io
-        write(io,image); close(io)
-        read(`$(CUDACore.CUDA_Compiler_jll.nvdisasm_path) $path`,String)
-    end
-end
-# ptxas serializes WGMMA it cannot prove safe (a call anywhere in the kernel,
-# a warpgroup arrive it must insert on a divergent path), fencing and waiting
-# around every instruction. Asynchronous code keeps one WARPGROUP.ARRIVE per
-# wgmma.fence.
-wgmma_arrives(code) = (count("WARPGROUP.ARRIVE",sass(code.image)),count("wgmma.fence",code.ptx))
 
 function entry_body(ptx)
     split(split(ptx,".visible .entry";limit=2)[2],"// -- End function";limit=2)[1]

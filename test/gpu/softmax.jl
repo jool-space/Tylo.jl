@@ -10,8 +10,7 @@ begin # assembly checks
         ("softmax-mma",mma_softmax_kernel!,Tuple{CuDeviceMatrix{Float32,1},CuDeviceMatrix{BFloat16,1},CuDeviceMatrix{BFloat16,1},CuDeviceMatrix{Bool,1},typeof(config)},32))
         code=compile_kernel(f,tt;arch=CUDACore.SMVersion(12,1,:arch),threads)
         save_code(name,code); body=entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         @test occursin("shfl.sync.bfly",body)
         if name=="softmax-mma"
             @test occursin("mma.sync.aligned.m16n8k16",body)

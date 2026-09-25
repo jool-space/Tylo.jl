@@ -59,8 +59,7 @@ end
         code = compile_kernel(tcgen05_gemm_kernel!,tt;arch=CUDACore.SMVersion(10,0,:arch),threads=128)
         save_code("tcgen05-gemm-$variant",code)
         body = entry_body(code.ptx)
-        @test !occursin(".local .",body)
-        @test !occursin(r"\bcall",body)
+        @test isempty(audit(code))
         @test count("tcgen05.mma.cta_group::1.kind::f16",body) == 4
         @test count("tcgen05.commit",body) == 1
         @test count("tcgen05.alloc",body) == 1 && count("tcgen05.dealloc",body) == 1

@@ -153,7 +153,7 @@ end
     @test count("cp.async.bulk.wait_group.read 0",body) == 1
     @test count(r"cp\.async\.bulk\.wait_group 0",body) == 1
     @test count("fence.proxy.async.shared::cta",body) == 1
-    @test !occursin(r"\bcall",body)
+    @test isempty(audit(code))
     # Stores into one matrix of a batch skip the padding beyond its bounds.
     plan=TMATile(Float32,(32,64),1)
     dst=CuArray(fill(111f0,40,64,2))
