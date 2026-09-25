@@ -21,6 +21,7 @@ end
 _warp_reduce(op,x,width) = throw(ArgumentError("warp shuffles run on the device"))
 "One xor-shuffle exchange at a lane offset."
 _shuffle_xor(op,x,offset) = throw(ArgumentError("warp shuffles run on the device"))
+_shuffle_idx(x::UInt32,lane) = throw(ArgumentError("warp shuffles run on the device"))
 
 """
     _reduce_values(op, data, ownership, Val(axis))

@@ -64,3 +64,38 @@ end
         end
     end
 end
+
+# FP32 scores to an FP8 atom's register A (PTX ISA Figure 155), by the quad
+# exchange: every A slot holds the score at its coordinate. Two patterns of
+# exactly representable values, so that no misplacement can coincide.
+function fp8_operand_probe!(out,::Val{K},::Val{Pattern}) where {K,Pattern}
+    t = Int32(threadIdx().x)-Int32(1)
+    atom = WGMMAAtom(Float8_E4M3FN,64,K)
+    scores = zero_accumulator(WGMMAAtom(BFloat16,K,16))
+    at = @inbounds coordinates(scores,t)
+    value(x) = Pattern == 1 ? Float32((x[1]*Int32(5)+x[2]*Int32(3))%Int32(13)-Int32(6)) :
+                              Float32((x[1]+x[2]*Int32(7))%Int32(11)-Int32(5))
+    scores = map(value,at)
+    a = pack_operand_a(atom,scores,t)
+    Tylo.@rtuple(1:K÷2) do e
+        @inbounds out[e,t+Int32(1)] = reinterpret(UInt8,a.data[e])
+    end
+    nothing
+end
+@testset "FP8 register A from FP32 scores" begin
+    for K in (32,64,128), pattern in (1,2)
+        code = compile_kernel(fp8_operand_probe!,Tuple{CuDeviceMatrix{UInt8,1},Val{K},Val{pattern}};
+                              arch=CUDACore.SMVersion(9,0,:arch))
+        @test isempty(audit(code))
+        @test count("shfl.sync.idx",entry_body(code.ptx)) == 4*2*(K÷32)
+        if runtime_supported(@__FILE__) && capability_at_least(v"8.9")
+            out = CuArray{UInt8}(undef,K÷2,128)
+            @cuda threads=128 fp8_operand_probe!(out,Val(K),Val(pattern))
+            got = Array(out)
+            o = operand_layout(WGMMAAtom(Float8_E4M3FN,64,K),OperandA())
+            value(r,c) = reinterpret(UInt8,Float8_E4M3FN(pattern == 1 ? Float32((r*5+c*3)%13-6) : Float32((r+c*7)%11-5)))
+            @test all(got[e+1,t+1] == value(Tylo.Layouts.coordinate(o,t,e)...) for t in 0:127, e in 0:K÷2-1)
+        end
+    end
+    @test_throws ArgumentError pack_operand_a(WGMMAAtom(BFloat16,64,64),zero_accumulator(WGMMAAtom(BFloat16,64,16)),0)
+end

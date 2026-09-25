@@ -1,7 +1,7 @@
 # TEST_TARGET: cc==9.0
 # The Hopper FlashAttention forward example: clean for sm_90a, and equal to
 # attention in Float64 on Hopper.
-include("../../examples/hopper_attention/kernel.jl")
+include("../../examples/hopper_attention/fp8.jl")   # and kernel.jl
 
 @testset "Hopper attention assembly" begin
     let T = BFloat16, binding(plan) = Tylo.TMABinding{typeof(plan),PTX.TMADescriptorPtr,3}
@@ -67,6 +67,29 @@ if capability_is(v"9.0")
                 @test maximum(abs.(actual[:,:,h] .- transpose(p*transpose(Float64.(v[:,:,h]))))) <= 0.03
             end
             end
+        end
+    end
+end
+end
+
+if capability_is(v"9.0")
+# FP8 inputs, P quantized to FP8 as well: against Float64 attention of the
+# FP8-rounded inputs, a few percent relative error (P's 3-bit mantissa).
+@testset "FP8 Hopper attention on Hopper" begin
+    rng = MersenneTwister(8)
+    T = Float8_E4M3FN
+    for (s,bh) in ((256,2),(2048,9))
+        q, k = (T.(randn(rng,Float32,128,s,bh)) for _ in 1:2)
+        v = T.(randn(rng,Float32,128,s,bh))
+        vt = permutedims(v,(2,1,3))
+        _, launch, o = fp8_attention(CuArray(q),CuArray(k),CuArray(vt))
+        launch(); synchronize()
+        actual = Float64.(Array(o))
+        for h in 1:bh
+            sc = transpose(Float64.(Float32.(q[:,:,h])))*Float64.(Float32.(k[:,:,h])) ./ sqrt(128)
+            p = exp.(sc .- maximum(sc;dims=2)); p ./= sum(p;dims=2)
+            expected = transpose(p*transpose(Float64.(Float32.(v[:,:,h]))))
+            @test sqrt(sum(abs2,actual[:,:,h] .- expected)/sum(abs2,expected)) < 0.05
         end
     end
 end

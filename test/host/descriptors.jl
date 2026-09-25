@@ -110,7 +110,18 @@ end
             @test Tylo.Layouts.coordinate(o,t,e) == (r,c)
         end
     end
-    @test_throws ArgumentError operand_layout(WGMMAAtom(Float8_E4M3FN,64,64),OperandA())
+    # FP8 (Figure 155, m64nNk32): per instruction's 32 columns, a0-a3 hold
+    # columns 4(t%4)..4(t%4)+3 at row r, a4-a7 the same at row r+8, a8-a15
+    # the same 16 columns further.
+    for T in (Float8_E4M3FN,Float8_E5M2), k in (32,64,128)
+        o = operand_layout(WGMMAAtom(T,64,k),OperandA())
+        for t in 0:127, e in 0:k÷2-1
+            j, i = e ÷ 16, e % 16
+            r = 16(t ÷ 32) + (t % 32) ÷ 4 + 8((i ÷ 4) % 2)
+            c = 32j + 4(t % 4) + i % 4 + 16(i ÷ 8)
+            @test Tylo.Layouts.coordinate(o,t,e) == (r,c)
+        end
+    end
 end
 
 # Shared operands for tcgen05: K-major and MN-major, one row-width group or

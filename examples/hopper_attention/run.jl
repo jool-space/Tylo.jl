@@ -2,7 +2,7 @@
 # Times the Hopper attention forward pass (BF16, d = 128, non-causal) for a
 # few shapes, tuning its stage count; compare with reference.py.
 using Random
-include("kernel.jl")
+include("fp8.jl")          # and kernel.jl
 CUDACore.capability(CUDACore.device()) == v"9.0" || error("requires an H100 or H200")
 for (bh,s) in ((64,4096),(32,8192),(128,2048))
     rng = MersenneTwister(1)
@@ -33,4 +33,17 @@ for (bh,s) in ((64,4096),(32,8192),(128,2048))
     for t in tuning.trials[2:end]
         println("    ",t.candidate,": ",round(2.0*bh*s*s*128/t.median/1e12;digits=1)," TFLOP/s")
     end
+end
+
+# FP8 (E4M3) inputs, BF16 output.
+for (bh,s) in ((64,4096),(32,8192),(128,2048))
+    rng = MersenneTwister(3)
+    q, k = (CuArray(Float8_E4M3FN.(randn(rng,Float32,128,s,bh))) for _ in 1:2)
+    vt = CuArray(Float8_E4M3FN.(randn(rng,Float32,s,128,bh)))
+    tuning = tune([3,4,5]) do stages
+        kernel, launch, _ = fp8_attention(q,k,vt;stages)
+        kernel, launch
+    end
+    best = first(tuning.trials)
+    println("fp8, batch·heads $bh, seq $s: Tylo ",round(4.0*bh*s*s*128/best.median/1e12;digits=1)," TFLOP/s (",round(1e3best.median;digits=3)," ms, stages = ",best.candidate,")")
 end

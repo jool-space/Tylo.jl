@@ -27,6 +27,8 @@ end
     Tylo._from_words(T,words,Tylo.Layouts.layout(f))
 end
 @device_override @inline Tylo._smem_address(p::Core.LLVMPtr{T,3}) where T = PTX.smem_addr_u32(p)
+@device_override @inline Tylo._shuffle_idx(x::UInt32,lane::Int32) =
+    ptx"shfl.sync.idx.b32"(x,lane % UInt32,UInt32(0x1f),0xffffffff % UInt32)
 @device_override @inline Tylo._ex2(x::Float32) = ccall("llvm.nvvm.ex2.approx.ftz.f",llvmcall,Float32,(Float32,),x)
 @device_override @inline Tylo._warp_reduce(op::F,x,::Val{W}) where {F,W} = PTX.Warps.warp_reduce(op,x,Val(W))
 # stmatrix exists from sm_90; the compile target decides, folded at compile time.
@@ -153,5 +155,39 @@ function Tylo.tune(prepare,candidates;samples::Integer=15,audit=true,target::Rea
         push!(trials,Tylo.Trial(x.c,:timed,"",times[cld(length(times),2)],first(times),x.registers))
     end
     Tylo.Tuning(Tylo._ranked(trials))
+end
+
+# FP32 scores to an FP8 atom's register A: within each quad, thread q takes
+# its four consecutive columns 4q..4q+3 of each 16 from threads 2(q%2) and
+# 2(q%2)+1, which hold them as pairs in 8-column block q÷2 (and q÷2+2).
+@generated function Tylo.pack_operand_a(atom::A,f::Fragment{Float32,R,L},thread::Integer) where {T<:Union{Tylo.Float8_E4M3FN,Tylo.Float8_E5M2},N,K,A<:WGMMAAtom{T,N,K},R,L}
+    L === typeof(Tylo._operand_layout(WGMMAAtom{BFloat16,K,16,1}(),Tylo.Accumulator())) ||
+        return :(throw(ArgumentError("the scores are not a 64×$K accumulator fragment")))
+    # Accumulator slot (1-based) of pair p, row half h, 8-column block b.
+    slot(p,h,b) = 1 + p + 2h + 4b
+    words = Expr[]
+    body = Expr[]
+    for j in 0:K÷32-1, h in 0:1
+        pair(b) = :(_fp8_pair($T,f.data[$(slot(0,h,4j+b))],f.data[$(slot(1,h,4j+b))]))
+        x0, x1, u0, u1 = (Symbol(n,"_",j,"_",h) for n in (:x0,:x1,:u0,:u1))
+        push!(body,:($x0 = UInt32($(pair(0))) | (UInt32($(pair(2))) << 16)))
+        push!(body,:($x1 = UInt32($(pair(1))) | (UInt32($(pair(3))) << 16)))
+        push!(body,:($u0 = ifelse(high,Tylo._shuffle_idx($x1,from0),Tylo._shuffle_idx($x0,from0))))
+        push!(body,:($u1 = ifelse(high,Tylo._shuffle_idx($x1,from1),Tylo._shuffle_idx($x0,from1))))
+    end
+    for j in 0:K÷32-1, b in 0:1, h in 0:1
+        u0, u1 = Symbol(:u0_,j,"_",h), Symbol(:u1_,j,"_",h)
+        push!(words, b == 0 ? :(($u0 & 0x0000ffff) | ($u1 << 16)) : :(($u0 >> 16) | ($u1 & 0xffff0000)))
+    end
+    quote
+        Base.@inline
+        lane = thread % Int32(32)
+        q = lane & Int32(3)
+        high = q >= Int32(2)                         # wants blocks 1 and 3
+        from0 = (lane & ~Int32(3)) | ((q & Int32(1)) << 1)
+        from1 = from0 | Int32(1)
+        $(body...)
+        Tylo._from_words($T,($(words...),),Tylo.operand_layout(atom,Tylo.OperandA()))
+    end
 end
 end

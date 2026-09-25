@@ -64,15 +64,32 @@ function _operand_layout(::WGMMAAtom{T,N},::Accumulator) where {T,N}
                                ((s(128),s(1),s(16)),(s(64),s(8),s(512)))))
 end
 
-# A 16-bit A in registers holds 64×K in the accumulator's layout: for each
-# instruction's 16 columns, the pairs a0a1 (row r), a2a3 (row r+8), a4a5 and
-# a6a7 (the next 8 columns), as in the PTX ISA's register fragment figure.
+# A in registers holds 64×K. For 16-bit inputs it is the accumulator's
+# layout: for each instruction's 16 columns, the pairs a0a1 (row r), a2a3
+# (row r+8), a4a5 and a6a7 (the next 8 columns). For FP8, each instruction's
+# 32 columns: a0-a3 four consecutive columns 4(t%4) at row r, a4-a7 the same
+# at row r+8, a8-a15 the same 16 columns further (PTX ISA Figures 151, 155).
 function _operand_layout(::WGMMAAtom{T,N,K},::OperandA) where {T,N,K}
-    sizeof(T) == 2 || throw(ArgumentError("only 16-bit A operands come from registers"))
     L, s = Layouts.Layout, Layouts.static
-    Layouts.Ownership((64,K),L(((s(4),s(8),s(4)),(s(2),s(2),s(K÷8))),
-                               ((s(128),s(1),s(16)),(s(64),s(8),s(512)))))
+    sizeof(T) == 2 && return Layouts.Ownership((64,K),L(((s(4),s(8),s(4)),(s(2),s(2),s(K÷8))),
+                                                       ((s(128),s(1),s(16)),(s(64),s(8),s(512)))))
+    Layouts.Ownership((64,K),L(((s(4),s(8),s(4)),(s(4),s(2),s(2),s(K÷32))),
+                               ((s(256),s(1),s(16)),(s(64),s(8),s(1024),s(2048)))))
 end
+
+"""
+    pack_operand_a(atom::WGMMAAtom, scores, thread)
+
+An FP32 accumulator fragment of 64×K (`scores`, in the accumulator layout of
+a K-wide product) as the A operand of an FP8 atom of that K, in
+`operand_layout(atom, OperandA())`: FP8's register A holds four consecutive
+columns where the accumulator holds pairs, so each quad of threads exchanges
+pairs, four shuffles and two byte permutes per row and 32 columns. (For
+16-bit atoms the layouts agree: `Fragment{BFloat16}(scores)` is the A.)
+`thread` is the thread's index in its warpgroup.
+"""
+pack_operand_a(::WGMMAAtom,::Fragment,::Integer) =
+    throw(ArgumentError("pack_operand_a converts FP32 scores for FP8 atoms, on the device; for 16-bit atoms, Fragment{BFloat16}(scores) is the A operand"))
 
 # The role, the plan, the major order and the byte step between the plan's
 # instructions travel with the descriptor, preventing A/B swaps or reuse
