@@ -115,10 +115,9 @@ c = wait_mma(mma_async(atom, operand(atom, OperandA(), sa), operand(atom, Operan
 f = finish_mma(c)   # a Fragment of the 64×n accumulator
 ```
 
-A pipeline chains issues on a pending accumulator, which needs neither a
-fence nor a wait, and `wait_mma(c, 1)` retires every group but the newest,
-freeing the older stages' shared memory while the tensor cores work on the
-latest one:
+A pipeline chains issues on a pending accumulator, which needs no wait, and
+`wait_mma(c, 1)` retires every group but the newest, freeing the older
+stages' shared memory while the tensor cores work on the latest one:
 
 ```julia
 c = mma_async(atom, a(0), b(0), zero_accumulator(atom))
@@ -129,6 +128,15 @@ for i in 1:stages-1
 end
 f = finish_mma(wait_mma(c))
 ```
+
+ptxas keeps WGMMA asynchronous only when it can prove the pipeline safe.
+Any function call in the kernel, even on another warp's path (an
+out-of-line error helper, a `StepRange`'s overflow check), makes it wait
+after every instruction instead, and says so only as a performance
+warning. The SASS shows it: an asynchronous kernel has one
+`WARPGROUP.ARRIVE` per `wgmma.fence` in its PTX, while a serialized kernel
+has one per instruction. Tylo's tests check this for every WGMMA kernel
+they compile.
 
 ## tcgen05 and tensor memory (Blackwell)
 

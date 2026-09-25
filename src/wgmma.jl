@@ -61,11 +61,11 @@ end
 
 Warpgroup collective (128 threads, converged). Issue the atom's WGMMA
 instructions on the shared operands `a` and `b` (from [`operand`](@ref))
-and commit them as one group; the result is pending until
-[`wait_mma`](@ref). The accumulator is ready (from `zero_accumulator` or a
-completed wait, fenced before the issue) or still pending from the previous
-issue: a chain of issues on one accumulator needs no wait in between, which
-keeps the tensor cores busy while a pipeline waits for its next stage.
+and commit them as one group, after a `wgmma.fence`; the result is pending
+until [`wait_mma`](@ref). The accumulator is ready (from `zero_accumulator`
+or a completed wait) or still pending from the previous issue: a chain of
+issues on one accumulator needs no wait in between, which keeps the tensor
+cores busy while a pipeline waits for its next stage.
 Operands must be visible to the async proxy and unchanged until their
 group completes.
 """
@@ -82,10 +82,10 @@ pending.
 
 ```julia
 wait(full(0), 0)
-c = mma_async(atom, a(0), b(0), zero_accumulator(atom))   # the first issue fences
+c = mma_async(atom, a(0), b(0), zero_accumulator(atom))
 for i in 1:stages-1
     wait(full(i), phase(i))
-    c = mma_async(atom, a(i), b(i), c)      # chained: no fence, no wait
+    c = mma_async(atom, a(i), b(i), c)      # chained: no wait
     c = wait_mma(c, 1)                      # stage i-1's group is complete
     arrive!(empty(i-1))                     # its buffers may be refilled
 end

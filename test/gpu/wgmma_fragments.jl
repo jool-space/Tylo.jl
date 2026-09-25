@@ -49,6 +49,8 @@ end
             save_code("hopper-softmax-$(T)-n$n-k$k",code)
             body = entry_body(code.ptx)
             @test occursin("wgmma.mma_async",body)
+            arrives, fences = wgmma_arrives(code)
+            @test arrives == fences
             @test occursin("shfl.sync.bfly",body)
             @test first(findfirst("wgmma.wait_group",body)) < first(findfirst("shfl.sync.bfly",body))
             @test !occursin(r"\bcall",body)

@@ -31,12 +31,13 @@ Base.@propagate_inbounds function operand(p::WGMMAAtom{T,N,K},role::Role,
     WGMMAOperand{typeof(p),Role}(desc)
 end
 
-# Issue a plan's K/16 instructions and commit them as one group. A ready
-# accumulator's registers were last written by ordinary instructions, so a
-# wgmma.fence orders them first; a pending one's were last written by a
-# wgmma of the same shape, which the hardware orders by itself (PTX ISA
-# §9.7.17.7.1), so a chain of issues needs no fence and no wait.
-function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R,fence::Bool) where {T,N,K,P}
+# Issue a plan's K/16 instructions and commit them as one group. Every issue
+# fences, a chained one too: the hardware orders wgmma after wgmma on the same
+# accumulator (PTX ISA §9.7.17.7.1), but ptxas then inserts a warpgroup
+# arrive of its own, and where that lands on a path it cannot prove
+# convergent (after an mbarrier wait loop, say) it serializes every wgmma in
+# the kernel. The explicit fence is the same single instruction.
+function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R) where {T,N,K,P}
     dtype = T === BFloat16 ? "bf16" : "f16"
     instruction = ptx"wgmma.mma_async.sync.aligned.m64n$(N)k16.f32.$dtype.$dtype"
     init = [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
@@ -47,7 +48,7 @@ function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R,fence::Bool) where {T,N,K,
     vals = [:($(Symbol(:part,j))[$i]) for j in 0:P-1 for i in 1:N÷2]
     quote
         Base.@inline
-        d = $(fence ? :(_wgmma_register_barrier(Val(:fence),c.data)) : :(c.data))
+        d = _wgmma_register_barrier(Val(:fence),c.data)
         $(init...)
         $(ops...)
         ptx"wgmma.commit_group.sync.aligned"()
@@ -55,9 +56,7 @@ function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R,fence::Bool) where {T,N,K,
     end
 end
 @generated mma_async(p::A,a::WGMMAOperand{A,OperandA},b::WGMMAOperand{A,OperandB},
-                     c::WGMMAAccumulator{A,R}) where {A<:WGMMAAtom,R} = _mma_async_expr(A,R,true)
-@generated mma_async(p::A,a::WGMMAOperand{A,OperandA},b::WGMMAOperand{A,OperandB},
-                     c::PendingWGMMA{A,R}) where {A<:WGMMAAtom,R} = _mma_async_expr(A,R,false)
+                     c::Union{WGMMAAccumulator{A,R},PendingWGMMA{A,R}}) where {A<:WGMMAAtom,R} = _mma_async_expr(A,R)
 # The descriptor of the `j`-th K=16 instruction: 32 bytes further along K.
 @inline _k_step(o::WGMMAOperand,::Val{J}) where J = PTX.step_desc(o.descriptor,32J)
 @inline wait_mma(c::PendingWGMMA) = wait_mma(c,0)

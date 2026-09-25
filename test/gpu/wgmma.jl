@@ -17,6 +17,8 @@ begin # assembly checks
         @test !isempty(code.image)
         @test !occursin(".local .",body)
         @test count(r"\bcall",body) == 0
+        arrives, fences = wgmma_arrives(code)
+        @test arrives == fences
         for instruction in ("cp.async.bulk.tensor.2d", "mbarrier.arrive.expect_tx", "wgmma.fence.sync.aligned",
                             "wgmma.mma_async.sync.aligned.m64n$(n)k16", "wgmma.commit_group.sync.aligned",
                             "wgmma.wait_group.sync.aligned 0")
@@ -66,6 +68,8 @@ begin # assembly checks
             arch=CUDACore.SMVersion(9,0,:arch))
         save_code("hopper-origin-$(T)-n$n-k$k-p$partials",code)
         @test !isempty(code.image)
+        arrives, fences = wgmma_arrives(code)
+        @test arrives == fences
         @test !occursin(".local .",entry_body(code.ptx))
     end
 end
@@ -77,7 +81,9 @@ end
         save_code("hopper-pipelined-$(T)-n$n",code)
         body = entry_body(code.ptx)
         @test count("wgmma.mma_async",body) == 4 && count("wgmma.commit_group",body) == 4
-        @test count("wgmma.fence",body) == 1                     # chained issues need none
+        @test count("wgmma.fence",body) == 4
+        arrives, fences = wgmma_arrives(code)
+        @test arrives == fences
         @test count("wgmma.wait_group.sync.aligned 1",body) == 3
         @test count("wgmma.wait_group.sync.aligned 0",body) == 1
         commits = [first(r) for r in findall("wgmma.commit_group",body)]
@@ -90,7 +96,7 @@ if capability_is(v"9.0")
 @testset "Pipelined WGMMA equals one K=64 issue" begin
     for T in (BFloat16,Float16), n in (8,64)
         chained, whole = CuArray{Float32}(undef,64,n), CuArray{Float32}(undef,64,n)
-        @cuda threads=128 shmem=33792 arch=CUDACore.SMVersion(9,0,:arch) wgmma_pipelined_probe!(chained,WGMMAAtom(T,n,16))
+        @cuda threads=128 shmem=33800 arch=CUDACore.SMVersion(9,0,:arch) wgmma_pipelined_probe!(chained,WGMMAAtom(T,n,16))
         @cuda threads=128 shmem=33792 arch=CUDACore.SMVersion(9,0,:arch) wgmma_operand_probe!(whole,WGMMAAtom(T,n,64),Int32(0))
         @test Array(chained) == Array(whole)
     end
