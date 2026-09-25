@@ -16,7 +16,7 @@ stops.
 | Barriers and TMA | mbarriers; 2-D loads and stores of 1-, 2- and 4-byte elements with 32/64/128-byte swizzles and up to eight stripes, batched matrices, logical bounds | GB10 and H200 runtime | No multicast, clusters or unswizzled boxes |
 | WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, partial accumulators, pipelined issue | H200 runtime for every shape, partials and stages; descriptors checked against the PTX ISA's canonical layouts for every element and K step; SASS checked for ptxas serialization | |
 | tcgen05 and TMEM | `.32x32b` TMEM loads and stores (FP32, packed BF16/FP16, 1–128 words); `Tcgen05Atom` (f16, tf32, f8f6f4, i8; M=128) with shared (K- or MN-major, multi-stripe) or TMEM A | Descriptors and instruction descriptors checked against the PTX ISA; sm_100a assembly; transfers executed on a B200 | **tcgen05 MMA not yet run on a B200**; M=64 and `cta_group::2` not described |
-| Examples | GEMM, softmax, streaming attention, Hopper GEMM, datacenter FlashAttention pieces | GB10 runtime; the Hopper GEMM on an H200; the datacenter pieces by assembly | |
+| Examples | GEMM, softmax, streaming attention, Hopper GEMMs (a small pipeline, and a warp-specialized one), datacenter FlashAttention pieces | GB10 runtime; the Hopper GEMMs on an H200 and an H100 NVL, where the warp-specialized BF16 GEMM reaches 95% of cuBLAS at 4096³ and 97% at 8192³; the datacenter pieces by assembly | |
 
 ## Running the tests
 
@@ -43,8 +43,8 @@ records those comparisons.
 
 ## On Hopper and Blackwell hardware
 
-The suite has run on a GB10 (sm_121) and an H200 (sm_90), where WGMMA, TMA
-and barriers execute. tcgen05 MMAs have not run on a B200 yet; their
+The suite has run on a GB10 (sm_121), an H200 and an H100 NVL (sm_90),
+where WGMMA, TMA and barriers execute. tcgen05 MMAs have not run on a B200 yet; their
 operand descriptors are checked on the host against the PTX ISA: every
 descriptor Tylo emits is decoded with the specification's bit layout, and
 the canonical layout it describes must read each element where the tile
