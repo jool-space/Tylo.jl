@@ -94,12 +94,27 @@ function mma_async end
 """
     wait_mma(pending)
     wait_mma(pending, n)
+    wait_mma(pending; newer=n)
 
 Wait for this warpgroup's WGMMA groups. Without `n`, or with `n = 0`, wait
 for all of them and return the ready accumulator. With a constant `n > 0`,
 wait until at most the `n` most recent groups are in flight, so the shared
 operands of all older groups may be reused, and return `pending`, still
 pending.
+
+With `newer = n`, `pending`'s own group is older than the `n` most recent,
+which stay in flight: wait until only they are, and return `pending` ready.
+Two products overlap this way, as attention's S and O:
+
+```julia
+s = mma_async(qk, q, k(j+1), zero_accumulator(qk))    # the next scores
+...                                                   # softmax of the current ones
+o = wait_mma(o; newer=1)                              # o's group is older than s's
+o = mma_async(pv, p, v(j), rescaled(o))
+s = wait_mma(s; newer=1)                              # o's newest group runs on
+```
+
+The count is of groups committed after `pending`'s, one per `mma_async`.
 
 ```julia
 wait(full(0), 0)

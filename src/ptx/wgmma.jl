@@ -105,7 +105,11 @@ end
 end
 # The descriptor of the `j`-th instruction, a constant step further along K.
 @inline _k_step(o::WGMMAOperand{P,Role,Major,Step},::Val{J}) where {P,Role,Major,Step,J} = PTX.step_desc(o.descriptor,Step*J)
-@inline wait_mma(c::PendingWGMMA) = wait_mma(c,0)
+# With `newer`, `c`'s group is older than the `newer` most recent: waiting
+# until only those are in flight completes it.
+Base.@constprop :aggressive @inline function wait_mma(c::PendingWGMMA{P};newer::Integer=0) where P
+    WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val((:wait,Int(newer))),c.data))
+end
 Base.@constprop :aggressive @inline wait_mma(c::PendingWGMMA,n::Integer) = _wait_mma(c,Val(Int(n)))
 @inline function _wait_mma(c::PendingWGMMA{P},::Val{0}) where P
     WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val((:wait,0)),c.data))
