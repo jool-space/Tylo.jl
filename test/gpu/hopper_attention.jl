@@ -5,11 +5,13 @@ include("../../examples/hopper_attention/kernel.jl")
 
 @testset "Hopper attention assembly" begin
     let T = BFloat16, binding(plan) = Tylo.TMABinding{typeof(plan),PTX.TMADescriptorPtr,3}
-        tt = Tuple{CuDeviceArray{T,3,1},binding(TMATile(T,(128,128),2)),binding(TMATile(T,(128,128),1)),
-                   binding(TMATile(T,(128,128),2)),Int32,Int32,Float32,Val{2}}
-        code = compile_kernel(persistent_attention_kernel!,tt;arch=CUDACore.SMVersion(9,0,:arch),threads=384)
-        save_code("hopper-attention-persistent",code)
-        @test isempty(audit(code))
+        for causal in (false,true)
+            tt = Tuple{CuDeviceArray{T,3,1},binding(TMATile(T,(128,128),2)),binding(TMATile(T,(128,128),1)),
+                       binding(TMATile(T,(128,128),2)),CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{2},Val{causal},Val{causal},Val{false}}
+            code = compile_kernel(persistent_attention_kernel!,tt;arch=CUDACore.SMVersion(9,0,:arch),threads=384)
+            save_code("hopper-attention-persistent$(causal ? "-causal" : "")",code)
+            @test isempty(audit(code))
+        end
     end
     T = BFloat16
     binding(plan) = Tylo.TMABinding{typeof(plan),PTX.TMADescriptorPtr,3}
@@ -48,17 +50,23 @@ if capability_is(v"9.0")
     # Persistent: 2 heads × 3 query blocks, and 9 heads × 16 query blocks,
     # 144 tiles, more than an H100's 132 SMs: CTAs walk two tiles, carrying
     # Q buffers and K/V stages across them.
-    for (sq,skv,bh) in ((384,256,2),(2048,256,9))
+    for (sq,skv,bh) in ((384,256,2),(384,384,2),(2048,2048,9))
         q, k, v = (BFloat16.(randn(rng,Float32,128,s,bh)) for s in (sq,skv,skv))
         # Two Q buffers and three stages exceed the H100's shared memory.
         @test_throws ArgumentError hopper_attention(CuArray(q),CuArray(k),CuArray(v);stages=3,persistent=true)
-        _, launch, o = hopper_attention(CuArray(q),CuArray(k),CuArray(v);stages=2,persistent=true)
-        launch(); synchronize()
-        actual = Float64.(Array(o))
-        for h in 1:bh
-            s = transpose(Float64.(q[:,:,h]))*Float64.(k[:,:,h]) ./ sqrt(128)
-            p = exp.(s .- maximum(s;dims=2)); p ./= sum(p;dims=2)
-            @test maximum(abs.(actual[:,:,h] .- transpose(p*transpose(Float64.(v[:,:,h]))))) <= 0.03
+        for causal in (false,true)
+            causal && sq != skv && continue
+            for (dynamic,heads_inner) in (causal ? ((false,false),(true,false),(true,true)) : ((false,false),))
+            _, launch, o = hopper_attention(CuArray(q),CuArray(k),CuArray(v);stages=2,persistent=true,causal,dynamic,heads_inner)
+            launch(); synchronize()
+            actual = Float64.(Array(o))
+            for h in 1:bh
+                s = transpose(Float64.(q[:,:,h]))*Float64.(k[:,:,h]) ./ sqrt(128)
+                causal && (s[[c > r for r in 1:sq, c in 1:skv]] .= -Inf)
+                p = exp.(s .- maximum(s;dims=2)); p ./= sum(p;dims=2)
+                @test maximum(abs.(actual[:,:,h] .- transpose(p*transpose(Float64.(v[:,:,h]))))) <= 0.03
+            end
+            end
         end
     end
 end

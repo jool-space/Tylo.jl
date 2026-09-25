@@ -25,3 +25,11 @@ for bh, s in ((64, 4096), (32, 8192), (128, 2048)):
             print(f"batch·heads {bh}, seq {s}: {backend.name} {flops / ms / 1e9:.1f} TFLOP/s ({ms:.3f} ms)")
         except RuntimeError as e:
             print(f"batch·heads {bh}, seq {s}: {backend.name} unavailable: {str(e)[:80]}")
+
+for bh, s in ((64, 4096), (32, 8192), (128, 2048)):
+    q, k, v = (torch.randn(bh // 16, 16, s, 128, dtype=torch.bfloat16, device="cuda") for _ in range(3))
+    flops = 2.0 * bh * s * s * 128
+    for backend in (SDPBackend.FLASH_ATTENTION, SDPBackend.CUDNN_ATTENTION):
+        with sdpa_kernel(backend):
+            ms = bench(lambda: F.scaled_dot_product_attention(q, k, v, is_causal=True))
+        print(f"causal, batch·heads {bh}, seq {s}: {backend.name} {flops / ms / 1e9:.1f} TFLOP/s ({ms:.3f} ms)")

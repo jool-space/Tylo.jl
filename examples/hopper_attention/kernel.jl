@@ -139,18 +139,27 @@ end
 # blocks first so that the CTAs running at once share a head's K and V
 # through L2. Q is double-buffered and K/V stages are counted across tiles,
 # so the producer loads the next tile's Q and first blocks while the
-# consumers finish and store the current one.
-function persistent_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Float32,::Val{Stages}) where Stages
+# consumers finish and store the current one. With `Causal` (queries and keys
+# aligned), query block b attends to key blocks 0 through b only: the others
+# are never loaded and the diagonal block is masked. Causal tiles differ in
+# length, so CTAs take them from a global counter (`counter`, zero at launch),
+# longest first within each head; the producer passes each tile to the
+# consumers in shared memory, published by the barrier that announces its Q,
+# and -1 when none remain. (Taking them longest first across all heads
+# balances no better and loses the L2 sharing of a head's K and V.)
+function persistent_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int32,scale::Float32,::Val{Stages},::Val{Causal}=Val(false),
+                                      ::Val{Dynamic}=Val(Causal),::Val{HeadsInner}=Val(false)) where {Stages,Causal,Dynamic,HeadsInner}
     qk = WGMMAAtom(BFloat16,128,64)
     pv = WGMMAAtom(BFloat16,128,64)
     qbytes, kbytes, vbytes = transfer_bytes(tq), transfer_bytes(tk), transfer_bytes(tv)
-    workspace = @inbounds CuDynamicSharedArray(UInt8,32+16Stages+1024+2qbytes+Stages*(kbytes+vbytes))
+    workspace = @inbounds CuDynamicSharedArray(UInt8,40+16Stages+1024+2qbytes+Stages*(kbytes+vbytes))
     raw = pointer(workspace)
     @inline qfull(b) = Barrier(raw,b)                       # Q buffer b holds a tile's queries
     @inline qempty(b) = Barrier(raw+16,b)                   # Q buffer b may be refilled
     @inline full(s) = Barrier(raw+32,s)
     @inline empty(s) = Barrier(raw+32+8Stages,s)
-    start = raw+32+16Stages
+    tile_ids = reinterpret(Core.LLVMPtr{Int32,3},raw+32+16Stages)   # the tile in Q buffer 0 and 1
+    start = raw+40+16Stages
     base = start+((UInt32(0)-PTX.smem_addr_u32(start)) & UInt32(1023))
     @inline qstage(b) = base+b*Int32(qbytes)
     @inline kstage(s) = base+Int32(2qbytes)+s*Int32(kbytes+vbytes)
@@ -173,19 +182,34 @@ function persistent_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scal
     nq = seq ÷ Int32(128)
     tiles = nq*heads
     blocks = seq_kv ÷ Int32(128)
+    # Head and query block of tile t: heads outer, so concurrent CTAs share K
+    # and V in L2, or (`HeadsInner`) query blocks outer, for causal tiles
+    # longest first across all heads. Causal tiles run longest first.
+    @inline function tile_of(t)
+        head, block = HeadsInner ? (unchecked_rem(t,heads), unchecked_div(t,heads)) : (unchecked_div(t,nq), unchecked_rem(t,nq))
+        head, Causal ? nq-Int32(1)-block : block
+    end
+    # The tile after `t`: the next in the static order, or (`Dynamic`) from
+    # the counter.
+    @inline next_tile(t) = Dynamic ? gridDim().x+CUDACore.atomic_add!(pointer(counter),Int32(1)) : t+gridDim().x
     if warpgroup == Int32(0)
         release_registers(Val(40))
         if tid == Int32(0)
             i = Int32(0); c = Int32(0)                      # tiles and K/V blocks so far
             t = Int32(blockIdx().x)-Int32(1)
-            while t < tiles
+            while true
                 qb = i&Int32(1)
                 i >= Int32(2) && wait(qempty(qb),((i>>1)-Int32(1))&Int32(1))
-                head = unchecked_div(t,nq)
-                q0 = unchecked_rem(t,nq)*Int32(128)
+                unsafe_store!(tile_ids,t < tiles ? t : Int32(-1),qb+Int32(1),Val(4))
+                if t >= tiles
+                    arrive!(qfull(qb))                      # no tile: the consumers stop
+                    break
+                end
+                head, qblock = tile_of(t)
+                q0 = qblock*Int32(128)
                 arrive!(qfull(qb),qbytes)
                 @inbounds tma_load!(shared_tile(tq,qstage(qb)),tq,(q0,Int32(0),head),qfull(qb))
-                for j in Int32(0):blocks-Int32(1)
+                for j in Int32(0):(Causal ? qblock : blocks-Int32(1))
                     slot = c%Int32(Stages)
                     c >= Int32(Stages) && wait(empty(slot),((c÷Int32(Stages))-Int32(1))&Int32(1))
                     arrive!(full(slot),kbytes+vbytes)
@@ -194,7 +218,7 @@ function persistent_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scal
                     c += Int32(1)
                 end
                 i += Int32(1)
-                t += gridDim().x
+                t = next_tile(t)
             end
         end
     else
@@ -202,21 +226,31 @@ function persistent_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scal
         rows = (warpgroup-Int32(1))*Int32(64)
         thread = tid%Int32(128)
         i = Int32(0); c = Int32(0)
-        t = Int32(blockIdx().x)-Int32(1)
-        while t < tiles
+        while true
             qb = i&Int32(1)
             wait(qfull(qb),(i>>1)&Int32(1))
+            t = unsafe_load(tile_ids,qb+Int32(1),Val(4))
+            t < Int32(0) && break
             q = shared_tile(tq,qstage(qb))
             @inbounds qa = (operand(qk,OperandA(),q,(rows,Int32(0))),operand(qk,OperandA(),q,(rows,Int32(64))))
             state = SoftmaxState(finish_mma(zero_accumulator(qk));dims=2)
             out = zero_accumulator(pv)
-            for j in Int32(0):blocks-Int32(1)
+            head, qblock = tile_of(t)
+            last = Causal ? qblock : blocks-Int32(1)
+            for j in Int32(0):last
                 slot = c%Int32(Stages)
                 wait(full(slot),(c÷Int32(Stages))&Int32(1))
                 k = shared_tile(tk,kstage(slot)); v = shared_tile(tv,vstage(slot))
                 @inbounds sa = mma_async(qk,qa[1],operand(qk,OperandB(),k,(Int32(0),Int32(0))))
                 @inbounds sa = mma_async(qk,qa[2],operand(qk,OperandB(),k,(Int32(64),Int32(0))),sa)
-                update = softmax_update(state,finish_mma(wait_mma(sa));scale)
+                scores = wait_mma(sa)
+                if Causal && j == last
+                    # The diagonal block: key c of the block attends to query r
+                    # of this warpgroup's rows when c ≤ rows + r.
+                    at = coordinates(scores,thread)
+                    scores = ifelse.((x -> x[2] <= x[1]+rows).(at),scores,-Inf32)
+                end
+                update = softmax_update(state,scores;scale)
                 state = update.state
                 out = out .* update.rescale                   # the output so far, to the new maxima
                 p = Fragment{BFloat16}(update.weights)
@@ -226,24 +260,23 @@ function persistent_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scal
                 c += Int32(1)
             end
             arrive!(qempty(qb))
-            head = unchecked_div(t,nq)
-            q0 = unchecked_rem(t,nq)*Int32(128)
+            q0 = qblock*Int32(128)
             result = Fragment{BFloat16}(softmax_normalize(finish_mma(out),state))
             dst = @inbounds GlobalTile(pointer(o,Int32(1)+head*seq*Int32(128)),Layout((seq,static(128)),(static(128),static(1))),16)
             @inbounds store!(window(dst,(q0+rows,Int32(0)),(64,128)),result,thread)
             i += Int32(1)
-            t += gridDim().x
         end
     end
     nothing
 end
 
 """
-    hopper_attention(q, k, v; stages=2, persistent=true, overlap=false, pingpong=overlap) -> (kernel, launch, o)
+    hopper_attention(q, k, v; stages=2, persistent=true, causal=false, overlap=false, pingpong=overlap) -> (kernel, launch, o)
 
 Prepare O = softmax(Q Kᵀ / √d) V for BF16 `q`, `k`, `v` of size
 d×seq×(batch·heads), d = 128, sequence lengths multiples of 128. With
-`persistent`, one CTA per SM walks the tiles (with the simple schedule).
+`persistent`, one CTA per SM walks the tiles (with the simple schedule);
+`causal` masks keys after each query (sequences of equal length).
 With `overlap`, each block's softmax runs while the tensor cores multiply the
 previous block's probabilities by V, and with `pingpong` the two consumers
 take turns at the tensor cores, which needs three stages to pay. On an H100
@@ -251,7 +284,8 @@ NVL the persistent form is fastest for short sequences (2048) and the
 overlapped ping-pong schedule for long ones (4096 and up), each within a
 few percent of the other; run.jl tunes between them.
 """
-function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages::Integer=2,persistent::Bool=true,overlap::Bool=false,pingpong::Bool=overlap,o=nothing) where T
+function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages::Integer=2,persistent::Bool=true,causal::Bool=false,
+                          dynamic::Bool=causal,heads_inner::Bool=false,overlap::Bool=false,pingpong::Bool=overlap,o=nothing) where T
     d, sq, bh = size(q); skv = size(k,2)
     d == 128 && size(k) == size(v) == (d,skv,bh) && sq % 128 == 0 && skv % 128 == 0 ||
         throw(ArgumentError("d must be 128 and sequence lengths multiples of 128"))
@@ -264,13 +298,18 @@ function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages
     scale = Float32(1/sqrt(d))
     pingpong && !overlap && throw(ArgumentError("ping-pong turns apply to the overlapped schedule"))
     persistent && overlap && throw(ArgumentError("the persistent form has the simple schedule"))
+    causal && !(persistent && sq == skv) && throw(ArgumentError("causal attention is persistent, with equal sequence lengths"))
     if persistent
-        shmem += 16+transfer_bytes(tq)
+        shmem += 24+transfer_bytes(tq)
         shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
-        kernel = @cuda launch=false minthreads=384 persistent_attention_kernel!(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages))
+        counter = CuArray(Int32[0])
+        kernel = @cuda launch=false minthreads=384 persistent_attention_kernel!(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(causal),Val(dynamic),Val(heads_inner))
         CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
         blocks = min((sq÷128)*bh,CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
-        launch_persistent() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages);threads=384,blocks,shmem)
+        function launch_persistent()
+            dynamic && fill!(counter,Int32(0))
+            GC.@preserve tq tk tv kernel(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(causal),Val(dynamic),Val(heads_inner);threads=384,blocks,shmem)
+        end
         return kernel, launch_persistent, o
     end
     kernel = @cuda launch=false minthreads=384 attention_kernel!(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong))
