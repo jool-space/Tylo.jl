@@ -1,8 +1,9 @@
 # Tied SSA operands are necessary: memory clobbers alone do not stop arithmetic
 # on an async result from moving above the wait (or initialization below fence).
 @generated function _wgmma_register_barrier(::Val{Kind},d::NTuple{R,Float32}) where {Kind,R}
-    Kind in (:fence,:wait) || error("unknown WGMMA barrier")
-    asm = Kind === :fence ? "wgmma.fence.sync.aligned;" : "wgmma.wait_group.sync.aligned 0;"
+    asm = Kind === :fence ? "wgmma.fence.sync.aligned;" :
+          Kind isa Tuple{Symbol,Int} && Kind[1] === :wait && Kind[2] >= 0 ? "wgmma.wait_group.sync.aligned $(Kind[2]);" :
+          error("unknown WGMMA barrier")
     constraints = join(vcat(fill("=f",R),string.(0:R-1),["~{memory}"]),",")
     ir = PTX.convergent_asm_ir(asm,constraints,NTuple{R,Float32},fill(Float32,R))
     args = [:(d[$i]) for i in 1:R]
@@ -30,10 +31,12 @@ Base.@propagate_inbounds function operand(p::WGMMAAtom{T,N,K},role::Role,
     WGMMAOperand{typeof(p),Role}(desc)
 end
 
-@generated function mma_async(p::WGMMAAtom{T,N,K,P},
-        a::WGMMAOperand{WGMMAAtom{T,N,K,P},OperandA},
-        b::WGMMAOperand{WGMMAAtom{T,N,K,P},OperandB},
-        c::WGMMAAccumulator{WGMMAAtom{T,N,K,P},R}) where {T,N,K,P,R}
+# Issue a plan's K/16 instructions and commit them as one group. A ready
+# accumulator's registers were last written by ordinary instructions, so a
+# wgmma.fence orders them first; a pending one's were last written by a
+# wgmma of the same shape, which the hardware orders by itself (PTX ISA
+# §9.7.17.7.1), so a chain of issues needs no fence and no wait.
+function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R,fence::Bool) where {T,N,K,P}
     dtype = T === BFloat16 ? "bf16" : "f16"
     instruction = ptx"wgmma.mma_async.sync.aligned.m64n$(N)k16.f32.$dtype.$dtype"
     init = [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
@@ -44,17 +47,28 @@ end
     vals = [:($(Symbol(:part,j))[$i]) for j in 0:P-1 for i in 1:N÷2]
     quote
         Base.@inline
-        d = _wgmma_register_barrier(Val(:fence),c.data)
+        d = $(fence ? :(_wgmma_register_barrier(Val(:fence),c.data)) : :(c.data))
         $(init...)
         $(ops...)
         ptx"wgmma.commit_group.sync.aligned"()
         PendingWGMMA{typeof(p),$R}(($(vals...),))
     end
 end
+@generated mma_async(p::A,a::WGMMAOperand{A,OperandA},b::WGMMAOperand{A,OperandB},
+                     c::WGMMAAccumulator{A,R}) where {A<:WGMMAAtom,R} = _mma_async_expr(A,R,true)
+@generated mma_async(p::A,a::WGMMAOperand{A,OperandA},b::WGMMAOperand{A,OperandB},
+                     c::PendingWGMMA{A,R}) where {A<:WGMMAAtom,R} = _mma_async_expr(A,R,false)
 # The descriptor of the `j`-th K=16 instruction: 32 bytes further along K.
 @inline _k_step(o::WGMMAOperand,::Val{J}) where J = PTX.step_desc(o.descriptor,32J)
-@inline function wait_mma(c::PendingWGMMA{P}) where P
-    WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val(:wait),c.data))
+@inline wait_mma(c::PendingWGMMA) = wait_mma(c,0)
+Base.@constprop :aggressive @inline wait_mma(c::PendingWGMMA,n::Integer) = _wait_mma(c,Val(Int(n)))
+@inline function _wait_mma(c::PendingWGMMA{P},::Val{0}) where P
+    WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val((:wait,0)),c.data))
+end
+# Older groups complete; this one may still be in flight, so it stays pending.
+@inline function _wait_mma(c::PendingWGMMA{P,R},::Val{N}) where {P,R,N}
+    N isa Int && N > 0 || throw(ArgumentError("wait for at most a nonnegative constant number of groups"))
+    PendingWGMMA{P,R}(_wgmma_register_barrier(Val((:wait,N)),c.data))
 end
 # Reconstitute an isbits static plan, including validated constructor semantics.
 _plan(::Type{WGMMAAtom{T,N,K,P}}) where {T,N,K,P} = WGMMAAtom{T,N,K,P}()

@@ -70,7 +70,31 @@ begin # assembly checks
     end
 end
 end
+@testset "Pipelined WGMMA issue assembles" begin
+    for T in (BFloat16,Float16), n in (8,64)
+        p = WGMMAAtom(T,n,16)
+        code = compile_kernel(wgmma_pipelined_probe!,Tuple{CuDeviceMatrix{Float32,1},typeof(p)};arch=CUDACore.SMVersion(9,0,:arch))
+        save_code("hopper-pipelined-$(T)-n$n",code)
+        body = entry_body(code.ptx)
+        @test count("wgmma.mma_async",body) == 4 && count("wgmma.commit_group",body) == 4
+        @test count("wgmma.fence",body) == 1                     # chained issues need none
+        @test count("wgmma.wait_group.sync.aligned 1",body) == 3
+        @test count("wgmma.wait_group.sync.aligned 0",body) == 1
+        commits = [first(r) for r in findall("wgmma.commit_group",body)]
+        waits = [first(r) for r in findall("wgmma.wait_group",body)]
+        @test issorted(vcat(commits[1:2],waits[1],commits[3],waits[2],commits[4],waits[3:4]))
+        @test !occursin(".local .",body) && !occursin(r"\bcall",body)
+    end
+end
 if capability_is(v"9.0")
+@testset "Pipelined WGMMA equals one K=64 issue" begin
+    for T in (BFloat16,Float16), n in (8,64)
+        chained, whole = CuArray{Float32}(undef,64,n), CuArray{Float32}(undef,64,n)
+        @cuda threads=128 shmem=33792 arch=CUDACore.SMVersion(9,0,:arch) wgmma_pipelined_probe!(chained,WGMMAAtom(T,n,16))
+        @cuda threads=128 shmem=33792 arch=CUDACore.SMVersion(9,0,:arch) wgmma_operand_probe!(whole,WGMMAAtom(T,n,64),Int32(0))
+        @test Array(chained) == Array(whole)
+    end
+end
 @testset "WGMMA shared stores and descriptor origins" begin
     for T in (BFloat16,Float16), k in (16,32,64), n in (8,24), partials in unique((1,k÷16)), k0 in unique((0,64-k))
         p = WGMMAAtom(T,n,k,partials)

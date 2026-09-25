@@ -13,9 +13,9 @@ stops.
 | Fragments | Broadcasting, conversion, reductions on either axis or both (any type within a thread, 32-bit across lanes), windows, in-lane relayouts, coordinates | Host tests; GB10 runtime | No redistribution across lanes beyond reductions |
 | Loads, stores, copies | `ldmatrix`/`stmatrix`, 16/8/4-byte vectors within declared alignments, scalars; `cp.async` with zero-fill; bounded and swizzled tiles | GB10 runtime, including every bound position and alignment; assembly on sm_80 to sm_121 | |
 | Warp MMA | 24 `mma.sync` atoms (16-bit, TF32, FP8, INT8), block-scaled MXFP8, `TiledMMA` | GB10 runtime oracle for every atom; complete GEMM, ragged and full | Not a tuned GEMM library |
-| TMA | 2-D loads and stores of 1-, 2- and 4-byte elements with 32/64/128-byte swizzles, batched matrices, logical bounds | GB10 runtime | No multicast, clusters or unswizzled boxes |
-| WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, partial accumulators | sm_90a assembly | **Not yet run on Hopper hardware** |
-| tcgen05 and TMEM | `.32x32b` TMEM loads and stores (FP32, packed BF16/FP16, 1–128 words); `Tcgen05Atom` (f16, tf32, f8f6f4, i8; M=128) with shared or TMEM A | sm_100a assembly; transfers executed on a B200 | **tcgen05 MMA not yet run on a B200**; M=64 and `cta_group::2` not described |
+| Barriers and TMA | mbarriers; 2-D loads and stores of 1-, 2- and 4-byte elements with 32/64/128-byte swizzles and up to eight stripes, batched matrices, logical bounds | GB10 runtime | No multicast, clusters or unswizzled boxes |
+| WGMMA | Shared/shared M=64, N=8:8:256, K=16/32/64, partial accumulators, pipelined issue | Descriptors checked against the PTX ISA's canonical layouts for every element and K step; sm_90a assembly | **Not yet run on Hopper hardware** |
+| tcgen05 and TMEM | `.32x32b` TMEM loads and stores (FP32, packed BF16/FP16, 1–128 words); `Tcgen05Atom` (f16, tf32, f8f6f4, i8; M=128) with shared (K- or MN-major, multi-stripe) or TMEM A | Descriptors and instruction descriptors checked against the PTX ISA; sm_100a assembly; transfers executed on a B200 | **tcgen05 MMA not yet run on a B200**; M=64 and `cta_group::2` not described |
 | Examples | GEMM, softmax, streaming attention, Hopper GEMM, datacenter FlashAttention pieces | GB10 runtime (the Hopper and datacenter pieces by assembly) | |
 
 ## Running the tests
@@ -40,3 +40,14 @@ randomized cases.
 A change that touches code generation is checked by saving evidence before
 and after it and comparing the SASS of every kernel. The commit history
 records those comparisons.
+
+## On Hopper and Blackwell hardware
+
+WGMMA and tcgen05 MMAs have not run on hardware yet. Their operand
+descriptors are checked on the host against the PTX ISA: every descriptor
+Tylo emits is decoded with the specification's bit layout, and the
+canonical layout it describes must read each element where the tile stores
+it. On an H100/H200 or a B200/B300, run the suite with
+`TYLO_REQUIRE_GPU_RUNTIME=true`: the `gpu/wgmma*`, `gpu/tcgen05`, `gpu/tmem*`
+and `gpu/flash_attention` files then execute their kernels and compare
+numbers.

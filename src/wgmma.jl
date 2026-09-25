@@ -57,15 +57,41 @@ end
 
 
 """
-    mma_async(plan, a, b, accumulator)
+    mma_async(atom, a, b, accumulator)
 
-128-thread collective. Fence accumulator registers, issue the plan's WGMMA
-instructions and commit ONE group. Returns pending registers; only `wait_mma`
-accepts them. Operands must already be visible to the async proxy and remain
-unchanged until the wait completes. All four warps execute in convergence.
+Warpgroup collective (128 threads, converged). Issue the atom's WGMMA
+instructions on the shared operands `a` and `b` (from [`operand`](@ref))
+and commit them as one group; the result is pending until
+[`wait_mma`](@ref). The accumulator is ready (from `zero_accumulator` or a
+completed wait, fenced before the issue) or still pending from the previous
+issue: a chain of issues on one accumulator needs no wait in between, which
+keeps the tensor cores busy while a pipeline waits for its next stage.
+Operands must be visible to the async proxy and unchanged until their
+group completes.
 """
 function mma_async end
-"Wait for ALL this warpgroup's committed WGMMA groups; return ready registers."
+"""
+    wait_mma(pending)
+    wait_mma(pending, n)
+
+Wait for this warpgroup's WGMMA groups. Without `n`, or with `n = 0`, wait
+for all of them and return the ready accumulator. With a constant `n > 0`,
+wait until at most the `n` most recent groups are in flight, so the shared
+operands of all older groups may be reused, and return `pending`, still
+pending.
+
+```julia
+wait(full(0), 0)
+c = mma_async(atom, a(0), b(0), zero_accumulator(atom))   # the first issue fences
+for i in 1:stages-1
+    wait(full(i), phase(i))
+    c = mma_async(atom, a(i), b(i), c)      # chained: no fence, no wait
+    c = wait_mma(c, 1)                      # stage i-1's group is complete
+    arrive!(empty(i-1))                     # its buffers may be refilled
+end
+f = finish_mma(wait_mma(c))
+```
+"""
 function wait_mma end
 
 @generated function finish_mma(c::WGMMAAccumulator{WGMMAAtom{T,N,K,P}}) where {T,N,K,P}

@@ -29,6 +29,13 @@ end
 Base.@constprop :aggressive @inline TMATile(::Type{T},shape::Tuple{Integer,Integer},axis::Integer,width::Integer=128) where T =
     TMATile{T,map(Int,shape),Int(axis),Int(width)}()
 Base.size(::TMATile{T,S}) where {T,S} = S
+"""
+    transfer_bytes(plan_or_binding)
+
+The bytes one [`tma_load!`](@ref) of the tile delivers, every element
+counted (out-of-bounds ones arrive as zeros): what its barrier's phase
+must expect.
+"""
 transfer_bytes(::TMATile{T,S}) where {T,S} = sizeof(T)*prod(S)
 swizzle_bytes(::TMATile{T,S,A,W}) where {T,S,A,W} = W
 # Swizzle rows side by side along the inner axis, each one TMA box.

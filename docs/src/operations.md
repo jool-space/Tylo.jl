@@ -66,15 +66,41 @@ block tile, stored with `store!`. [`pack_operand_a`](@ref) turns FP32
 accumulator blocks into a BF16/FP16 A operand without moving values
 between lanes, as attention does between its two products.
 
+## Barriers
+
+A [`Barrier`](@ref) is an mbarrier in shared memory. TMA loads, tcgen05
+MMAs and `cp.async` copies complete on barriers, and threads wait on their
+phases:
+
+```julia
+full(s) = Barrier(pointer(smem), s)        # one barrier per stage
+if thread == 0
+    foreach(s -> initialize!(full(s), 1), 0:stages-1)
+    fence_barrier_init()                   # visible to TMA
+end
+sync_threads()
+thread == 0 && (arrive!(full(s), transfer_bytes(binding)); tma_load!(tile, binding, origin, full(s)))
+wait(full(s), phase)                       # parity 0, 1, 0, ... per reuse of the stage
+```
+
+`arrive!(barrier)` counts one arrival, `arrive!(barrier, bytes)` also
+announces bytes of asynchronous transactions, `expect_bytes!` announces
+them without arriving, and `commit_copies(barrier)` makes a thread's
+`cp.async` copies one arrival as they land. `fence_async_shared()` orders
+ordinary shared-memory writes before asynchronous reads (a TMA store, an
+MMA).
+
 ## TMA
 
-A [`TMATile`](@ref) describes a 2-D box that the tensor memory accelerator
-moves between global memory and swizzled shared storage. `prepare_tma(plan,
-array)` encodes and uploads its descriptor on the host; in the kernel,
-`tma_load!(shared_tile(binding, ptr), binding, origin, barrier)` issues one
-copy that arrives on an mbarrier, and `tma_store!` writes back in bulk
-groups. The shared storage, `shared_layout(plan)`, is the same swizzled
-encoding `ldmatrix`, WGMMA and tcgen05 read.
+A [`TMATile`](@ref) describes a 2-D tile that the tensor memory
+accelerator moves between global memory and swizzled shared storage: along
+its inner axis, up to eight swizzle rows (stripes) of 32, 64 or 128 bytes.
+`prepare_tma(plan, array)` encodes and uploads its descriptor on the host;
+in the kernel, `tma_load!(shared_tile(binding, ptr), binding, origin,
+barrier)` copies the tile (one box per stripe) and completes on the
+barrier, and `tma_store!` writes back in bulk groups. The shared storage,
+`shared_layout(plan)`, is the canonical swizzled encoding `ldmatrix`, WGMMA
+and tcgen05 read, so a TMA tile is directly an MMA operand.
 
 ## WGMMA (Hopper)
 
@@ -87,6 +113,21 @@ atom = WGMMAAtom(BFloat16, 64)
 c = zero_accumulator(atom)
 c = wait_mma(mma_async(atom, operand(atom, OperandA(), sa), operand(atom, OperandB(), sb), c))
 f = finish_mma(c)   # a Fragment of the 64×n accumulator
+```
+
+A pipeline chains issues on a pending accumulator, which needs neither a
+fence nor a wait, and `wait_mma(c, 1)` retires every group but the newest,
+freeing the older stages' shared memory while the tensor cores work on the
+latest one:
+
+```julia
+c = mma_async(atom, a(0), b(0), zero_accumulator(atom))
+for i in 1:stages-1
+    wait(full(i), phase(i))
+    c = wait_mma(mma_async(atom, a(i), b(i), c), 1)
+    arrive!(empty(i-1))
+end
+f = finish_mma(wait_mma(c))
 ```
 
 ## tcgen05 and tensor memory (Blackwell)
@@ -120,10 +161,11 @@ waits on a different scope:
 | Issued by | Completed by | Scope |
 |:--|:--|:--|
 | `copy_async!` | `commit_copies()`, `wait_copies(n)` | the thread's cp.async groups |
-| `tma_load!` | the mbarrier's phase | the barrier's transaction count |
+| `tma_load!` | `wait(barrier, parity)` | the barrier's arrivals and transaction bytes |
 | `tma_store!` | `commit_tma_stores()`, `wait_tma_reads(n)`, `wait_tma_stores(n)` | the thread's bulk groups |
-| `mma_async` | `wait_mma(pending)` | the warpgroup's WGMMA groups |
-| tcgen05 `mma` | `commit_mma(barrier)` | the issuing thread's MMAs |
+| `mma_async` | `wait_mma(pending[, n])` | the warpgroup's WGMMA groups |
+| tcgen05 `mma` | `commit_mma(barrier)`, then `wait` | the issuing thread's MMAs |
+| `copy_async!` | `commit_copies(barrier)`, then `wait` | the thread's cp.async copies, as one arrival |
 | `load_async` | `wait_load(pending)` | the thread's TMEM loads |
 | `store_async!` | `wait_stores()` | the thread's TMEM stores |
 
