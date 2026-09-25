@@ -16,13 +16,28 @@
         s = Tylo.swizzled_structure(typeof(l),T,axis)
         @test s.major === :K && s.swizzle_bytes == W && s.row_elements == row && s.stride_bytes == 8W && s.groups == 1
     end
+    # Several stripes: each W bytes of the inner axis, stored after the last.
+    for T in (UInt8,BFloat16,Float32), W in (32,128), axis in (1,2), stripes in (2,3)
+        row = W ÷ sizeof(T); rows = 16
+        shape = axis == 2 ? (rows,stripes*row) : (stripes*row,rows)
+        p = TMATile(T,shape,axis,W); l = shared_layout(p)
+        @test transfer_bytes(p) == stripes*W*rows && Tylo._box(p) == (row,rows)
+        for r in 0:rows-1, k in 0:stripes*row-1
+            s, kk = divrem(k,row)
+            c = axis == 2 ? (Int32(r),Int32(k)) : (Int32(k),Int32(r))
+            @test Int(l(c)) == s*row*rows + swizzle(sizeof(T)*(row*r+kk),W) ÷ sizeof(T)
+        end
+        st = Tylo.swizzled_structure(typeof(l),T,axis)
+        @test st.major === :K && st.groups == stripes && st.row_elements == row
+    end
     @test TMATile(BFloat16,(128,64),2) === TMATile(BFloat16,(128,64),2)
     @test TMATile(BFloat16,(128,64),2) isa TMATile{BFloat16,(128,64),2,128}
     for (shape,axis) in (((64,32),2),((7,64),2),((264,64),2),((64,8),0))
         @test_throws ArgumentError TMATile(BFloat16,shape,axis)
     end
-    @test_throws ArgumentError TMATile(Float32,(64,64),2)
-    @test_throws ArgumentError TMATile(Float32,(32,32),2,64)
+    @test Tylo._stripes(TMATile(Float32,(64,64),2)) == 2 && Tylo._stripes(TMATile(Float32,(32,32),2,64)) == 2
+    @test_throws ArgumentError TMATile(Float32,(64,40),2)      # 160 bytes: not whole rows
+    @test_throws ArgumentError TMATile(Float32,(32,24),2,64)
     @test_throws ArgumentError TMATile(BFloat16,(64,64),2,256)
     @test_throws ArgumentError TMATile(BFloat16,(64,64),2,48)
     @test_throws ArgumentError TMATile(Float64,(64,16),2)

@@ -137,3 +137,24 @@ end
         @test field(d,29,3) == 0
     end
 end
+
+# Operands straight from TMA storage, several stripes along K included.
+@testset "Descriptors of multi-stripe TMA tiles" begin
+    for T in (BFloat16,Float8_E4M3FN), stripes in (1,2)
+        row = 128 ÷ sizeof(T)
+        katom = 256 ÷ (8sizeof(T))
+        a = shared_tile(TMATile(T,(128,stripes*row),2),sptr(T,0x400))
+        b = shared_tile(TMATile(T,(stripes*row,64),1),sptr(T,0x400+128*stripes*128))
+        atom = Tcgen05Atom((128,64,katom),T,T,Float32)
+        for k0 in 0:katom:stripes*row-katom
+            oa, ob = operand(atom,OperandA(),a,(0,k0)), operand(atom,OperandB(),b,(k0,0))
+            @test reads_tile(decode_tcgen05(Tylo._k_step(oa,Val(0))),:K,a,T,128,katom,(0,k0),2)
+            @test reads_tile(decode_tcgen05(Tylo._k_step(ob,Val(0))),:K,b,T,64,katom,(k0,0),1)
+        end
+        T === BFloat16 || continue
+        p = WGMMAAtom(T,64)
+        for k0 in 0:64:stripes*row-64, j in 0:3
+            @test reads_tile(decode_wgmma(Tylo._k_step(operand(p,OperandA(),a,(0,k0)),Val(j))),:K,a,T,64,16,(0,k0+16j),2)
+        end
+    end
+end

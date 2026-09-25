@@ -58,8 +58,9 @@ end
 
 if runtime_supported(@__FILE__)
 @testset "TMA loads: element widths, swizzle rows, logical axes, OOB and phase reuse" begin
-    for T in (UInt8,BFloat16,Float16,Float32), W in (32,64,128), axis in (1,2), rows in (8,64,128)
-        row = W ÷ sizeof(T)
+    for T in (UInt8,BFloat16,Float16,Float32), W in (32,64,128), axis in (1,2), rows in (8,64,128), stripes in (1,2)
+        (stripes == 2 && rows == 8) && continue
+        row = stripes * W ÷ sizeof(T)      # the inner extent: one or two stripes
         shape = axis == 2 ? (rows,row) : (row,rows)
         plan = TMATile(T,shape,axis,W)
         host = T.(reshape(mod.(0:128*77-1,113),128,77))

@@ -45,7 +45,7 @@ function Tylo.prepare_tma(p::TMATile{T,S,A,W},array::CuArray{T,N};bounds=size(ar
     UInt(pointer(array)) % 16 == 0 && (size(array,1)*sizeof(T)) % 16 == 0 ||
         throw(ArgumentError("TMA source pointer and column stride must be 16-byte aligned"))
     strides = N == 2 ? (sizeof(T)*size(array,1),) : (sizeof(T)*size(array,1),sizeof(T)*size(array,1)*size(array,2))
-    box = N == 2 ? (S[A],S[3-A]) : (S[A],S[3-A],1)
+    box = N == 2 ? Tylo._box(p) : (Tylo._box(p)...,1)     # one stripe per copy
     tmap = GC.@preserve array PTX.tensor_map_encode_tiled(_tma_dtype(T),UInt(pointer(array)),
         map(Int,bounds),strides,box;swizzle=Symbol(:B,W))
     uploaded = PTX.upload_tma_descriptor(tmap)

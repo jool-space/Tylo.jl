@@ -1,24 +1,28 @@
 """
     TMATile(T, (m,k), 2)        # logical A(M,K), 128-byte rows
     TMATile(T, (k,n), 1, 64)    # logical B(K,N), 64-byte rows
+    TMATile(T, (m,128), 2)      # BF16: two 128-byte stripes along K
 
 A 2D tile that TMA moves between global and shared memory. Elements are
-one, two or four bytes wide. Axis `A` is the inner axis and spans one
-swizzle row of `W` bytes (32, 64 or 128, default 128); the other extent is a
-positive multiple of eight, at most 256. Shared storage is
-[`shared_layout`](@ref)`(plan)`, allocated at a multiple of `8W` bytes.
-`transfer_bytes` counts every element of the box, including zero-filled
-out-of-bounds elements of a load. The plan owns no memory, descriptor or
-barrier; [`prepare_tma`](@ref) binds it to a device array. The shape, axis
-and width must be constants.
+one, two or four bytes wide. Axis `A` is the inner axis: a whole number of
+swizzle rows of `W` bytes (32, 64 or 128, default 128), up to eight, each a *stripe*
+stored after the previous one; the other extent is a positive multiple of
+eight, at most 256. Shared storage is [`shared_layout`](@ref)`(plan)`,
+allocated at a multiple of `8W` bytes, and is the canonical swizzled
+encoding `ldmatrix`, WGMMA and tcgen05 read. One [`tma_load!`](@ref) or
+[`tma_store!`](@ref) moves the whole tile, one copy per stripe.
+`transfer_bytes` counts every element, including zero-filled out-of-bounds
+elements of a load. The plan owns no memory, descriptor or barrier;
+[`prepare_tma`](@ref) binds it to a device array. The shape, axis and width
+must be constants.
 """
 struct TMATile{T,S,A,W}
     @inline function TMATile{T,S,A,W}() where {T,S,A,W}
         isbitstype(T) && sizeof(T) in (1,2,4) || throw(ArgumentError("TMA elements are one, two or four bytes wide"))
         W isa Int && W in (32,64,128) || throw(ArgumentError("swizzle rows are 32, 64 or 128 bytes"))
         S isa Tuple && length(S) == 2 && all(x -> x isa Int && x > 0,S) && A isa Int && A in (1,2) &&
-            S[A]*sizeof(T) == W && S[3-A] % 8 == 0 && S[3-A] <= 256 ||
-            throw(ArgumentError("the inner extent is one swizzle row of elements and the outer extent a multiple of eight, at most 256"))
+            (S[A]*sizeof(T)) % W == 0 && S[A]*sizeof(T) <= 8W && S[3-A] % 8 == 0 && S[3-A] <= 256 ||
+            throw(ArgumentError("the inner extent is a whole number of swizzle rows and the outer extent a multiple of eight, at most 256"))
         new{T,S,A,W}()
     end
 end
@@ -27,7 +31,9 @@ Base.@constprop :aggressive @inline TMATile(::Type{T},shape::Tuple{Integer,Integ
 Base.size(::TMATile{T,S}) where {T,S} = S
 transfer_bytes(::TMATile{T,S}) where {T,S} = sizeof(T)*prod(S)
 swizzle_bytes(::TMATile{T,S,A,W}) where {T,S,A,W} = W
-
+# Swizzle rows side by side along the inner axis, each one TMA box.
+_stripes(::TMATile{T,S,A,W}) where {T,S,A,W} = S[A]*sizeof(T) ÷ W
+_box(::TMATile{T,S,A,W}) where {T,S,A,W} = (W ÷ sizeof(T),S[3-A])
 # The hardware swizzle family in elements: 16-byte chunks (the low M bits
 # stay), 2^B chunks per row, the chunk index XORed with row bits 1..3 of a
 # 128-byte address period (shift 3). B=3,2,1 are the 128/64/32-byte modes.
@@ -40,10 +46,14 @@ the inner axis, packed, with the matching hardware swizzle, as
 `Swizzle{B,M,3}` composed with the row layout. Offsets are elements. The
 same encoding is what `ldmatrix` loads, `operand` describes (see [`swizzled_structure`](@ref)).
 """
-@inline function shared_layout(::TMATile{T,S,A,W}) where {T,S,A,W}
-    row = Layouts.static(W ÷ sizeof(T))
-    Layouts.compose(_swizzle(T,W),Layouts.Layout(map(Layouts.static,S),
-        A == 2 ? (row,Layouts.static(1)) : (Layouts.static(1),row)))
+@inline function shared_layout(p::TMATile{T,S,A,W}) where {T,S,A,W}
+    st = Layouts.static
+    row, outer, stripes = W ÷ sizeof(T), S[3-A], _stripes(p)
+    # One stripe: rows of the swizzle width. Several: stripe after stripe.
+    inner = stripes == 1 ? (st(row),st(1)) : ((st(row),st(stripes)),(st(1),st(row*outer)))
+    l = A == 2 ? Layouts.Layout((st(outer),inner[1]),(st(row),inner[2])) :
+                 Layouts.Layout((inner[1],st(outer)),(inner[2],st(row)))
+    Layouts.compose(_swizzle(T,W),l)
 end
 @inline shared_tile(p::TMATile{T},ptr::Core.LLVMPtr{U,3}) where {T,U} =
     SharedTile(reinterpret(Core.LLVMPtr{T,3},ptr),shared_layout(p))
