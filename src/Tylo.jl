@@ -26,7 +26,7 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
         :Tcgen05Operand,:tmem_allocate!,:tmem_deallocate!,:tmem_relinquish_permit,
         :fence_after_thread_sync,:fence_before_thread_sync,:softmax_logsumexp,:convert_element,:threads,
         :MachineCode,:Finding,:registers,:spill_bytes,:local_bytes,:kernel_calls,:wgmma_groups,
-        :memory_instructions,:sass_instructions,:entry_ptx,:trace,:Tuning,:Trial,:best))
+        :memory_instructions,:sass_instructions,:entry_ptx,:trace,:Tuning,:Trial,:best,:boxed_variables))
 end
 
 include("tuples.jl")

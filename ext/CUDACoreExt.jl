@@ -74,8 +74,12 @@ function Tylo.machine_code(@nospecialize(f),@nospecialize(types::Type{<:Tuple});
     # Without debug information: its strings name Julia functions, which a
     # search of the PTX would otherwise match.
     stripped = CUDACore.GPUCompiler.CompilerJob(job.source,CUDACore.GPUCompiler.CompilerConfig(config;strip=true))
-    asm, _ = CUDACore.GPUCompiler.JuliaContext() do ctx
-        CUDACore.invoke_frozen(CUDACore.GPUCompiler.compile,:asm,stripped)
+    asm, _ = try
+        CUDACore.GPUCompiler.JuliaContext() do ctx
+            CUDACore.invoke_frozen(CUDACore.GPUCompiler.compile,:asm,stripped)
+        end
+    catch err
+        throw(Tylo._compile_failure(f,types,err))
     end
     ptx = String(asm)
     entry = something(match(r"\.visible \.entry\s+([\w$]+)",ptx),(;captures=["?"])).captures[1]

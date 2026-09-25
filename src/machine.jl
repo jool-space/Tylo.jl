@@ -55,6 +55,42 @@ end
 function _machine_code_call end
 
 """
+    boxed_variables(f, types) -> Vector{Symbol}
+
+The variables Julia boxes (`Core.Box`) in the kernel `f`: captured by a
+closure and assigned where the closure can see them. GPU code cannot use a
+box; `machine_code` names them when a kernel fails to compile. Read from
+the kernel's lowered code, on the host.
+"""
+function boxed_variables(f,types::Type{<:Tuple})
+    names = Symbol[]
+    for ci in code_lowered(f,types), st in ci.code
+        st isa Expr && st.head === :(=) && st.args[1] isa Core.SlotNumber || continue
+        value = st.args[2]
+        value isa Expr && value.head === :call && value.args[1] == GlobalRef(Core,:Box) &&
+            push!(names,ci.slotnames[st.args[1].id])
+    end
+    unique(names)
+end
+
+# Why a kernel failed to compile, when Julia can tell: boxed variables.
+function _compile_failure(f,types,err)
+    boxed = try
+        boxed_variables(f,types)
+    catch
+        Symbol[]
+    end
+    isempty(boxed) && return err
+    one = length(boxed) == 1
+    names = join(("`$b`" for b in boxed),", ")
+    ErrorException(string(nameof(f)," did not compile: ",names," ",one ? "is" : "are",
+        " captured by a closure and assigned where the closure sees ",one ? "it" : "them",
+        ", so Julia boxes ",one ? "it" : "them"," (Core.Box), which GPU code cannot use. ",
+        "A kernel's closures share its scope: rename the closure's variables apart from the kernel's.",
+        "\n\nThe compiler said: ",sprint(showerror,err)))
+end
+
+"""
     Finding
 
 One way a kernel's machine code falls short of what Tylo's kernels promise:

@@ -117,3 +117,27 @@ end
           startswith(only(split.sources),"machine.jl:$(UNALIGNED_LINE) (unaligned_sum!)")
     @test occursin("Val(sizeof(T))",split.hint)
 end
+
+# A closure local sharing a name with the kernel's variable: Julia boxes it,
+# and machine_code names it instead of the compiler's invalid-IR report.
+function boxed_kernel!(y)
+    @inline scaled(j) = (v = 2f0*j; v)
+    v = 0f0
+    for i in 1:4
+        v += scaled(Float32(i))
+    end
+    @inbounds y[1] = v
+    nothing
+end
+@testset "Boxed variables" begin
+    vector = CuDeviceVector{Float32,1}
+    @test Tylo.boxed_variables(boxed_kernel!,Tuple{vector}) == [:v]
+    @test Tylo.boxed_variables(clean_scale!,Tuple{vector,vector}) == Symbol[]
+    err = try
+        compile_kernel(boxed_kernel!,Tuple{vector};arch=CUDACore.SMVersion(12,1,:arch),threads=32)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ErrorException && occursin("`v` is captured by a closure",err.msg)
+end

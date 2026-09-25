@@ -71,6 +71,12 @@ code = machine_code(kernel!, Tuple{CuDeviceMatrix{Float32,1}, WGMMAAtom{BFloat16
   `WARPGROUP.ARRIVE`s in the SASS against `wgmma.fence`s in the PTX, and
   reports the reason ptxas gave.
 
+A kernel that does not compile at all is often one that Julia had to box
+a variable in: a closure inside the kernel assigns a name the kernel also
+assigns, and they share one scope. [`machine_code`](@ref) then names those
+variables (from the kernel's lowered code, [`boxed_variables`](@ref))
+instead of passing on the compiler's report of invalid IR.
+
 ## Looking closer
 
 A [`MachineCode`](@ref) holds the PTX, the cubin, its SASS and ptxas's
