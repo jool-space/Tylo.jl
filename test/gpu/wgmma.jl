@@ -39,7 +39,10 @@ if capability_is(v"9.0")
         out = CuArray{Float32}(undef,64,n)
         GC.@preserve a b begin
             kernel = @cuda launch=false arch=CUDACore.SMVersion(9,0,:arch) minthreads=160 hopper_gemm_kernel!(out,a,b,plan,Int32(k),Val(stages))
-            launch() = kernel(out,a,b,plan,Int32(k),Val(stages);threads=160,shmem=1056+stages*(transfer_bytes(a)+transfer_bytes(b)))
+            shmem = 1056+stages*(transfer_bytes(a)+transfer_bytes(b))
+            # Beyond 48 KiB a kernel must opt in (n=128 with two stages).
+            CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
+            launch() = kernel(out,a,b,plan,Int32(k),Val(stages);threads=160,shmem)
             launch(); synchronize()
             expected = transpose(Float64.(ha))*Float64.(hb)
             @test all(abs.(Array(out) .- expected) .<= 2e-4 .+ 2e-4 .* abs.(expected))

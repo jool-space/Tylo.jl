@@ -86,10 +86,18 @@ end
             native = compile_kernel(fp8_packing_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=32)
             save_code("fp8-packing-$(T)-$(S)-$(H)-w$w",native)
             body = entry_body(native.ptx)
-            @test count("cvt.rn.satfinite.$(names[T]).$(names[S])",body) == 2w
-            @test occursin("cvt.rn.$(names[H]).$(names[T])",body)
-            @test !occursin(".local .",body)
-            @test !occursin(r"\bcall",body)
+            # The PTX ISA the toolkit emits bounds the native forms: FP8 from
+            # f32 and f16x2 and back to f16x2 since 7.8, from bf16x2 since 9.1,
+            # back to bf16x2 since 9.2 (a CUDA 12 toolkit stops at 8.8).
+            ptx_isa = VersionNumber(match(r"^\.version (\d+\.\d+)"m,native.ptx)[1])
+            packs = S !== BFloat16 || ptx_isa >= v"9.1"
+            widens = H !== BFloat16 || ptx_isa >= v"9.2"
+            @test count("cvt.rn.satfinite.$(names[T]).$(names[S])",body) == (packs ? 2w : 0)
+            @test occursin("cvt.rn.$(names[H]).$(names[T])",body) == widens
+            if ptx_isa >= v"9.2"
+                @test !occursin(".local .",body)
+                @test !occursin(r"\bcall",body)
+            end
             # sm_80 has none of these instructions and takes the generic path.
             generic = compile_kernel(fp8_packing_kernel!,tt;arch=CUDACore.SMVersion(8,0),threads=32)
             @test !occursin(names[T],entry_body(generic.ptx))
