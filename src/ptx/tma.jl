@@ -15,6 +15,19 @@ Base.@propagate_inbounds function tma_load!(dst::SharedTile{T,L},
     end
     nothing
 end
+# Multicast: the box lands at the same shared address in every CTA of the
+# cluster whose bit is set in `ctas`, and completes on the barrier at the
+# same address in each.
+Base.@propagate_inbounds function tma_load!(dst::SharedTile{T,L},
+        b::TMABinding{TMATile{T,S,A,W},D,2},origin::Tuple{Int32,Int32},barrier::Barrier,ctas::UInt16) where {T,L,S,A,W,D}
+    _check_tma(dst,b,origin)
+    PTX.Utils.@unroll 8 for s in 0:_stripes(b.plan)-1
+        bytes, inner = s*_stripe_bytes(b.plan), Int32(s)*_stripe_extent(b.plan)
+        ptx"cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.multicast::cluster"(
+            reinterpret(Core.LLVMPtr{UInt8,3},dst.ptr)+bytes,b.descriptor,origin[A]+inner,origin[3-A],barrier.ptr,ctas)
+    end
+    nothing
+end
 Base.@propagate_inbounds function tma_load!(dst::SharedTile{T,L},
         b::TMABinding{TMATile{T,S,A,W},D,3},origin::Tuple{Int32,Int32,Int32},barrier::Barrier) where {T,L,S,A,W,D}
     _check_tma(dst,b,origin)

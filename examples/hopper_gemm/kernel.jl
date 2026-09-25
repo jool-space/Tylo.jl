@@ -8,7 +8,13 @@ using Tylo.Layouts: Layout, static
 # warpgroups: the first loads A and B tiles with TMA into `Stages` shared
 # buffers; the other two each multiply 64 rows with WGMMA, keeping one group
 # in flight while they wait for the next stage.
-function hopper_gemm_kernel!(c,a,b,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{Stages},::Val{Group}) where {T,N,KS,Stages,Group}
+# With `Cluster = 2`, the two CTAs of a cluster compute the tiles of rows 2m
+# and 2m+1 in the same columns: each loads its own A and half of the shared B
+# tile (`bh`), multicast into both CTAs' stages. A stage is refilled only
+# when both CTAs' consumers have released it, since the peer's multicast
+# writes it: one elected thread per consumer warpgroup arrives on the empty
+# barriers of both.
+function hopper_gemm_kernel!(c,a,b,bh,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{Stages},::Val{Group},::Val{Cluster}=Val(1)) where {T,N,KS,Stages,Group,Cluster}
     bytes = transfer_bytes(a)+transfer_bytes(b)
     workspace = @inbounds CuDynamicSharedArray(UInt8,16Stages+1024+Stages*bytes)
     raw = pointer(workspace)
@@ -21,62 +27,84 @@ function hopper_gemm_kernel!(c,a,b,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{Stag
     if tid == Int32(0)
         for s in Int32(0):Int32(Stages-1)
             initialize!(full(s),1)
-            initialize!(empty(s),256)           # every consumer thread
+            initialize!(empty(s),Cluster == 1 ? 256 : 2Cluster)   # consumer threads, or elected per warpgroup and CTA
         end
         fence_barrier_init()
     end
-    sync_threads()
+    Cluster == 1 ? sync_threads() : cluster_sync()
+    rank = Cluster == 1 ? Int32(0) : cluster_rank()
     m, n = size(c,2) % Int32, size(c,1) % Int32
-    tiles_m, tiles_n = m ÷ Int32(128), n ÷ Int32(N)
+    tiles_m, tiles_n = m ÷ Int32(128*Cluster), n ÷ Int32(N)      # in row tiles per cluster
     tiles = tiles_m*tiles_n
     count = k ÷ Int32(KS)
+    first_tile = (Int32(blockIdx().x)-Int32(1)) ÷ Int32(Cluster)
+    stride = gridDim().x ÷ Int32(Cluster)
     @inline stage(i) = buffers+(i%Int32(Stages))*Int32(bytes)
-    # A CTA walks tiles blockIdx, blockIdx+gridDim, ... (one when the grid
-    # covers them all). Loads and MMAs count stages across tiles, so the
-    # producer fills the next tile's stages while the consumers store.
+    # A CTA (or cluster) walks tiles blockIdx, blockIdx+gridDim, ... (one
+    # when the grid covers them all). Loads and MMAs count stages across
+    # tiles, so the producer fills the next tile's stages while the consumers
+    # store.
     if warpgroup == Int32(0)
         release_registers(Val(40))
         if tid == Int32(0)
             i = Int32(0)
-            t = Int32(blockIdx().x)-Int32(1)
+            t = first_tile
             while t < tiles
-                tm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
+                pm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
+                tm = Int32(Cluster)*pm+rank
                 for kk in Int32(0):count-Int32(1)
                     slot = i%Int32(Stages)
                     i >= Int32(Stages) && wait(empty(slot),((i÷Int32(Stages))-Int32(1))&Int32(1))
                     arrive!(full(slot),bytes)
                     @inbounds tma_load!(shared_tile(a,stage(i)),a,(tm*Int32(128),Int32(KS)*kk),full(slot))
-                    @inbounds tma_load!(shared_tile(b,stage(i)+transfer_bytes(a)),b,(Int32(KS)*kk,tn*Int32(N)),full(slot))
+                    if Cluster == 1
+                        @inbounds tma_load!(shared_tile(b,stage(i)+transfer_bytes(a)),b,(Int32(KS)*kk,tn*Int32(N)),full(slot))
+                    else
+                        half = stage(i)+transfer_bytes(a)+rank*Int32(transfer_bytes(bh))
+                        @inbounds tma_load!(shared_tile(bh,half),bh,(Int32(KS)*kk,tn*Int32(N)+rank*Int32(N÷Cluster)),full(slot),UInt16(1 << Cluster - 1))
+                    end
                     i += Int32(1)
                 end
-                t += gridDim().x
+                t += stride
             end
         end
     else
         acquire_registers(Val(232))
         rows = (warpgroup-Int32(1))*Int32(64)
+        thread = tid%Int32(128)
         @inline operands(i) = @inbounds (operand(atom,OperandA(),shared_tile(a,stage(i)),(rows,Int32(0))),
                                  operand(atom,OperandB(),shared_tile(b,stage(i)+transfer_bytes(a))))
+        @inline function release(s)
+            if Cluster == 1
+                arrive!(empty(s))
+            elseif thread == Int32(0)
+                for r in Int32(0):Int32(Cluster-1)
+                    arrive!(empty(s);cta=r)
+                end
+            end
+        end
         out = @inbounds GlobalTile(pointer(c),Layout((m,n),(n,static(1))),4)
         i = Int32(0)
-        t = Int32(blockIdx().x)-Int32(1)
+        t = first_tile
         while t < tiles
-            tm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
+            pm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
+            tm = Int32(Cluster)*pm+rank
             wait(full(i%Int32(Stages)),(i÷Int32(Stages))&Int32(1))
             acc = mma_async(atom,operands(i)...)                  # a fresh tile: no zeroing
             for kk in Int32(1):count-Int32(1)
                 j = i+kk
                 wait(full(j%Int32(Stages)),(j÷Int32(Stages))&Int32(1))
                 acc = wait_mma(mma_async(atom,operands(j)...,acc),1)
-                arrive!(empty((j-Int32(1))%Int32(Stages)))   # stage j-1's group is complete
+                release((j-Int32(1))%Int32(Stages))              # stage j-1's group is complete
             end
             result = finish_mma(wait_mma(acc))
-            arrive!(empty((i+count-Int32(1))%Int32(Stages)))
+            release((i+count-Int32(1))%Int32(Stages))
             i += count
-            @inbounds store!(window(out,(tm*Int32(128)+rows,tn*Int32(N)),(64,N)),Fragment{BFloat16}(result),tid%Int32(128))
-            t += gridDim().x
+            @inbounds store!(window(out,(tm*Int32(128)+rows,tn*Int32(N)),(64,N)),Fragment{BFloat16}(result),thread)
+            t += stride
         end
     end
+    Cluster == 1 || cluster_sync()                          # no CTA leaves while its peer writes to it
     nothing
 end
 
@@ -91,30 +119,36 @@ end
 end
 
 """
-    hopper_gemm(a, b; n=256, stages=4, group=8, persistent=true) -> (kernel, launch, c)
+    hopper_gemm(a, b; n=256, stages=4, group=8, persistent=true, cluster=1) -> (kernel, launch, c)
 
 Prepare C = Aᵀ B for `a` (K×M) and `b` (K×N) on the device, BF16, FP16 or FP8: the tile
 width `n`, the number of shared stages, the number of row tiles grouped
 for L2 reuse, and whether one CTA per SM walks the tiles (`persistent`) or
-one CTA per tile runs are the configuration. Returns the
+one CTA per tile runs, and whether clusters of two CTAs share B tiles by
+multicast (`cluster = 2`) are the configuration. Returns the
 compiled kernel, a launcher, and C as an N×M matrix (row-major M×N).
 """
-function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,persistent::Bool=true,c=nothing) where T
+function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,persistent::Bool=true,
+                     cluster::Integer=1,c=nothing) where T
     k, m = size(a); kb, nt = size(b)
     ks = 128 ÷ sizeof(T)                                  # one swizzle row of K per stage
-    k == kb && k % ks == 0 && m % 128 == 0 && nt % n == 0 ||
-        throw(ArgumentError("shapes must be multiples of the tile: K of $ks, M of 128, N of $n"))
+    cluster in (1,2) || throw(ArgumentError("clusters of one or two CTAs"))
+    k == kb && k % ks == 0 && m % (128cluster) == 0 && nt % n == 0 ||
+        throw(ArgumentError("shapes must be multiples of the tile: K of $ks, M of $(128cluster), N of $n"))
     atom = WGMMAAtom(T,n,ks)
     ta = prepare_tma(TMATile(T,(128,ks),2),a)
     tb = prepare_tma(TMATile(T,(ks,n),1),b)
+    tbh = cluster == 1 ? tb : prepare_tma(TMATile(T,(ks,n÷cluster),1),b)   # each CTA's share of B
     shmem = 16stages+1024+stages*(transfer_bytes(ta)+transfer_bytes(tb))
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     c = c === nothing ? CuArray{BFloat16}(undef,nt,m) : c
-    (m÷128) % group == 0 || throw(ArgumentError("row tiles must be a multiple of the group"))
-    kernel = @cuda launch=false minthreads=384 hopper_gemm_kernel!(c,ta,tb,atom,Int32(k),Val(stages),Val(group))
+    (m÷(128cluster)) % group == 0 || throw(ArgumentError("row tiles must be a multiple of the group"))
+    kernel = @cuda launch=false minthreads=384 hopper_gemm_kernel!(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     tiles = (m÷128)*(nt÷n)
-    blocks = persistent ? min(tiles,CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)) : tiles
-    launch() = GC.@preserve ta tb kernel(c,ta,tb,atom,Int32(k),Val(stages),Val(group);threads=384,blocks,shmem)
+    sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+    blocks = persistent ? cluster*(min(tiles,sms)÷cluster) : tiles
+    launch() = GC.@preserve ta tb tbh kernel(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster);
+                                             threads=384,blocks,shmem,clustersize=cluster)
     kernel, launch, c
 end

@@ -40,10 +40,14 @@ function initialize! end
 """
     arrive!(barrier)
     arrive!(barrier, bytes)
+    arrive!(barrier; cta)
 
 Arrive on the barrier's current phase. With `bytes`, first announce that
 many bytes of asynchronous transactions (a TMA load's
 [`transfer_bytes`](@ref)) that must also land before the phase completes.
+With `cta`, arrive on the barrier at the same address in the cluster's CTA
+of that rank ([`cluster_rank`](@ref)): a consumer releasing a stage that a
+peer's multicast loads write.
 """
 function arrive! end
 
@@ -88,3 +92,22 @@ that ordinary stores wrote (followed by a thread barrier when other
 threads wrote it).
 """
 function fence_async_shared end
+
+"""
+    cluster_rank()
+
+The calling CTA's rank within its cluster (`%cluster_ctarank`), from 0: the
+bit of it in a multicast mask, and the rank that `arrive!(barrier, rank)`
+names.
+"""
+function cluster_rank end
+
+"""
+    cluster_sync()
+
+All threads of every CTA in the cluster (`barrier.cluster`): after it, the
+cluster's barriers are initialized (with [`fence_barrier_init`](@ref)
+before), and before a CTA exits, no peer still writes into its shared
+memory or arrives on its barriers.
+"""
+function cluster_sync end
