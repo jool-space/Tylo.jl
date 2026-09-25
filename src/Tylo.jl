@@ -12,7 +12,7 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
        CopyAtom, copy_async!, commit_copies, wait_copies,
        Barrier, initialize!, arrive!, expect_bytes!, invalidate!, fence_barrier_init, fence_async_shared,
        TMATile, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes, tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores,
-       WGMMAAtom, operand, mma_async, wait_mma, finish_mma,
+       WGMMAAtom, operand, mma_async, wait_mma, finish_mma, release_registers, acquire_registers, warp_uniform,
        Tcgen05Atom, accumulator, commit_mma,
        reinterpret_tile, load_async, wait_load, store_async!, wait_stores,
        SoftmaxState, softmax_update, softmax_merge, softmax_normalize,
@@ -45,6 +45,7 @@ include("arrayops.jl")
 include("online.jl")
 include("tma.jl")
 include("wgmma.jl")
+include("warpgroup.jl")
 include("tcgen05.jl")
 include("derive.jl")
 include("machine.jl")

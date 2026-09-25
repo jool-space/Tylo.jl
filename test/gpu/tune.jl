@@ -19,7 +19,7 @@ end
 if runtime_supported(@__FILE__)
 @testset "tune" begin
     x = CUDACore.ones(Float32,1<<16); y = similar(x)
-    tuning = tune([1,64,4096,:local,:refused]) do c
+    tuning = tune([1,4096,65536,:local,:refused]) do c
         c === :refused && throw(ArgumentError("not a configuration"))
         if c === :local
             kernel = @cuda launch=false local_kernel!(y,x,Int32(3))
@@ -30,7 +30,7 @@ if runtime_supported(@__FILE__)
     end
     @test [t.status for t in tuning.trials] == [:timed,:timed,:timed,:audited,:invalid]
     @test Tylo.best(tuning) == 1                         # the least work
-    @test last(filter(t -> t.status === :timed,tuning.trials)).candidate == 4096
+    @test last(filter(t -> t.status === :timed,tuning.trials)).candidate == 65536
     @test issorted([t.median for t in tuning.trials[1:3]])
     @test tuning.trials[4].reason == "local_memory"
     @test occursin("not a configuration",tuning.trials[5].reason)

@@ -129,6 +129,15 @@ end
 f = finish_mma(wait_mma(c))
 ```
 
+A warp-specialized kernel gives each warpgroup one role: a producer
+issues TMA loads, consumers multiply. [`release_registers`](@ref) and
+`acquire_registers` move registers from the producer, which needs few, to
+the consumers' accumulators, and [`warp_uniform`](@ref) makes the
+warpgroup index a value ptxas knows to be uniform, so that its branches do
+not count as divergent. `examples/hopper_gemm` is such a GEMM: one
+producer and two consumer warpgroups per 128×N tile, a TMA pipeline of
+several stages, and pipelined WGMMA.
+
 The newest stage's buffers stay held while the next is issued, so a
 pipeline has one stage fewer to load into. That pays when the tensor cores
 are the bottleneck and stages are plentiful; a memory-bound pipeline
