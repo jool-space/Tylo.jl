@@ -110,23 +110,31 @@ origin)`:
 
 ```julia
 atom = WGMMAAtom(BFloat16, 64)
-c = zero_accumulator(atom)
-c = wait_mma(mma_async(atom, operand(atom, OperandA(), sa), operand(atom, OperandB(), sb), c))
-f = finish_mma(c)   # a Fragment of the 64×n accumulator
+c = wait_mma(mma_async(atom, operand(atom, OperandA(), sa), operand(atom, OperandB(), sb)))
+c = c .* scale      # ready: a Fragment of the 64×n accumulator, like any other
 ```
+
+`mma_async(atom, a, b)`, without an accumulator, starts a product from zero
+without zeroing registers; `mma_async(atom, a, b, c)` accumulates onto a
+ready Fragment or a pending result. A 16-bit A may come from registers, as a
+Fragment in `operand_layout(atom, OperandA())`, which is the accumulator's
+layout: an FP32 result converted with `Fragment{BFloat16}` is the next
+product's A, as attention's probabilities are. Shared operands may be
+MN-major (transposed) for 16-bit inputs, as attention's V is. An atom with
+several `partials` keeps them apart until `finish_mma` sums them.
 
 A pipeline chains issues on a pending accumulator, which needs no wait, and
 `wait_mma(c, 1)` retires every group but the newest, freeing the older
 stages' shared memory while the tensor cores work on the latest one:
 
 ```julia
-c = mma_async(atom, a(0), b(0), zero_accumulator(atom))
+c = mma_async(atom, a(0), b(0))
 for i in 1:stages-1
     wait(full(i), phase(i))
     c = wait_mma(mma_async(atom, a(i), b(i), c), 1)
     arrive!(empty(i-1))
 end
-f = finish_mma(wait_mma(c))
+f = wait_mma(c)
 ```
 
 A warp-specialized kernel gives each warpgroup one role: a producer

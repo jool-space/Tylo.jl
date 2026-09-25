@@ -101,9 +101,14 @@ function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R,A,B;fresh::Bool=false) whe
         PendingWGMMA{typeof(p),$R}(($(vals...),))
     end
 end
+# The accumulator: ready (a Fragment in the accumulator layout, or several
+# partials' registers) or pending from the previous issue.
+const _Accumulator{A,R} = Union{WGMMAAccumulator{A,R},PendingWGMMA{A,R},Fragment{Float32,R}}
+_accumulator_check(A,c) = c <: Fragment && c.parameters[3] !== typeof(_operand_layout(A(),Accumulator())) ?
+    :(throw(ArgumentError("the accumulator fragment is not in the atom's accumulator layout"))) : nothing
 @generated function mma_async(p::A,a::WGMMAOperand{A,OperandA},b::WGMMAOperand{A,OperandB},
-                              c::Union{WGMMAAccumulator{A,R},PendingWGMMA{A,R}}) where {A<:WGMMAAtom,R}
-    _mma_async_expr(A,R,a,b)
+                              c::_Accumulator{A,R}) where {A<:WGMMAAtom,R}
+    something(_accumulator_check(A,c),_mma_async_expr(A,R,a,b))
 end
 # A fresh product: no accumulator, none zeroed.
 @generated function mma_async(p::A,a::Union{WGMMAOperand{A,OperandA},Fragment},b::WGMMAOperand{A,OperandB}) where {A<:WGMMAAtom}
@@ -115,21 +120,21 @@ end
 end
 # A in registers: a fragment in the operand layout, the accumulator's for 64×K.
 @generated function mma_async(p::A,a::Fragment{T,NA,L},b::WGMMAOperand{A,OperandB},
-                              c::Union{WGMMAAccumulator{A,R},PendingWGMMA{A,R}}) where {T,N,K,P,A<:WGMMAAtom{T,N,K,P},NA,L,R}
+                              c::_Accumulator{A,R}) where {T,N,K,P,A<:WGMMAAtom{T,N,K,P},NA,L,R}
     L === typeof(_operand_layout(A(),OperandA())) ||
         return :(throw(ArgumentError("the A fragment is not in the atom's operand layout")))
-    _mma_async_expr(A,R,a,b)
+    something(_accumulator_check(A,c),_mma_async_expr(A,R,a,b))
 end
 # The descriptor of the `j`-th instruction, a constant step further along K.
 @inline _k_step(o::WGMMAOperand{P,Role,Major,Step},::Val{J}) where {P,Role,Major,Step,J} = PTX.step_desc(o.descriptor,Step*J)
 # With `newer`, `c`'s group is older than the `newer` most recent: waiting
 # until only those are in flight completes it.
 Base.@constprop :aggressive @inline function wait_mma(c::PendingWGMMA{P};newer::Integer=0) where P
-    WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val((:wait,Int(newer))),c.data))
+    _ready(_plan(P),_wgmma_register_barrier(Val((:wait,Int(newer))),c.data))
 end
 Base.@constprop :aggressive @inline wait_mma(c::PendingWGMMA,n::Integer) = _wait_mma(c,Val(Int(n)))
 @inline function _wait_mma(c::PendingWGMMA{P},::Val{0}) where P
-    WGMMAAccumulator(_plan(P),_wgmma_register_barrier(Val((:wait,0)),c.data))
+    _ready(_plan(P),_wgmma_register_barrier(Val((:wait,0)),c.data))
 end
 # Older groups complete; this one may still be in flight, so it stays pending.
 @inline function _wait_mma(c::PendingWGMMA{P,R},::Val{N}) where {P,R,N}

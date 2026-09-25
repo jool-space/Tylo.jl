@@ -14,10 +14,11 @@ by the hardware). A 16-bit A may also come from registers: a `Fragment` in
 an FP32 result converted to BF16 is the next product's A without moving
 values between threads.
 `partials=4` at n=8,k=64 preserves Cohere's four independent K chains.
-Use `finish_mma` to sum partials after waiting. No allocation or CTA barrier.
-The sizes must be constants. The finished accumulator is a `Fragment` in
-`operand_layout(atom, Accumulator())`; A and B are shared-memory descriptors
-from [`operand`](@ref), not registers.
+The sizes must be constants. With one partial, the ready accumulator
+(from `zero_accumulator` and `wait_mma`) is a `Fragment` in
+`operand_layout(atom, Accumulator())`, to compute with, rescale or store like
+any other; with several, `finish_mma` sums them into one. No allocation or
+CTA barrier.
 """
 struct WGMMAAtom{T,N,K,P} <: Atom
     function WGMMAAtom{T,N,K,P}() where {T,N,K,P}
@@ -47,8 +48,12 @@ end
 struct PendingWGMMA{P,R}
     data::NTuple{R,Float32}
 end
-@inline zero_accumulator(p::WGMMAAtom) =
-    WGMMAAccumulator(p,ntuple(_ -> 0f0,Val(_wg_registers(p))))
+# A ready accumulator: with one partial, a Fragment in the accumulator
+# layout, like any other register tile; with several, their registers, which
+# `finish_mma` sums.
+@inline _ready(p::WGMMAAtom{T,N,K,1},data) where {T,N,K} = Fragment(data,operand_layout(p,Accumulator()))
+@inline _ready(p::WGMMAAtom,data) = WGMMAAccumulator(p,data)
+@inline zero_accumulator(p::WGMMAAtom) = _ready(p,ntuple(_ -> 0f0,Val(_wg_registers(p))))
 
 # PTX ISA wgmma accumulator figure: lane groups t%4 select column pairs,
 # (t%32)÷4 the row, warps 16-row bands; slots alternate column, row half,
@@ -121,18 +126,19 @@ The count is of groups committed after `pending`'s, one per `mma_async`.
 
 ```julia
 wait(full(0), 0)
-c = mma_async(atom, a(0), b(0), zero_accumulator(atom))
+c = mma_async(atom, a(0), b(0))
 for i in 1:stages-1
     wait(full(i), phase(i))
     c = mma_async(atom, a(i), b(i), c)      # chained: no wait
     c = wait_mma(c, 1)                      # stage i-1's group is complete
     arrive!(empty(i-1))                     # its buffers may be refilled
 end
-f = finish_mma(wait_mma(c))
+f = wait_mma(c)                             # a Fragment
 ```
 """
 function wait_mma end
 
+@inline finish_mma(f::Fragment{Float32}) = f
 @generated function finish_mma(c::WGMMAAccumulator{WGMMAAtom{T,N,K,P}}) where {T,N,K,P}
     values = [foldl((a,b) -> :($a + $b), [:(c.data[$(i+j*(N÷2))]) for j in 0:P-1]) for i in 1:N÷2]
     quote

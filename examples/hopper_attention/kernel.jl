@@ -91,7 +91,7 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,::Val{Stages}
                 wait(full(slot_of(j)),phase_of(j))
                 update = softmax_update(state,finish_mma(wait_mma(scores_async(j)));scale)
                 state = update.state
-                out = Tylo.WGMMAAccumulator(pv,(finish_mma(out) .* update.rescale).data)
+                out = out .* update.rescale                   # the output so far, to the new maxima
                 out = wait_mma(output_async(out,update.weights,j))
                 arrive!(empty(slot_of(j)))
             end
@@ -117,7 +117,7 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,::Val{Stages}
                 pass(false)
                 update = softmax_update(state,finish_mma(wait_mma(scores;newer=2));scale)
                 state = update.state
-                out = Tylo.WGMMAAccumulator(pv,(finish_mma(wait_mma(pending)) .* update.rescale).data)
+                out = wait_mma(pending) .* update.rescale
                 p = update.weights
                 arrive!(empty(slot_of(j-Int32(1))))
             end
@@ -218,7 +218,7 @@ function persistent_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scal
                 @inbounds sa = mma_async(qk,qa[2],operand(qk,OperandB(),k,(Int32(64),Int32(0))),sa)
                 update = softmax_update(state,finish_mma(wait_mma(sa));scale)
                 state = update.state
-                out = Tylo.WGMMAAccumulator(pv,(finish_mma(out) .* update.rescale).data)
+                out = out .* update.rescale                   # the output so far, to the new maxima
                 p = Fragment{BFloat16}(update.weights)
                 @inbounds out = mma_async(pv,window(p,(0,0),(64,64)),operand(pv,OperandB(),v,(Int32(0),Int32(0))),out)
                 @inbounds out = wait_mma(mma_async(pv,window(p,(0,64),(64,64)),operand(pv,OperandB(),v,(Int32(64),Int32(0))),out))

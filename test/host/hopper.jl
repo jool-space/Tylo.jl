@@ -53,6 +53,11 @@ end
         @test all(c -> c isa Tuple{Int32,Int32},coordinates)
         @test all(iszero,finish_mma(zero_accumulator(p)).data)
     end
+    # One partial: the accumulator is a Fragment, finished already.
+    one = zero_accumulator(WGMMAAtom(BFloat16,64))
+    @test one isa Fragment{Float32} && Tylo.Layouts.layout(one) == operand_layout(WGMMAAtom(BFloat16,64),Accumulator())
+    @test finish_mma(one) === one
+    @test zero_accumulator(WGMMAAtom(BFloat16,8,64,4)) isa Tylo.WGMMAAccumulator
     for k in (16,32,64), partials in (1,k÷16)
         p = WGMMAAtom(BFloat16,8,k,partials)
         c = Tylo.WGMMAAccumulator(p,ntuple(Float32,4partials))
