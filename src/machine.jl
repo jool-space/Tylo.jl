@@ -119,10 +119,12 @@ function audit(code::MachineCode; calls::Bool=true, local_memory::Bool=true, spi
         bytes = local_bytes(code)
         accesses = _sass_count(code,r"\b(LDL|STL)\b")
         if bytes > 0 || accesses > 0
-            hint = isempty(kernel_calls(code)) ?
+            sources = bytes > 0 ? _local_origins(code) : String[]
+            hint = any(s -> occursin(r"\((sincos|sin|cos|tan|sinpi|cospi)\)",s),sources) ?
+                "libdevice's sin and cos keep a 28-byte array for reducing large arguments (beyond about 1e5 radians); it is touched only then. Tables of precomputed values, or reduced arguments, avoid it." :
+                isempty(kernel_calls(code)) ?
                 "Values that did not become registers: an array or tuple indexed with a runtime index, or a closure or tuple the compiler did not unroll." :
                 "The exception reporting ptxas inlined keeps a local buffer; it goes away with the calls."
-            sources = bytes > 0 ? _local_origins(code) : String[]
             push!(findings,Finding(:local_memory,"$bytes bytes of local memory declared, $accesses local loads and stores",sources,hint))
         end
     end
@@ -286,9 +288,11 @@ function _local_origins(ir::AbstractString)
     end
     isempty(names) && return String[]
     uses = Regex(join(("\\Q$(n)\\E(?![\\w.\"])" for n in names),"|"))
+    # Address arithmetic gets hoisted with unrelated locations; lifetime
+    # markers, loads, stores and calls keep the frames that own the memory.
     origins = String[]
     _trace(ir) do line, chain
-        occursin(r"= alloca\b",line) && return
+        occursin(r"= alloca\b|getelementptr",line) && return
         occursin(uses,line) && !(chain in origins) && push!(origins,chain)
     end
     origins
