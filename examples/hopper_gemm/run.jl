@@ -1,48 +1,37 @@
-# julia --project=test examples/hopper_gemm/run.jl [m n k]
-# Checks the warp-specialized GEMM against cuBLAS, then tunes its tile width
-# and stage count, timing cuBLAS as one more candidate.
-using cuBLAS, Random
+# julia --project=test examples/hopper_gemm/run.jl [bf16|fp8] [m n k]
+# Checks the warp-specialized GEMM against cuBLASLt, then tunes its tile
+# width and stage count, timing cuBLASLt as one more candidate.
+using Random
 include("kernel.jl")
+include("cublaslt.jl")
 CUDACore.capability(CUDACore.device()) == v"9.0" || error("requires an H100 or H200")
 
-# C (N×M, row-major M×N) = Bᵀ A in cuBLAS's terms, the same product.
-function cublas_gemm(a,b,c)
-    k, m = size(a); n = size(b,2)
-    alpha, beta = CuArray(Float32[1]), CuArray(Float32[0])
-    handle = cuBLAS.handle()
-    cuBLAS.cublasSetPointerMode_v2(handle,cuBLAS.CUBLAS_POINTER_MODE_DEVICE)
-    () -> cuBLAS.cublasGemmEx(handle,'T','N',n,m,k,alpha,b,eltype(b),k,a,eltype(a),k,beta,c,eltype(c),n,
-                              cuBLAS.CUBLAS_COMPUTE_32F,cuBLAS.CUBLAS_GEMM_DEFAULT)
-end
-
-function main(m,n,k)
+function main(::Type{T},m,n,k) where T
     rng = MersenneTwister(1)
-    a = CuArray(BFloat16.(randn(rng,Float32,k,m) ./ sqrt(Float32(k))))
-    b = CuArray(BFloat16.(randn(rng,Float32,k,n)))
+    a = CuArray(T.(randn(rng,Float32,k,m) ./ sqrt(Float32(k))))
+    b = CuArray(T.(randn(rng,Float32,k,n)))
     reference = CuArray{BFloat16}(undef,n,m)
-    cublas = cublas_gemm(a,b,reference)
-    cublas(); CUDACore.synchronize()
+    library = cublaslt_gemm(a,b,reference)
+    library(); CUDACore.synchronize()
     expected = Float32.(Array(reference))
-    println(CUDACore.name(device()),": C = AᵀB, BF16, ",(m,n,k))
-    candidates = [:cublas; [(; n=w, stages=s) for w in (128,256) for s in 3:8]]
+    println(CUDACore.name(device()),": C = AᵀB, ",T," inputs, BF16 C, ",(m,n,k))
+    candidates = [:cublaslt; [(; n=w, stages=s, group=g) for w in (128,256) for s in 3:5 for g in (1,4,8,16)]]
     tuning = tune(candidates) do cand
-        cand === :cublas && return cublas
+        cand === :cublaslt && return library
         kernel, launch, c = hopper_gemm(a,b;cand...)
         fill!(c,BFloat16(NaN)); launch()
         err = maximum(abs.(Float32.(Array(c)) .- expected))
-        err <= 0.03f0*maximum(abs,expected) || error("$cand differs from cuBLAS by $err")
+        err <= 0.03f0*maximum(abs,expected) || error("$cand differs from cuBLASLt by $err")
         kernel, launch
     end
     show(stdout,MIME("text/plain"),tuning); println()
     flops = 2.0*m*n*k
-    for t in tuning.trials
-        t.status === :timed || continue
-        println(rpad(string(t.candidate),26),round(flops/t.median/1e12;digits=1)," TFLOP/s")
-    end
-    ours = first(filter(t -> t.status === :timed && t.candidate !== :cublas,tuning.trials))
-    theirs = only(filter(t -> t.candidate === :cublas,tuning.trials))
-    println("best Tylo: ",ours.candidate,", ",round(100*theirs.median/ours.median;digits=1),"% of cuBLAS")
+    ours = first(filter(t -> t.status === :timed && t.candidate !== :cublaslt,tuning.trials))
+    theirs = only(filter(t -> t.candidate === :cublaslt,tuning.trials))
+    println("cuBLASLt ",round(flops/theirs.median/1e12;digits=1)," TFLOP/s; Tylo ",ours.candidate," ",
+            round(flops/ours.median/1e12;digits=1)," TFLOP/s: ",round(100*theirs.median/ours.median;digits=1),"% of cuBLASLt")
 end
 
-m, n, k = isempty(ARGS) ? (4096,4096,4096) : parse.(Int,ARGS)
-main(m,n,k)
+T = get(ARGS,1,"bf16") == "fp8" ? Float8_E4M3FN : BFloat16
+m, n, k = length(ARGS) >= 4 ? parse.(Int,ARGS[2:4]) : (4096,4096,4096)
+main(T,m,n,k)

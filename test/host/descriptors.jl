@@ -44,27 +44,28 @@ end
 sptr(::Type{T},a) where T = reinterpret(Core.LLVMPtr{T,3},UInt64(a))
 
 @testset "WGMMA descriptors read the tile (PTX ISA canonical layouts)" begin
-    for T in (BFloat16,Float16), W in (32,64,128), base in (0x400,0x8000)
+    for T in (BFloat16,Float16,Float8_E4M3FN,Float8_E5M2), W in (32,64,128), base in (0x400,0x8000)
         row = W ÷ sizeof(T)
+        ik = 32 ÷ sizeof(T)                                  # K per instruction
         a = SharedTile(sptr(T,base),shared_layout(TMATile(T,(128,row),2,W)))
         b = SharedTile(sptr(T,base+0x4000),shared_layout(TMATile(T,(row,64),1,W)))
-        for k in (16,32,64), n in (8,16,64)
+        for k in (ik,2ik,4ik), n in (8,16,64)
             k <= row || continue
             p = WGMMAAtom(T,n,k)
-            for rr in (0,64), kk in 0:16:row-k
+            for rr in (0,64), kk in 0:ik:row-k
                 o = operand(p,OperandA(),a,(Int32(rr),Int32(kk)))
-                for j in 0:k÷16-1
+                for j in 0:k÷ik-1
                     d = decode_wgmma(Tylo._k_step(o,Val(j)))
                     @test d.swizzle == W && d.base == 0 && d.reserved == 0
-                    @test reads_tile(d,:K,a,T,64,16,(rr,kk+16j),2)
+                    @test reads_tile(d,:K,a,T,64,ik,(rr,kk+ik*j),2)
                 end
             end
-            for kk in 0:16:row-k, cc in (0,64-n)
+            for kk in 0:ik:row-k, cc in (0,64-n)
                 o = operand(p,OperandB(),b,(Int32(kk),Int32(cc)))
-                for j in 0:k÷16-1
+                for j in 0:k÷ik-1
                     d = decode_wgmma(Tylo._k_step(o,Val(j)))
                     @test d.swizzle == W && d.base == 0
-                    @test reads_tile(d,:K,b,T,n,16,(kk+16j,cc),1)
+                    @test reads_tile(d,:K,b,T,n,ik,(kk+ik*j,cc),1)
                 end
             end
         end

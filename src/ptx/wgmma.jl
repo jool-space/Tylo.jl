@@ -31,20 +31,21 @@ Base.@propagate_inbounds function operand(p::WGMMAAtom{T,N,K},role::Role,
     WGMMAOperand{typeof(p),Role}(desc)
 end
 
-# Issue a plan's K/16 instructions and commit them as one group. Every issue
+# Issue a plan's instructions, 32 bytes of K each, and commit them as one group. Every issue
 # fences, a chained one too: the hardware orders wgmma after wgmma on the same
 # accumulator (PTX ISA §9.7.17.7.1), but ptxas then inserts a warpgroup
 # arrive of its own, and where that lands on a path it cannot prove
 # convergent (after an mbarrier wait loop, say) it serializes every wgmma in
 # the kernel. The explicit fence is the same single instruction.
 function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R) where {T,N,K,P}
-    dtype = T === BFloat16 ? "bf16" : "f16"
-    instruction = ptx"wgmma.mma_async.sync.aligned.m64n$(N)k16.f32.$dtype.$dtype"
+    dtype = T === BFloat16 ? "bf16" : T === Float16 ? "f16" : T === Float8_E4M3FN ? "e4m3" : "e5m2"
+    ik = _instruction_k(T)
+    instruction = ptx"wgmma.mma_async.sync.aligned.m64n$(N)k$(ik).f32.$dtype.$dtype"
     init = [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
     ops = [begin
         name = Symbol(:part,j%P)
         :($name = $instruction($name,_k_step(a,Val($j)),_k_step(b,Val($j)),Val(true)))
-    end for j in 0:K÷16-1]
+    end for j in 0:K÷ik-1]
     vals = [:($(Symbol(:part,j))[$i]) for j in 0:P-1 for i in 1:N÷2]
     quote
         Base.@inline
@@ -57,7 +58,7 @@ function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R) where {T,N,K,P}
 end
 @generated mma_async(p::A,a::WGMMAOperand{A,OperandA},b::WGMMAOperand{A,OperandB},
                      c::Union{WGMMAAccumulator{A,R},PendingWGMMA{A,R}}) where {A<:WGMMAAtom,R} = _mma_async_expr(A,R)
-# The descriptor of the `j`-th K=16 instruction: 32 bytes further along K.
+# The descriptor of the `j`-th instruction: 32 bytes further along K.
 @inline _k_step(o::WGMMAOperand,::Val{J}) where J = PTX.step_desc(o.descriptor,32J)
 @inline wait_mma(c::PendingWGMMA) = wait_mma(c,0)
 Base.@constprop :aggressive @inline wait_mma(c::PendingWGMMA,n::Integer) = _wait_mma(c,Val(Int(n)))

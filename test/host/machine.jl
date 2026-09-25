@@ -31,5 +31,7 @@
     @test !any(startswith("llvm."),keys(traced))
     @test occursin("StepRange",Tylo._call_hint("julia_overflow_case",traced["julia_overflow_case"]))
     @test occursin("sqrt_llvm",Tylo._call_hint("julia_throw_complex_domainerror",String[]))
-    @test occursin("sdiv_int",Tylo._call_hint("gpu_report_exception",["k.jl:1 (f) → int.jl:295 (div)"]))
+    @test occursin("unchecked_div",Tylo._call_hint("gpu_report_exception",["k.jl:1 (f) → int.jl:295 (div)"]))
+    @test unchecked_div(Int32(-7),Int32(2)) === Int32(-3) && unchecked_rem(Int32(-7),Int32(2)) === Int32(-1)
+    @test unchecked_div(UInt32(7),UInt32(2)) === UInt32(3) && unchecked_rem(UInt32(7),UInt32(2)) === UInt32(1)
 end

@@ -8,7 +8,7 @@ include("../../examples/hopper_gemm/kernel.jl")
     for (n,stages) in ((128,6),(256,4))
         ta = Tylo.TMABinding{typeof(TMATile(T,(128,64),2)),PTX.TMADescriptorPtr,2}
         tb = Tylo.TMABinding{typeof(TMATile(T,(64,n),1)),PTX.TMADescriptorPtr,2}
-        tt = Tuple{CuDeviceMatrix{T,1},ta,tb,typeof(WGMMAAtom(T,n,64)),Int32,Val{stages}}
+        tt = Tuple{CuDeviceMatrix{T,1},ta,tb,typeof(WGMMAAtom(T,n,64)),Int32,Val{stages},Val{8}}
         code = compile_kernel(hopper_gemm_kernel!,tt;arch=CUDACore.SMVersion(9,0,:arch),threads=384)
         save_code("hopper-gemm-n$n-s$stages",code)
         @test isempty(audit(code))

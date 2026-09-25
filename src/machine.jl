@@ -164,7 +164,7 @@ function _call_hint(name,sources)
     from("(steprange") || occursin("overflow_case",name) ?
         "A StepRange (a:step:b) with runtime bounds checks its step and computes its last element out of line. Iterate a unit range and scale the index, or loop with while." :
     from("(div)") || from("(rem)") || from("(cld)") || from("(fld)") || from("(mod)") || occursin("diverror",lowercase(name)) ?
-        "Integer division by a runtime divisor checks for zero. Divide by a constant, or use Core.Intrinsics.sdiv_int/srem_int (udiv_int/urem_int) when the divisor is known to be nonzero." :
+        "Integer division by a runtime divisor checks for zero. Divide by a constant, or use unchecked_div/unchecked_rem when the divisor is known to be nonzero." :
     occursin("domainerror",lowercase(name)) ?
         "sqrt, log or ^ of a value not known to be nonnegative throws a DomainError. When it is, use Core.Intrinsics.sqrt_llvm (IEEE sqrt, NaN for negatives)." :
     occursin("inexacterror",lowercase(name)) || from("(checked_trunc") || from("(toUInt") || from("(toInt") ?
@@ -207,11 +207,12 @@ sass_instructions(code::MachineCode) = _sass_count(code,r"^\s+/\*[0-9a-f]{4,}\*/
 """
     wgmma_groups(code) -> (; instructions, fences, arrives, waits)
 
-WGMMA instructions in the SASS, `wgmma.fence`s in the PTX, and the
+WGMMA instructions in the SASS (`HGMMA`, `QGMMA` for FP8, `IGMMA`),
+`wgmma.fence`s in the PTX, and the
 warpgroup arrives and waits ptxas emitted; asynchronous code has one arrive
 per fence.
 """
-wgmma_groups(code::MachineCode) = (; instructions=_sass_count(code,r"\bHGMMA\b"),
+wgmma_groups(code::MachineCode) = (; instructions=_sass_count(code,r"\b[HQIB]GMMA\b"),   # 16-bit, FP8, integer, binary
     fences=count("wgmma.fence",entry_ptx(code)),
     arrives=_sass_count(code,r"WARPGROUP\.ARRIVE"),
     waits=_sass_count(code,r"WARPGROUP\.DEPBAR"))

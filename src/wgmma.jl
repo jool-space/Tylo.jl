@@ -1,10 +1,13 @@
 """
     WGMMAAtom(T, n, k=64, partials=1)
 
-Hopper shared/shared warpgroup MMA: 128 threads compute a 64×n×k product.
-BF16/FP16 inputs, FP32 accumulation; n=8:8:256, k in (16,32,64). Each K=16
-instruction updates one of `partials` independent accumulators cyclically.
-Partials must divide k/16; total registers per thread must not exceed 128.
+Hopper shared/shared warpgroup MMA: 128 threads compute a 64×n×k product,
+accumulating in FP32. BF16 or FP16 inputs take 16 of K per instruction, FP8
+(`Float8_E4M3FN`, `Float8_E5M2`) 32: each instruction covers 32 bytes of K,
+and `k` covers one, two or four instructions (16, 32 or 64 for 16-bit
+inputs; 32, 64 or 128 for FP8). n=8:8:256. Each instruction updates one of
+`partials` independent accumulators cyclically. Partials must divide the
+instruction count; total registers per thread must not exceed 128.
 `partials=4` at n=8,k=64 preserves Cohere's four independent K chains.
 Use `finish_mma` to sum partials after waiting. No allocation or CTA barrier.
 The sizes must be constants. The finished accumulator is a `Fragment` in
@@ -13,9 +16,9 @@ from [`operand`](@ref), not registers.
 """
 struct WGMMAAtom{T,N,K,P} <: Atom
     function WGMMAAtom{T,N,K,P}() where {T,N,K,P}
-        T === BFloat16 || T === Float16 || throw(ArgumentError("BF16 or FP16 required"))
-        N isa Int && 8 <= N <= 256 && N % 8 == 0 && K isa Int && K in (16,32,64) &&
-            P isa Int && P > 0 && (K÷16) % P == 0 && N÷2*P <= 128 ||
+        T in (BFloat16,Float16,Float8_E4M3FN,Float8_E5M2) || throw(ArgumentError("BF16, FP16 or FP8 (E4M3, E5M2) required"))
+        N isa Int && 8 <= N <= 256 && N % 8 == 0 && K isa Int && K*sizeof(T) in (32,64,128) &&
+            P isa Int && P > 0 && (K÷_instruction_k(T)) % P == 0 && N÷2*P <= 128 ||
             throw(ArgumentError("invalid WGMMA shape or partial accumulator count"))
         new{T,N,K,P}()
     end
@@ -27,6 +30,8 @@ threads(::WGMMAAtom) = 128
 Base.eltype(::WGMMAAtom{T},::Union{OperandA,OperandB}) where T = T
 Base.eltype(::WGMMAAtom,::Accumulator) = Float32
 _wg_registers(::WGMMAAtom{T,N,K,P}) where {T,N,K,P} = N÷2*P
+# One instruction covers 32 bytes of K.
+_instruction_k(::Type{T}) where T = 32 ÷ sizeof(T)
 struct WGMMAAccumulator{P,R}
     data::NTuple{R,Float32}
     function WGMMAAccumulator(p::P,data::NTuple{R,Float32}) where {P<:WGMMAAtom,R}
@@ -112,7 +117,7 @@ function validate_wgmma(p::WGMMAAtom{T,N,K},role::Role,l::Layouts.AbstractLayout
     K <= row || throw(ArgumentError("the plan's K does not fit one swizzle row"))
     k,r = origin[A],origin[3-A]
     outer = Role === OperandA ? 64 : N
-    k >= 0 && k % 16 == 0 && k % row + K <= row && k+K <= size(l)[A] && r >= 0 && r % 8 == 0 && r+outer <= size(l)[3-A] ||
+    k >= 0 && k % _instruction_k(T) == 0 && k % row + K <= row && k+K <= size(l)[A] && r >= 0 && r % 8 == 0 && r+outer <= size(l)[3-A] ||
         throw(ArgumentError("WGMMA origin or extent is not descriptor-compatible"))
     nothing
 end
