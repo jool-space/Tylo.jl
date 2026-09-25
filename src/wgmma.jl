@@ -79,6 +79,7 @@ end
 
 """
     mma_async(atom, a, b, accumulator)
+    mma_async(atom, a, b)
 
 Warpgroup collective (128 threads, converged). Issue the atom's WGMMA
 instructions on the shared operands `a` and `b` (from [`operand`](@ref))
@@ -86,7 +87,9 @@ and commit them as one group, after a `wgmma.fence`; the result is pending
 until [`wait_mma`](@ref). The accumulator is ready (from `zero_accumulator`
 or a completed wait) or still pending from the previous issue: a chain of
 issues on one accumulator needs no wait in between, which keeps the tensor
-cores busy while a pipeline waits for its next stage.
+cores busy while a pipeline waits for its next stage. Without an
+accumulator the product starts from zero, without zeroing registers first
+(the first instructions ignore their accumulator).
 Operands must be visible to the async proxy and unchanged until their
 group completes.
 """

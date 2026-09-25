@@ -74,7 +74,7 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,::Val{Stages}
         @inline function scores_async(j)
             k = shared_tile(tk,kstage(slot_of(j)))
             # (A name of the enclosing body assigned here would be boxed.)
-            @inbounds half = mma_async(qk,qa[1],operand(qk,OperandB(),k,(Int32(0),Int32(0))),zero_accumulator(qk))
+            @inbounds half = mma_async(qk,qa[1],operand(qk,OperandB(),k,(Int32(0),Int32(0))))   # fresh: no zeroing
             @inbounds mma_async(qk,qa[2],operand(qk,OperandB(),k,(Int32(64),Int32(0))),half)
         end
         # O plus P V for block j: two groups, one per half of the block, P
@@ -135,19 +135,123 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,::Val{Stages}
     nothing
 end
 
+# The persistent form: one CTA per SM walks (query block, head) tiles, query
+# blocks first so that the CTAs running at once share a head's K and V
+# through L2. Q is double-buffered and K/V stages are counted across tiles,
+# so the producer loads the next tile's Q and first blocks while the
+# consumers finish and store the current one.
+function persistent_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Float32,::Val{Stages}) where Stages
+    qk = WGMMAAtom(BFloat16,128,64)
+    pv = WGMMAAtom(BFloat16,128,64)
+    qbytes, kbytes, vbytes = transfer_bytes(tq), transfer_bytes(tk), transfer_bytes(tv)
+    workspace = @inbounds CuDynamicSharedArray(UInt8,32+16Stages+1024+2qbytes+Stages*(kbytes+vbytes))
+    raw = pointer(workspace)
+    @inline qfull(b) = Barrier(raw,b)                       # Q buffer b holds a tile's queries
+    @inline qempty(b) = Barrier(raw+16,b)                   # Q buffer b may be refilled
+    @inline full(s) = Barrier(raw+32,s)
+    @inline empty(s) = Barrier(raw+32+8Stages,s)
+    start = raw+32+16Stages
+    base = start+((UInt32(0)-PTX.smem_addr_u32(start)) & UInt32(1023))
+    @inline qstage(b) = base+b*Int32(qbytes)
+    @inline kstage(s) = base+Int32(2qbytes)+s*Int32(kbytes+vbytes)
+    @inline vstage(s) = kstage(s)+kbytes
+    tid = Int32(threadIdx().x)-Int32(1)
+    warpgroup = warp_uniform(tid ÷ Int32(128))
+    if tid == Int32(0)
+        for b in Int32(0):Int32(1)
+            initialize!(qfull(b),1)
+            initialize!(qempty(b),256)
+        end
+        for s in Int32(0):Int32(Stages-1)
+            initialize!(full(s),1)
+            initialize!(empty(s),256)
+        end
+        fence_barrier_init()
+    end
+    sync_threads()
+    seq = size(o,2) % Int32
+    nq = seq ÷ Int32(128)
+    tiles = nq*heads
+    blocks = seq_kv ÷ Int32(128)
+    if warpgroup == Int32(0)
+        release_registers(Val(40))
+        if tid == Int32(0)
+            i = Int32(0); c = Int32(0)                      # tiles and K/V blocks so far
+            t = Int32(blockIdx().x)-Int32(1)
+            while t < tiles
+                qb = i&Int32(1)
+                i >= Int32(2) && wait(qempty(qb),((i>>1)-Int32(1))&Int32(1))
+                head = unchecked_div(t,nq)
+                q0 = unchecked_rem(t,nq)*Int32(128)
+                arrive!(qfull(qb),qbytes)
+                @inbounds tma_load!(shared_tile(tq,qstage(qb)),tq,(q0,Int32(0),head),qfull(qb))
+                for j in Int32(0):blocks-Int32(1)
+                    slot = c%Int32(Stages)
+                    c >= Int32(Stages) && wait(empty(slot),((c÷Int32(Stages))-Int32(1))&Int32(1))
+                    arrive!(full(slot),kbytes+vbytes)
+                    @inbounds tma_load!(shared_tile(tk,kstage(slot)),tk,(Int32(0),Int32(128)*j,head),full(slot))
+                    @inbounds tma_load!(shared_tile(tv,vstage(slot)),tv,(Int32(128)*j,Int32(0),head),full(slot))
+                    c += Int32(1)
+                end
+                i += Int32(1)
+                t += gridDim().x
+            end
+        end
+    else
+        acquire_registers(Val(232))
+        rows = (warpgroup-Int32(1))*Int32(64)
+        thread = tid%Int32(128)
+        i = Int32(0); c = Int32(0)
+        t = Int32(blockIdx().x)-Int32(1)
+        while t < tiles
+            qb = i&Int32(1)
+            wait(qfull(qb),(i>>1)&Int32(1))
+            q = shared_tile(tq,qstage(qb))
+            @inbounds qa = (operand(qk,OperandA(),q,(rows,Int32(0))),operand(qk,OperandA(),q,(rows,Int32(64))))
+            state = SoftmaxState(finish_mma(zero_accumulator(qk));dims=2)
+            out = zero_accumulator(pv)
+            for j in Int32(0):blocks-Int32(1)
+                slot = c%Int32(Stages)
+                wait(full(slot),(c÷Int32(Stages))&Int32(1))
+                k = shared_tile(tk,kstage(slot)); v = shared_tile(tv,vstage(slot))
+                @inbounds sa = mma_async(qk,qa[1],operand(qk,OperandB(),k,(Int32(0),Int32(0))))
+                @inbounds sa = mma_async(qk,qa[2],operand(qk,OperandB(),k,(Int32(64),Int32(0))),sa)
+                update = softmax_update(state,finish_mma(wait_mma(sa));scale)
+                state = update.state
+                out = Tylo.WGMMAAccumulator(pv,(finish_mma(out) .* update.rescale).data)
+                p = Fragment{BFloat16}(update.weights)
+                @inbounds out = mma_async(pv,window(p,(0,0),(64,64)),operand(pv,OperandB(),v,(Int32(0),Int32(0))),out)
+                @inbounds out = wait_mma(mma_async(pv,window(p,(0,64),(64,64)),operand(pv,OperandB(),v,(Int32(64),Int32(0))),out))
+                arrive!(empty(slot))
+                c += Int32(1)
+            end
+            arrive!(qempty(qb))
+            head = unchecked_div(t,nq)
+            q0 = unchecked_rem(t,nq)*Int32(128)
+            result = Fragment{BFloat16}(softmax_normalize(finish_mma(out),state))
+            dst = @inbounds GlobalTile(pointer(o,Int32(1)+head*seq*Int32(128)),Layout((seq,static(128)),(static(128),static(1))),16)
+            @inbounds store!(window(dst,(q0+rows,Int32(0)),(64,128)),result,thread)
+            i += Int32(1)
+            t += gridDim().x
+        end
+    end
+    nothing
+end
+
 """
-    hopper_attention(q, k, v; stages=2, overlap=false, pingpong=overlap) -> (kernel, launch, o)
+    hopper_attention(q, k, v; stages=2, persistent=true, overlap=false, pingpong=overlap) -> (kernel, launch, o)
 
 Prepare O = softmax(Q Kᵀ / √d) V for BF16 `q`, `k`, `v` of size
 d×seq×(batch·heads), d = 128, sequence lengths multiples of 128. With
-`overlap`, each block's softmax runs while the tensor cores multiply the
+`persistent`, one CTA per SM walks the tiles (with the simple schedule).
+With `overlap`, each block's softmax runs while the tensor cores multiply the
 previous block's probabilities by V, and with `pingpong` the two consumers
-take turns at the tensor cores. On an H100 NVL neither pays yet: the two
-consumers already overlap each other's softmax, the overlapped schedules
-hold two score tiles and spill a few registers, and the simple schedule is
-as fast or faster (see run.jl).
+take turns at the tensor cores, which needs three stages to pay. On an H100
+NVL the persistent form is fastest for short sequences (2048) and the
+overlapped ping-pong schedule for long ones (4096 and up), each within a
+few percent of the other; run.jl tunes between them.
 """
-function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages::Integer=2,overlap::Bool=false,pingpong::Bool=overlap,o=nothing) where T
+function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages::Integer=2,persistent::Bool=true,overlap::Bool=false,pingpong::Bool=overlap,o=nothing) where T
     d, sq, bh = size(q); skv = size(k,2)
     d == 128 && size(k) == size(v) == (d,skv,bh) && sq % 128 == 0 && skv % 128 == 0 ||
         throw(ArgumentError("d must be 128 and sequence lengths multiples of 128"))
@@ -159,6 +263,16 @@ function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages
     o = o === nothing ? similar(q) : o
     scale = Float32(1/sqrt(d))
     pingpong && !overlap && throw(ArgumentError("ping-pong turns apply to the overlapped schedule"))
+    persistent && overlap && throw(ArgumentError("the persistent form has the simple schedule"))
+    if persistent
+        shmem += 16+transfer_bytes(tq)
+        shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
+        kernel = @cuda launch=false minthreads=384 persistent_attention_kernel!(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages))
+        CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
+        blocks = min((sq÷128)*bh,CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
+        launch_persistent() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages);threads=384,blocks,shmem)
+        return kernel, launch_persistent, o
+    end
     kernel = @cuda launch=false minthreads=384 attention_kernel!(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     launch() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong);threads=384,blocks=(sq÷128,bh),shmem)

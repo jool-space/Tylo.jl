@@ -63,7 +63,7 @@ function hopper_gemm_kernel!(c,a,b,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{Stag
         while t < tiles
             tm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
             wait(full(i%Int32(Stages)),(i÷Int32(Stages))&Int32(1))
-            acc = mma_async(atom,operands(i)...,zero_accumulator(atom))
+            acc = mma_async(atom,operands(i)...)                  # a fresh tile: no zeroing
             for kk in Int32(1):count-Int32(1)
                 j = i+kk
                 wait(full(j%Int32(Stages)),(j÷Int32(Stages))&Int32(1))

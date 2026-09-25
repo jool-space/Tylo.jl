@@ -52,7 +52,11 @@ _instruction_step(::Type{L},::Type{T},::Type{Role},major::Symbol) where {L,T,Rol
 # convergent (after an mbarrier wait loop, say) it serializes every wgmma in
 # the kernel. The explicit fence is the same single instruction.
 _wgmma_dtype(::Type{T}) where T = T === BFloat16 ? "bf16" : T === Float16 ? "f16" : T === Float8_E4M3FN ? "e4m3" : "e5m2"
-@generated function _wgmma(::Val{N},::Type{T},::Val{Transposes},d::NTuple{R,Float32},a,b::UInt64) where {N,T,Transposes,R}
+# With `d === nothing`, a fresh product: scale-d 0 ignores the accumulator,
+# so its registers are outputs only and need no zeroing.
+@generated function _wgmma(::Val{N},::Type{T},::Val{Transposes},d,a,b::UInt64) where {N,T,Transposes}
+    fresh = d === Nothing
+    R = fresh ? N ÷ 2 : length(d.parameters)
     dt = _wgmma_dtype(T)
     registers = a <: NTuple{4,UInt32}
     # Transpose bits exist for 16-bit inputs only, and for A only in shared memory.
@@ -60,22 +64,27 @@ _wgmma_dtype(::Type{T}) where T = T === BFloat16 ? "bf16" : T === Float16 ? "f16
     outputs = "{" * join(("\$$i" for i in 0:R-1),", ") * "}"
     aslot = registers ? "{" * join(("\$$(R+i)" for i in 0:3),", ") * "}" : "\$$R"
     bslot = registers ? "\$$(R+4)" : "\$$(R+1)"
-    asm = "wgmma.mma_async.sync.aligned.m64n$(N)k$(_instruction_k(T)).f32.$dt.$dt $outputs, $aslot, $bslot, 1, 1, 1$tail;"
+    asm = "wgmma.mma_async.sync.aligned.m64n$(N)k$(_instruction_k(T)).f32.$dt.$dt $outputs, $aslot, $bslot, $(fresh ? 0 : 1), 1, 1$tail;"
     inputs = registers ? ["r","r","r","r","l"] : ["l","l"]
-    constraints = join(vcat(fill("=f",R),inputs,string.(0:R-1),["~{memory}"]),",")
-    argtypes = registers ? [UInt32,UInt32,UInt32,UInt32,UInt64,fill(Float32,R)...] : [UInt64,UInt64,fill(Float32,R)...]
+    ties = fresh ? String[] : string.(0:R-1)
+    constraints = join(vcat(fill("=f",R),inputs,ties,["~{memory}"]),",")
+    accumulator = fresh ? DataType[] : fill(Float32,R)
+    argtypes = registers ? [UInt32,UInt32,UInt32,UInt32,UInt64,accumulator...] : [UInt64,UInt64,accumulator...]
     ir = PTX.convergent_asm_ir(asm,constraints,NTuple{R,Float32},argtypes)
-    args = registers ? [[:(a[$i]) for i in 1:4];:b;[:(d[$i]) for i in 1:R]] : [:a;:b;[:(d[$i]) for i in 1:R]]
+    dargs = fresh ? Expr[] : [:(d[$i]) for i in 1:R]
+    args = registers ? [[:(a[$i]) for i in 1:4];:b;dargs] : [:a;:b;dargs]
     quote
         Base.@inline
         Base.llvmcall(($ir,"entry"),NTuple{$R,Float32},Tuple{$(argtypes...)},$(args...))
     end
 end
-function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R,A,B) where {T,N,K,P}
+function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R,A,B;fresh::Bool=false) where {T,N,K,P}
     ik = _instruction_k(T)
     registers = A <: Fragment
     transposes = (!registers && A.parameters[3] === :MN, B.parameters[3] === :MN)
-    init = [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
+    # A fresh product starts each partial accumulator with scale-d 0.
+    init = fresh ? [:($(Symbol(:part,j)) = nothing) for j in 0:P-1] :
+        [:( $(Symbol(:part,j)) = ($( [:(d[$(i+j*(N÷2))]) for i in 1:N÷2]... ),)) for j in 0:P-1]
     ops = [begin
         name = Symbol(:part,j%P)
         aop = registers ? :((words[$(4j+1)],words[$(4j+2)],words[$(4j+3)],words[$(4j+4)])) : :(_k_step(a,Val($j)))
@@ -85,7 +94,7 @@ function _mma_async_expr(::Type{WGMMAAtom{T,N,K,P}},R,A,B) where {T,N,K,P}
     quote
         Base.@inline
         $(registers ? :(words = _pack_words(a)) : nothing)
-        d = _wgmma_register_barrier(Val(:fence),c.data)
+        $(fresh ? :(ptx"wgmma.fence.sync.aligned"()) : :(d = _wgmma_register_barrier(Val(:fence),c.data)))
         $(init...)
         $(ops...)
         ptx"wgmma.commit_group.sync.aligned"()
@@ -95,6 +104,14 @@ end
 @generated function mma_async(p::A,a::WGMMAOperand{A,OperandA},b::WGMMAOperand{A,OperandB},
                               c::Union{WGMMAAccumulator{A,R},PendingWGMMA{A,R}}) where {A<:WGMMAAtom,R}
     _mma_async_expr(A,R,a,b)
+end
+# A fresh product: no accumulator, none zeroed.
+@generated function mma_async(p::A,a::Union{WGMMAOperand{A,OperandA},Fragment},b::WGMMAOperand{A,OperandB}) where {A<:WGMMAAtom}
+    if a <: Fragment
+        a.parameters[3] === typeof(_operand_layout(A(),OperandA())) ||
+            return :(throw(ArgumentError("the A fragment is not in the atom's operand layout")))
+    end
+    _mma_async_expr(A,_wg_registers(A()),a,b;fresh=true)
 end
 # A in registers: a fragment in the operand layout, the accumulator's for 64×K.
 @generated function mma_async(p::A,a::Fragment{T,NA,L},b::WGMMAOperand{A,OperandB},
