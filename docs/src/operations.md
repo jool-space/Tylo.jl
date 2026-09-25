@@ -129,6 +129,12 @@ end
 f = finish_mma(wait_mma(c))
 ```
 
+The newest stage's buffers stay held while the next is issued, so a
+pipeline has one stage fewer to load into. That pays when the tensor cores
+are the bottleneck and stages are plentiful; a memory-bound pipeline
+should release each stage after `wait_mma(c)` instead (with two stages, a
+decode projection on an H200 ran 1.6 times slower pipelined).
+
 ptxas keeps WGMMA asynchronous only when it can prove the pipeline safe.
 Any function call in the kernel, even on another warp's path (an
 out-of-line error helper, a `StepRange`'s overflow check), makes it wait
