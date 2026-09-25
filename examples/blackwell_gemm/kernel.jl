@@ -1,0 +1,175 @@
+using Tylo, PTX, CUDACore, BFloat16s
+using Tylo.Layouts: Layout, static
+using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_before_thread_sync, ctas
+include(joinpath(@__DIR__,"..","hopper_gemm","kernel.jl"))     # tile_order
+
+# A warp-specialized, persistent Blackwell GEMM, C = Aᵀ B, with the operand
+# conventions of the Hopper GEMM: A is K×M and B is K×N, both contiguous
+# along K, in BF16, FP16 or FP8; C is M×N, stored row-major (an N×M Julia
+# matrix), in BF16 with FP32 accumulation.
+#
+# Each CTA walks tiles with three roles. One thread of warp 0 loads A and B
+# stages with TMA. One thread of warp 1 issues the tile's tcgen05 MMAs into a
+# TMEM accumulator and hands each stage back with `commit_mma`, which arrives
+# once the MMAs reading it have completed. The four warps of warpgroup 1 read
+# the finished accumulator out of TMEM, lane band by lane band, and store it.
+# The accumulator is double-buffered in TMEM (2N of the 512 columns), so the
+# epilogue of one tile overlaps the MMAs of the next.
+#
+# With a CTA-pair atom (M = 256), the two CTAs of a cluster compute a 256×N
+# tile together: each loads its 128 rows of A and half of the tile's columns
+# of B, and the even CTA's MMA thread multiplies both halves at once. Its
+# `full` barriers count the bytes of both CTAs' loads (`tma_load!` with
+# `cta = 0`); its commits arrive in both CTAs, releasing each one's stages and
+# starting each one's epilogue; both epilogues release the accumulator to it.
+function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,::Val{Stages},::Val{Group}) where {S,Stages,Group}
+    M, N, K = S
+    CTAs = ctas(atom)
+    KS = 4K                                                 # K per stage: one 128-byte swizzle row
+    bytes = transfer_bytes(a)+transfer_bytes(b)             # this CTA's share of a stage
+    workspace = @inbounds CuDynamicSharedArray(UInt8,16Stages+48+1024+Stages*bytes)
+    raw = pointer(workspace)
+    @inline full(s) = Barrier(raw,s)                        # stage s holds A and B
+    @inline empty(s) = Barrier(raw+8Stages,s)               # stage s may be refilled
+    @inline ready(t) = Barrier(raw+16Stages,t)              # accumulator t holds a finished tile
+    @inline drained(t) = Barrier(raw+16Stages+16,t)         # accumulator t may be overwritten
+    slot = reinterpret(Core.LLVMPtr{UInt32,PTX.AS.Shared},raw+16Stages+32)
+    start = raw+16Stages+48
+    buffers = start+((UInt32(0)-PTX.smem_addr_u32(start)) & UInt32(1023))
+    tid = Int32(threadIdx().x)-Int32(1)
+    warp = warp_uniform(tid ÷ Int32(32))
+    if tid == Int32(0)
+        for s in Int32(0):Int32(Stages-1)
+            initialize!(full(s),1)
+            initialize!(empty(s),1)                         # tcgen05.commit
+        end
+        for t in Int32(0):Int32(1)
+            initialize!(ready(t),1)                         # tcgen05.commit
+            initialize!(drained(t),4CTAs)                   # one elected thread per epilogue warp
+        end
+        fence_barrier_init()
+    end
+    warp == Int32(1) && tmem_allocate!(atom,slot,2N)
+    fence_before_thread_sync()
+    CTAs == 1 ? sync_threads() : cluster_sync()
+    fence_after_thread_sync()
+    tmem = unsafe_load(slot)
+    rank = CTAs == 1 ? Int32(0) : cluster_rank()
+    # A pair's commits arrive in both CTAs; multicast needs a cluster launch.
+    @inline release(barrier) = CTAs == 1 ? commit_mma(atom,barrier) : commit_mma(atom,barrier,UInt16(0b11))
+    m, n = size(c,2) % Int32, size(c,1) % Int32
+    tiles_m, tiles_n = m ÷ Int32(M), n ÷ Int32(N)
+    tiles = tiles_m*tiles_n
+    count = k ÷ Int32(KS)
+    first_tile = (Int32(blockIdx().x)-Int32(1)) ÷ Int32(CTAs)
+    stride = gridDim().x ÷ Int32(CTAs)
+    @inline stage(i) = buffers+(i%Int32(Stages))*Int32(bytes)
+    if warp == Int32(0)
+        if tid == Int32(0)
+            i = Int32(0)
+            t = first_tile
+            while t < tiles
+                tm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
+                for kk in Int32(0):count-Int32(1)
+                    s = i%Int32(Stages)
+                    i >= Int32(Stages) && wait(empty(s),((i÷Int32(Stages))-Int32(1))&Int32(1))
+                    if CTAs == 1
+                        arrive!(full(s),bytes)
+                        @inbounds tma_load!(shared_tile(a,stage(i)),a,(tm*Int32(M),Int32(KS)*kk),full(s))
+                        @inbounds tma_load!(shared_tile(b,stage(i)+transfer_bytes(a)),b,(Int32(KS)*kk,tn*Int32(N)),full(s))
+                    else
+                        rank == Int32(0) && arrive!(full(s),CTAs*bytes)
+                        @inbounds tma_load!(shared_tile(a,stage(i)),a,(tm*Int32(M)+rank*Int32(128),Int32(KS)*kk),full(s);cta=0)
+                        @inbounds tma_load!(shared_tile(b,stage(i)+transfer_bytes(a)),b,(Int32(KS)*kk,tn*Int32(N)+rank*Int32(N÷CTAs)),full(s);cta=0)
+                    end
+                    i += Int32(1)
+                end
+                t += stride
+            end
+        end
+    elseif warp == Int32(1)
+        if tid == Int32(32) && rank == Int32(0)
+            i = Int32(0)
+            j = Int32(0)                                    # tiles issued by this CTA
+            t = first_tile
+            while t < tiles
+                buffer = j&Int32(1)
+                j >= Int32(2) && wait(drained(buffer),((j>>1)-Int32(1))&Int32(1))
+                fence_after_thread_sync()
+                acc = accumulator(atom,tmem+UInt32(N)*(buffer%UInt32))
+                for kk in Int32(0):count-Int32(1)
+                    s = i%Int32(Stages)
+                    wait(full(s),(i÷Int32(Stages))&Int32(1))
+                    fence_after_thread_sync()
+                    @inbounds mma(atom,acc,operand(atom,OperandA(),shared_tile(a,stage(i))),
+                                  operand(atom,OperandB(),shared_tile(b,stage(i)+transfer_bytes(a))),KS,kk != Int32(0))
+                    release(empty(s))                       # the stage is free once these MMAs complete
+                    i += Int32(1)
+                end
+                release(ready(buffer))
+                j += Int32(1)
+                t += stride
+            end
+        end
+    elseif warp >= Int32(4)
+        band = (warp-Int32(4))*Int32(32)                    # the TMEM lanes this warp may read
+        lane = tid%Int32(32)
+        out = @inbounds GlobalTile(pointer(c),Layout((m,n),(n,static(1))),16)
+        rows = distribute((32,32),32;vector=32,axis=2)      # lane t holds row t, 32 columns
+        j = Int32(0)
+        t = first_tile
+        while t < tiles
+            tm, tn = tile_order(t,tiles_m,tiles_n,Val(Group))
+            buffer = j&Int32(1)
+            wait(ready(buffer),(j>>1)&Int32(1))
+            fence_after_thread_sync()
+            acc = accumulator(atom,tmem+UInt32(N)*(buffer%UInt32))
+            row = tm*Int32(M)+rank*Int32(128)+band
+            for col in 0:32:N-32
+                values = wait_load(@inbounds load_async(rows,window(acc,(band,Int32(col)),(32,32))))
+                @inbounds store!(window(out,(row,tn*Int32(N)+Int32(col)),(32,32)),Fragment{BFloat16}(values),lane)
+            end
+            fence_before_thread_sync()
+            lane == Int32(0) && (CTAs == 1 ? arrive!(drained(buffer)) : arrive!(drained(buffer);cta=0))
+            j += Int32(1)
+            t += stride
+        end
+    end
+    fence_before_thread_sync()
+    CTAs == 1 ? sync_threads() : cluster_sync()             # no TMEM access remains in either CTA
+    fence_after_thread_sync()
+    warp == Int32(1) && tmem_deallocate!(atom,tmem,2N)
+    nothing
+end
+
+"""
+    blackwell_gemm(a, b; n=256, stages=4, group=8, ctas=1) -> (kernel, launch, c)
+
+Prepare C = Aᵀ B for `a` (K×M) and `b` (K×N) on the device, BF16, FP16 or
+FP8, with one persistent CTA per SM: the tile width `n` (the MMA's N, up to
+256), the number of shared stages, the number of row tiles grouped for L2
+reuse, and whether CTA pairs compute 256-row tiles together (`ctas = 2`)
+are the configuration. Returns the compiled kernel, a launcher, and C as an
+N×M matrix (row-major M×N).
+"""
+function blackwell_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,ctas::Integer=1,c=nothing) where T
+    k, m = size(a); kb, nt = size(b)
+    ks = 128 ÷ sizeof(T)                                    # one swizzle row of K per stage
+    ctas in (1,2) || throw(ArgumentError("one CTA or a CTA pair"))
+    k == kb && k % ks == 0 && m % (128ctas) == 0 && nt % n == 0 ||
+        throw(ArgumentError("shapes must be multiples of the tile: K of $ks, M of $(128ctas), N of $n"))
+    atom = Tcgen05Atom((128ctas,n,32 ÷ sizeof(T)),T)
+    ta = prepare_tma(TMATile(T,(128,ks),2),a)
+    tb = prepare_tma(TMATile(T,(ks,n÷ctas),1),b)                # this CTA's columns of the tile
+    shmem = 16stages+48+1024+stages*(transfer_bytes(ta)+transfer_bytes(tb))
+    shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
+    (m÷(128ctas)) % group == 0 || throw(ArgumentError("row tiles must be a multiple of the group"))
+    c = c === nothing ? CuArray{BFloat16}(undef,nt,m) : c
+    kernel = @cuda launch=false blackwell_gemm_kernel!(c,ta,tb,atom,Int32(k),Val(stages),Val(group))
+    CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
+    tiles = (m÷(128ctas))*(nt÷n)
+    sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+    blocks = ctas*min(tiles,sms÷ctas)
+    launch() = GC.@preserve ta tb kernel(c,ta,tb,atom,Int32(k),Val(stages),Val(group);threads=256,blocks,shmem,clustersize=ctas)
+    kernel, launch, c
+end

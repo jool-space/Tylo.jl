@@ -2,11 +2,18 @@
     Tcgen05Atom{(m,n,k),TA,TB,TC}()
     Tcgen05Atom((m,n,k), TA, TC=Float32)
 
-A single-thread `tcgen05.mma.cta_group::1` instruction described by its
-shape and element types: `.kind::f16` for BF16/FP16, `.kind::tf32` for
-Float32, `.kind::f8f6f4` for FP8 and `.kind::i8` for INT8 inputs. `k` is
-the instruction's fixed K (256 bits of each operand row), `m` is 128 and
-`n` a multiple of 16 up to 256.
+A single-thread `tcgen05.mma` instruction described by its shape and
+element types: `.kind::f16` for BF16/FP16, `.kind::tf32` for Float32,
+`.kind::f8f6f4` for FP8 and `.kind::i8` for INT8 inputs. `k` is the
+instruction's fixed K (256 bits of each operand row) and `n` a multiple of
+16 up to 256. `m` is 128 for one CTA (`.cta_group::1`) or 256 for a CTA
+pair (`.cta_group::2`): the two CTAs of a cluster whose ranks differ in the
+last bit. One thread of the pair issues the instruction; each CTA holds its
+own half of the operands, 128 rows of A and `n ÷ 2` columns of B at the same
+shared addresses, and receives rows `128r:128r+127` of the product in its
+own TMEM (rank `r`). Every `tcgen05` instruction of a kernel names the same
+CTA group, so the management functions take the atom
+([`commit_mma`](@ref), [`tmem_allocate!`](@ref)).
 
 Its operands are not thread-owned. A and B are shared-memory encodings, a
 canonical swizzled core-matrix layout (`Swizzle{B,M,3}` composed with a
@@ -43,22 +50,26 @@ _tcgen05_kind(::Type{T}) where T = (f = _input_family(T); f === :fp16 ? :f16 : f
     family === :fp16 && TA !== TB && throw(ArgumentError("16-bit A and B must share a type"))
     m,n,k = S
     k == 256 ÷ _element_bits(TA) || throw(ArgumentError("tcgen05 K is 256 bits of each operand row"))
-    m == 128 || throw(ArgumentError("tcgen05 atoms currently describe M=128; the M=64 accumulator layout is not described"))
+    m in (128,256) || throw(ArgumentError("tcgen05 atoms describe M=128 (one CTA) or M=256 (a CTA pair); the M=64 accumulator layout is not described"))
     n % 16 == 0 && 16 <= n <= 256 || throw(ArgumentError("tcgen05 N is a multiple of 16 up to 256"))
     TC === (family === :int8 ? Int32 : Float32) ||
         throw(ArgumentError("unsupported accumulator type for these inputs"))
     nothing
 end
 
-# The accumulator: TMEM lane m holds row m, column n holds column n.
+# The CTAs that execute an atom's instructions together.
+ctas(::Tcgen05Atom{S}) where S = S[1] ÷ 128
+# The accumulator: TMEM lane m holds row m, column n holds column n. A
+# pair's CTAs each hold 128 rows.
 _accumulator_layout(m,n) = Layouts.Layout((Layouts.static(m),Layouts.static(n)),(Layouts.static(1),Layouts.static(128)))
-@generated operand_layout(::A,::Accumulator) where {A<:Tcgen05Atom} = :($(_accumulator_layout(size(A())[1],size(A())[2])))
+@generated operand_layout(::A,::Accumulator) where {A<:Tcgen05Atom} = :($(_accumulator_layout(128,size(A())[2])))
 """
     accumulator(atom, address::UInt32)
 
-The atom's accumulator as a `TmemTile` at a TMEM address: lane `m` holds
-row `m`, column `n` holds column `n`. The caller owns the allocation; the
-first `mma` with `accumulate=false` initializes it.
+The atom's accumulator in this CTA as a `TmemTile` at a TMEM address: lane
+`m` holds row `m`, column `n` holds column `n`; for a CTA pair, this CTA's
+128 rows of the product. The caller owns the allocation; the first `mma`
+with `accumulate=false` initializes it.
 """
 @inline accumulator(a::Tcgen05Atom,address::UInt32) = TmemTile(eltype(a,Accumulator()),address,operand_layout(a,Accumulator()))
 
@@ -115,22 +126,26 @@ struct Tcgen05Operand{P,Role,Major,T,L}
 end
 Base.size(o::Tcgen05Operand) = size(o.layout)
 """
-    commit_mma(barrier::Barrier)
+    commit_mma([atom,] barrier::Barrier[, ctas::UInt16])
 
 Arrive on `barrier` once all prior `tcgen05.mma` instructions issued by
 this thread have completed: one of the phase's expected arrivals. Single
-thread; no wait is implied.
+thread; no wait is implied. With a mask of cluster ranks `ctas`, arrive on
+the barrier at the same address in each of those CTAs. Without an atom,
+the instructions are single-CTA ones.
 """
 function commit_mma end
 """
-    tmem_allocate!(slot, columns)
-    tmem_deallocate!(address, columns)
-    tmem_relinquish_permit()
+    tmem_allocate!([atom,] slot, columns)
+    tmem_deallocate!([atom,] address, columns)
+    tmem_relinquish_permit([atom])
 
 Warp-collective TMEM management. `tmem_allocate!` writes the base address of
 `columns` (a power of two from 32 to 512) to a shared slot; the CTA reads it
 after a barrier. `tmem_deallocate!` returns the columns and
-`tmem_relinquish_permit` lets other CTAs allocate. One warp executes each.
+`tmem_relinquish_permit` lets other CTAs allocate. One warp executes each;
+for a CTA-pair atom, one warp in each CTA of the pair, and the pair's TMEM
+accesses must be complete before either deallocates.
 """
 function tmem_allocate! end
 @doc (@doc tmem_allocate!) tmem_deallocate!

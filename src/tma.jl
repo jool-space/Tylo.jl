@@ -107,7 +107,7 @@ may not.
 function prepare_tma end
 
 """
-    tma_load!(dst, binding, origin, barrier::Barrier)
+    tma_load!(dst, binding, origin, barrier::Barrier; cta=nothing)
 
 Issue one TMA copy of the binding's box at a zero-based logical `origin` (a
 pair of integers, or a triple whose third coordinate selects the matrix of
@@ -119,6 +119,10 @@ must expect its [`transfer_bytes`](@ref) (`arrive!(barrier, bytes)`);
 origin starts a 16-byte chunk; the hardware rejects other origins.
 Nothing else is inserted: initialize and publish the barrier first, and
 release the consumers of `dst` before reusing it.
+
+With a cluster rank `cta` (two-dimensional bindings), the copy completes on
+the barrier at the same address in that CTA, this one or its CTA-pair peer,
+so that one barrier tracks both halves of a CTA-pair MMA's operands.
 """
 function tma_load! end
 

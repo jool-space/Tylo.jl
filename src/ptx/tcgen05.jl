@@ -14,7 +14,7 @@ Base.@propagate_inbounds function operand(a::A,role::Role,t::SharedTile{T,L},
     T === eltype(a,role) || throw(ArgumentError("operand tile element type differs from the atom"))
     s = _operand_structure(L,T,Role)
     m,n,k = size(a)
-    outer = Role === OperandA ? m : n
+    outer = (Role === OperandA ? m : n) ÷ ctas(a)                # this CTA's share
     kaxis = _k_axis(role)
     chunk = Int32(16 ÷ sizeof(T))
     @boundscheck begin
@@ -61,7 +61,7 @@ Base.@propagate_inbounds function operand(o::Tcgen05Operand{P,Role,Major,T,L},or
     kaxis = _k_axis(Role)
     chunk = Int32(16 ÷ sizeof(T))
     m,n,k = size(P())
-    outer = Role === OperandA ? m : n
+    outer = (Role === OperandA ? m : n) ÷ ctas(P())
     @boundscheck begin
         origin[kaxis] >= 0 && origin[3-kaxis] >= 0 && origin[3-kaxis] % Int32(8) == 0 &&
             (Major === :K ? origin[kaxis] % chunk == 0 : origin[kaxis] % Int32(8) == 0 && origin[3-kaxis] % Int32(_group_extent(L,Val(3-kaxis))) == 0) ||
@@ -116,7 +116,7 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
     inst = A()
     m,n,katom = size(inst)
     TC === eltype(inst,Accumulator()) || return :(throw(ArgumentError("accumulator element type differs from the atom")))
-    _tmem_canonical(LD,m) || return :(throw(ArgumentError("accumulator layout must be operand_layout(atom, Accumulator()) or a window of it")))
+    _tmem_canonical(LD,128) || return :(throw(ArgumentError("accumulator layout must be operand_layout(atom, Accumulator()) or a window of it")))
     K isa Int && K > 0 && K % katom == 0 || return :(throw(ArgumentError("K must be a positive multiple of the atom's K")))
     if OA <: Tcgen05Operand
         OA.parameters[1] === A && OA.parameters[2] === OperandA ||
@@ -124,7 +124,7 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
         amajor = OA.parameters[3]
     elseif OA <: TmemTile
         OA.parameters[1] === eltype(inst,OperandA()) || return :(throw(ArgumentError("TMEM A element type differs from the atom")))
-        _tmem_canonical(OA.parameters[2],m) || return :(throw(ArgumentError("TMEM A layout must follow the accumulator convention")))
+        _tmem_canonical(OA.parameters[2],128) || return :(throw(ArgumentError("TMEM A layout must follow the accumulator convention")))
         amajor = :K
     else
         return :(throw(ArgumentError("A is a Tcgen05Operand or a TmemTile")))
@@ -133,7 +133,7 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
         return :(throw(ArgumentError("B operand belongs to a different atom or role")))
     bmajor = OB.parameters[3]
     idesc = instruction_descriptor(inst;a_major=amajor,b_major=bmajor)
-    instruction = Meta.parse("ptx\"tcgen05.mma.cta_group::1.kind::$(_tcgen05_kind(eltype(inst,OperandA())))\"")
+    instruction = Meta.parse("ptx\"tcgen05.mma.cta_group::$(ctas(inst)).kind::$(_tcgen05_kind(eltype(inst,OperandA())))\"")
     TA = eltype(inst,OperandA())
     issues = [:($instruction(dstart,_k_step(a,Val($(kk*katom))),_k_step(b,Val($(kk*katom))),
                              $idesc,$(kk == 0 ? :accumulate : true)))
@@ -148,6 +148,13 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
 end
 @inline commit_mma(barrier::Barrier) =
     ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cta.b64"(_smem_address(barrier.ptr))
+@inline commit_mma(a::Tcgen05Atom,barrier::Barrier) =
+    ctas(a) == 1 ? commit_mma(barrier) :
+    ptx"tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.b64"(_smem_address(barrier.ptr))
+@inline commit_mma(a::Tcgen05Atom,barrier::Barrier,mask::UInt16) =
+    ctas(a) == 1 ?
+    ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.multicast::cluster.shared::cluster.b64"(_smem_address(barrier.ptr),mask) :
+    ptx"tcgen05.commit.cta_group::2.mbarrier::arrive::one.multicast::cluster.shared::cluster.b64"(_smem_address(barrier.ptr),mask)
 
 @inline function _check_tmem_columns(c)
     ispow2(c) && 32 <= c <= 512 || throw(ArgumentError("TMEM allocations are powers of two from 32 to 512 columns"))
@@ -156,11 +163,23 @@ end
     _check_tmem_columns(columns)
     ptx"tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32"(_smem_address(slot),columns % UInt32)
 end
+@inline function tmem_allocate!(a::Tcgen05Atom,slot::Core.LLVMPtr{UInt32,PTX.AS.Shared},columns::Integer)
+    ctas(a) == 1 && return tmem_allocate!(slot,columns)
+    _check_tmem_columns(columns)
+    ptx"tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32"(_smem_address(slot),columns % UInt32)
+end
 @inline function tmem_deallocate!(address::UInt32,columns::Integer)
     _check_tmem_columns(columns)
     ptx"tcgen05.dealloc.cta_group::1.sync.aligned.b32"(address,columns % UInt32)
 end
+@inline function tmem_deallocate!(a::Tcgen05Atom,address::UInt32,columns::Integer)
+    ctas(a) == 1 && return tmem_deallocate!(address,columns)
+    _check_tmem_columns(columns)
+    ptx"tcgen05.dealloc.cta_group::2.sync.aligned.b32"(address,columns % UInt32)
+end
 @inline tmem_relinquish_permit() = ptx"tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned"()
+@inline tmem_relinquish_permit(a::Tcgen05Atom) =
+    ctas(a) == 1 ? tmem_relinquish_permit() : ptx"tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned"()
 Base.@propagate_inbounds operand(a::Tcgen05Atom,role::Union{OperandA,OperandB},t::SharedTile,origin::Tuple{Integer,Integer}) =
     operand(a,role,t,map(x -> x % Int32,origin))
 Base.@propagate_inbounds operand(o::Tcgen05Operand,origin::Tuple{Integer,Integer}) = operand(o,map(x -> x % Int32,origin))

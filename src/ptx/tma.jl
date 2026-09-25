@@ -5,13 +5,24 @@
 # Stripe s: `s*W*outer` bytes into storage, `s*W÷sizeof(T)` along the inner axis.
 _stripe_bytes(::TMATile{T,S,A,W}) where {T,S,A,W} = W*S[3-A]
 _stripe_extent(::TMATile{T,S,A,W}) where {T,S,A,W} = Int32(W ÷ sizeof(T))
+# With `cta`, the copy completes on the barrier at the same address in the
+# CTA of that rank, this CTA or its pair peer (`.cta_group::2`).
 Base.@propagate_inbounds function tma_load!(dst::SharedTile{T,L},
-        b::TMABinding{TMATile{T,S,A,W},D,2},origin::Tuple{Int32,Int32},barrier::Barrier) where {T,L,S,A,W,D}
+        b::TMABinding{TMATile{T,S,A,W},D,2},origin::Tuple{Int32,Int32},barrier::Barrier;cta::Union{Nothing,Integer}=nothing) where {T,L,S,A,W,D}
     _check_tma(dst,b,origin)
-    PTX.Utils.@unroll 8 for s in 0:_stripes(b.plan)-1
-        bytes, inner = s*_stripe_bytes(b.plan), Int32(s)*_stripe_extent(b.plan)
-        ptx"cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes"(
-            reinterpret(Core.LLVMPtr{UInt8,3},dst.ptr)+bytes,b.descriptor,origin[A]+inner,origin[3-A],barrier.ptr)
+    if cta === nothing
+        PTX.Utils.@unroll 8 for s in 0:_stripes(b.plan)-1
+            bytes, inner = s*_stripe_bytes(b.plan), Int32(s)*_stripe_extent(b.plan)
+            ptx"cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes"(
+                reinterpret(Core.LLVMPtr{UInt8,3},dst.ptr)+bytes,b.descriptor,origin[A]+inner,origin[3-A],barrier.ptr)
+        end
+    else
+        remote = reinterpret(Core.LLVMPtr{UInt8,3},UInt64(ptx"mapa.shared::cluster.u32"(_smem_address(barrier.ptr),cta % UInt32)))
+        PTX.Utils.@unroll 8 for s in 0:_stripes(b.plan)-1
+            bytes, inner = s*_stripe_bytes(b.plan), Int32(s)*_stripe_extent(b.plan)
+            ptx"cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.tile.mbarrier::complete_tx::bytes"(
+                reinterpret(Core.LLVMPtr{UInt8,3},dst.ptr)+bytes,b.descriptor,origin[A]+inner,origin[3-A],remote)
+        end
     end
     nothing
 end
@@ -72,8 +83,8 @@ end
 Base.@constprop :aggressive @inline wait_tma_reads(n::Integer) = ptx"cp.async.bulk.wait_group.read"(Val(Int(n)))
 Base.@constprop :aggressive @inline wait_tma_stores(n::Integer) = ptx"cp.async.bulk.wait_group"(Val(Int(n)))
 # Origins of any integer type, as the Int32 coordinates TMA takes.
-Base.@propagate_inbounds tma_load!(dst::SharedTile,b::TMABinding,origin::Tuple{Integer,Integer},barrier::Barrier) =
-    tma_load!(dst,b,map(x -> x % Int32,origin),barrier)
+Base.@propagate_inbounds tma_load!(dst::SharedTile,b::TMABinding,origin::Tuple{Integer,Integer},barrier::Barrier;cta::Union{Nothing,Integer}=nothing) =
+    tma_load!(dst,b,map(x -> x % Int32,origin),barrier;cta)
 Base.@propagate_inbounds tma_load!(dst::SharedTile,b::TMABinding,origin::Tuple{Integer,Integer,Integer},barrier::Barrier) =
     tma_load!(dst,b,map(x -> x % Int32,origin),barrier)
 Base.@propagate_inbounds tma_store!(b::TMABinding,src::SharedTile,origin::Tuple{Integer,Integer}) =

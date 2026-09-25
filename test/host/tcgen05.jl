@@ -18,6 +18,18 @@ using Tylo.Layouts: @Layout, Layout, Swizzle, compose, window, static
     @test_throws ArgumentError Tcgen05Atom((128,128,32),Int8,Int8,Float32)
 end
 
+@testset "CTA-pair atoms" begin
+    p = Tcgen05Atom((256,256,16),BFloat16)
+    @test Tylo.ctas(p) == 2 && Tylo.ctas(Tcgen05Atom((128,256,16),BFloat16)) == 1
+    # Each CTA of the pair holds 128 rows of the product in its own TMEM.
+    @test operand_layout(p,Accumulator()) == @Layout((128,256),(1,128))
+    @test Tylo.instruction_descriptor(p) == PTX.tcgen05_instr_desc_f16bf16_f32(m=256,n=256,ab_dtype=:bf16)
+    @test (Tylo.instruction_descriptor(p) >> 24) & 0x1f == 256 >> 4
+    @test Tylo.instruction_descriptor(Tcgen05Atom((256,128,32),Float8_E4M3FN)) ==
+        PTX.tcgen05_instr_desc_f8f6f4(m=256,n=128,a_dtype=:e4m3,b_dtype=:e4m3)
+    @test_throws ArgumentError Tcgen05Atom((192,128,16),BFloat16)
+end
+
 @testset "Instruction descriptors are pure functions of the atom" begin
     a = Tcgen05Atom((128,128,16),BFloat16)
     # PTX ISA Table 45: D=f32 at bits 4-5, A/B format bf16=1 at bits 7-9 and

@@ -12,11 +12,15 @@ b_layout(::Val{:mn}) = compose(Swizzle{3,3,3}(),@Layout((64,(64,2)),(64,(1,4096)
 function tcgen05_gemm_kernel!(out,a_data,b_data,atom,variant::Val)
     tid = Int32(threadIdx().x)-Int32(1)
     warp,lane = tid >> 5,tid & Int32(31)
-    smem = @inbounds CuDynamicSharedArray(UInt8,32768)
+    # The 128-byte swizzle is a function of the address: operands start on
+    # 1024-byte boundaries, which dynamic shared memory after static
+    # variables need not be.
+    smem = @inbounds CuDynamicSharedArray(UInt8,32768+1024)
     slot = @inbounds CuStaticSharedArray(UInt32,1)
     mbar = @inbounds CuStaticSharedArray(UInt64,1)
-    sa = SharedTile(reinterpret(Core.LLVMPtr{BFloat16,3},pointer(smem)),compose(Swizzle{3,3,3}(),@Layout((128,64),(64,1))))
-    sb = SharedTile(reinterpret(Core.LLVMPtr{BFloat16,3},pointer(smem)+16384),b_layout(variant))
+    tiles = pointer(smem)+((UInt32(0)-PTX.smem_addr_u32(pointer(smem))) & UInt32(1023))
+    sa = SharedTile(reinterpret(Core.LLVMPtr{BFloat16,3},tiles),compose(Swizzle{3,3,3}(),@Layout((128,64),(64,1))))
+    sb = SharedTile(reinterpret(Core.LLVMPtr{BFloat16,3},tiles+16384),b_layout(variant))
     a = GlobalTile(pointer(a_data),@Layout((128,64),(1,128)))
     b = GlobalTile(pointer(b_data),@Layout((64,128),(1,64)))
     for i in tid:Int32(128):Int32(128*64-1)
@@ -75,7 +79,7 @@ if runtime_supported(@__FILE__)
         expected = Float32.(Float64.(a)*Float64.(b))
         for variant in (:k,:mn)
             out = CUDACore.zeros(Float32,128,128)
-            @cuda threads=128 shmem=32768 tcgen05_gemm_kernel!(out,CuArray(a),CuArray(b),atom,Val(variant))
+            @cuda threads=128 shmem=32768+1024 tcgen05_gemm_kernel!(out,CuArray(a),CuArray(b),atom,Val(variant))
             @test Array(out) == expected
         end
     end
