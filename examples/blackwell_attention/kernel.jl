@@ -140,7 +140,25 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
     # Item `t`: its head, first query row and key blocks. Causal items walk
     # each head's query blocks longest first, and stop at their diagonal:
     # the last block is the second tile's alone.
-    @inline item(t) = (unchecked_div(t,nq),(Causal ? nq-Int32(1)-unchecked_rem(t,nq) : unchecked_rem(t,nq))*Int32(256CTAs)+rank*Int32(256))
+    # Causal items go longest first across heads, not within each: heads in
+    # sections whose K and V fit in L2 (about 50 MB), and within a section
+    # every head's longest block before any shorter one. (Head by head, a
+    # long item would still be handed out near the end.)
+    fit = max(Int32(1),unchecked_div(Int32(50_000_000),Int32(512)*seq_kv))
+    section = min(Int32(1) << (Int32(31)-leading_zeros(fit) % Int32),heads)
+    @inline function item(t)
+        if Causal
+            per = section*nq
+            s = unchecked_div(t,per)
+            within = t-s*per
+            width = min(section,heads-s*section)
+            head = s*section+unchecked_rem(within,width)
+            block = nq-Int32(1)-unchecked_div(within,width)
+        else
+            head, block = unchecked_div(t,nq), unchecked_rem(t,nq)
+        end
+        head, block*Int32(256CTAs)+rank*Int32(256)
+    end
     @inline count(q0) = Causal ? (q0 ÷ Int32(128))+Int32(2) : blocks
     # Tile i's blocks: a causal item's first tile ends a block before the
     # second, at its own diagonal.
