@@ -11,7 +11,7 @@ include("../../examples/blackwell_attention/kernel.jl")
         tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
         tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),1)),PTX.TMADescriptorPtr,3}
         tv = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),2)),PTX.TMADescriptorPtr,3}
-        tt = Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tv,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4ctas},Val{ctas},Val{3},Val{false},Val{false}}
+        tt = Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tv,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4ctas},Val{ctas},Val{3},Val{false},Val{false},Val{()}}
         code = Tylo.machine_code(blackwell_attention_kernel!,tt;arch,threads=512,maxregs=128)
         save_code("blackwell-attention-ctas$ctas",code)
         # No spills anywhere: the softmax warps hold a row at 192 registers,
@@ -34,7 +34,7 @@ include("../../examples/blackwell_attention/kernel.jl")
     # out dynamically.
     let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3},
         tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4},Val{1},Val{3},Val{true},Val{true}};arch,threads=512,maxregs=128)
+        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4},Val{1},Val{3},Val{true},Val{true},Val{()}};arch,threads=512,maxregs=128)
         save_code("blackwell-attention-causal",code)
         @test isempty(audit(code))
         @test count("USETMAXREG",Tylo.kernel_sass(code)) == 3
@@ -43,7 +43,7 @@ include("../../examples/blackwell_attention/kernel.jl")
     # says so in a warning: the audit reports it.
     tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
     tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4},Val{1},Val{3},Val{false},Val{false}};arch,threads=512)
+    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{()}};arch,threads=512)
     @test :ptxas in getfield.(audit(unstated),:kind)
 end
 
@@ -80,6 +80,12 @@ if runtime_supported(@__FILE__)
         @test maximum(abs.(Float64.(Array(o)) .- reference(q,k,v;causal=true))) < 0.03
     end
     @test_throws ArgumentError blackwell_attention(CUDACore.zeros(BFloat16,128,512,1),CUDACore.zeros(BFloat16,128,512,1),CUDACore.zeros(BFloat16,128,512,1);causal=true,ctas=2)
+    # A fifth of the middle chunks' exponentials on the FMA pipe.
+    let q = BFloat16.(randn(rng,Float32,128,1024,2)), k = BFloat16.(randn(rng,Float32,128,1024,2)), v = BFloat16.(randn(rng,Float32,128,1024,2))
+        _, launch, o = blackwell_attention(CuArray(q),CuArray(k),CuArray(v);emulate=(4,5,6,7,8,9))
+        fill!(o,BFloat16(NaN)); launch(); synchronize()
+        @test maximum(abs.(Float64.(Array(o)) .- reference(q,k,v))) < 0.03
+    end
     # P published after one or two of its chunks instead of three.
     for ctas in (1,2), split in (1,2)
         q,k,v = (BFloat16.(randn(rng,Float32,128,1024,2)) for _ in 1:3)

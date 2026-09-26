@@ -56,12 +56,43 @@ end
 # A chunk of a row's scores, 32 keys from `first`, with keys past `row` masked.
 @inline _mask(x,first::Int32,row::Int32) = Fragment(ntuple(e -> ifelse(first+Int32(e-1) <= row,x.data[e],-Inf32),Val(32)),Tylo.Layouts.layout(x))
 # P's first `Split` chunks and the rest, from the row's four.
-@inline _first(s,c,m,::Val{1}) = (_exponentials(s[1],c,m),)
-@inline _first(s,c,m,::Val{2}) = (_exponentials(s[1],c,m),_exponentials(s[2],c,m))
-@inline _first(s,c,m,::Val{3}) = (_exponentials(s[1],c,m),_exponentials(s[2],c,m),_exponentials(s[3],c,m))
-@inline _rest(s,c,m,::Val{1}) = (_exponentials(s[2],c,m),_exponentials(s[3],c,m),_exponentials(s[4],c,m))
-@inline _rest(s,c,m,::Val{2}) = (_exponentials(s[3],c,m),_exponentials(s[4],c,m))
-@inline _rest(s,c,m,::Val{3}) = (_exponentials(s[4],c,m),)
+# exp2 of a pair on the FMA pipe (pyptx's degree-3 polynomial with the
+# integer part rounded off and added into the exponent), as FlashAttention-4
+# computes some of each row's to relieve MUFU.
+@inline _pack2(lo::Float32,hi::Float32) = (UInt64(reinterpret(UInt32,hi)) << 32) | UInt64(reinterpret(UInt32,lo))
+@inline function _ex2_pair(x0::Float32,x1::Float32)
+    big = _pack2(reinterpret(Float32,0x4B400000),reinterpret(Float32,0x4B400000))
+    x = _pack2(ptx"max.ftz.f32"(x0,-127f0),ptx"max.ftz.f32"(x1,-127f0))
+    bi = ptx"add.rm.ftz.f32x2"(x,big)
+    f = ptx"sub.rn.ftz.f32x2"(x,ptx"sub.rn.ftz.f32x2"(bi,big))
+    c3, c2, c1 = reinterpret(Float32,0x3D9DF09D), reinterpret(Float32,0x3E6906A4), reinterpret(Float32,0x3F31F519)
+    q = ptx"fma.rn.ftz.f32x2"(f,_pack2(c3,c3),_pack2(c2,c2))
+    q = ptx"fma.rn.ftz.f32x2"(q,f,_pack2(c1,c1))
+    q = ptx"fma.rn.ftz.f32x2"(q,f,_pack2(1f0,1f0))
+    reinterpret(Float32,((bi % UInt32) << 23)+(q % UInt32)), reinterpret(Float32,(((bi >> 32) % UInt32) << 23)+((q >> 32) % UInt32))
+end
+# A chunk's exponentials, the pairs in `Emulated` (0-15) on the FMA pipe.
+@generated function _exponentials(x::Fragment{Float32,32},c::Float32,m::Float32,::Val{Emulated}) where Emulated
+    isempty(Emulated) && return :(Base.@inline; _exponentials(x,c,m))
+    stmts = Any[:(y = muladd.(x,c,-m)), :(v = y.data)]
+    names = Symbol[]
+    for pair in 0:15
+        a, b = Symbol(:e,2pair+1), Symbol(:e,2pair+2)
+        push!(stmts,pair in Emulated ? :(($a,$b) = _ex2_pair(v[$(2pair+1)],v[$(2pair+2)])) :
+                                       :(($a,$b) = (Tylo._ex2(v[$(2pair+1)]),Tylo._ex2(v[$(2pair+2)]))))
+        push!(names,a,b)
+    end
+    :(Base.@inline; $(stmts...); Fragment(($(names...),),Tylo.Layouts.layout(x)))
+end
+# P's first `Split` chunks and the rest: the middle two chunks with
+# `Emulated` pairs on the FMA pipe.
+@inline _chunk(s,q,c,m,e) = _exponentials(s[q],c,m,q in (2,3) ? e : Val(()))
+@inline _first(s,c,m,::Val{1},e) = (_chunk(s,1,c,m,e),)
+@inline _first(s,c,m,::Val{2},e) = (_chunk(s,1,c,m,e),_chunk(s,2,c,m,e))
+@inline _first(s,c,m,::Val{3},e) = (_chunk(s,1,c,m,e),_chunk(s,2,c,m,e),_chunk(s,3,c,m,e))
+@inline _rest(s,c,m,::Val{1},e) = (_chunk(s,2,c,m,e),_chunk(s,3,c,m,e),_chunk(s,4,c,m,e))
+@inline _rest(s,c,m,::Val{2},e) = (_chunk(s,3,c,m,e),_chunk(s,4,c,m,e))
+@inline _rest(s,c,m,::Val{3},e) = (_chunk(s,4,c,m,e),)
 # Chunks of P into TMEM, 32 keys each, the first at key 32`First`.
 @generated function _store_chunks!(t,band,chunks::NTuple{N,Any},::Val{First}) where {N,First}
     stores = [:(@inbounds store_async!(window(t,(band,Int32($(32(First+q)))),(32,32)),Fragment{BFloat16}(chunks[$(q+1)]))) for q in 0:N-1]
@@ -69,7 +100,8 @@ end
 end
 
 function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int32,scale::Float32,::Val{Stages},::Val{CTAs}=Val(1),
-                                     ::Val{Split}=Val(3),::Val{Causal}=Val(false),::Val{Dynamic}=Val(Causal)) where {Stages,CTAs,Split,Causal,Dynamic}
+                                     ::Val{Split}=Val(3),::Val{Causal}=Val(false),::Val{Dynamic}=Val(Causal),
+                                     ::Val{Emulated}=Val(())) where {Stages,CTAs,Split,Causal,Dynamic,Emulated}
     qk = Tcgen05Atom((128CTAs,128,16),BFloat16)             # S = Q Kᵀ: 128 rows per CTA × 128 keys
     pv = Tcgen05Atom((128CTAs,128,16),BFloat16)             # O += P V: 128 rows per CTA × d
     qbytes, kvbytes = transfer_bytes(tq), transfer_bytes(tk)  # a Q tile; this CTA's share of a K or V block
@@ -212,7 +244,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                     j > Int32(0) && (factor = Tylo._ex2(m-top))
                     m = top
                 end
-                p = _first(s,c2,m,Val(Split))
+                p = _first(s,c2,m,Val(Split),Val(Emulated))
                 if j > Int32(0)
                     unsafe_store!(factors,factor,row+Int32(128)*i+Int32(1),Val(4))
                     ptx"bar.arrive"(handoff(i)%UInt32,UInt32(64))
@@ -228,7 +260,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                 token = ptx"mbarrier.arrive.shared.b64"(pready(i).ptr)
                 CTAs == 1 || release_to_mma(pready(i),paired(i))
                 basis = _after(token,m)
-                rest = _rest(s,c2,basis,Val(Split))
+                rest = _rest(s,c2,basis,Val(Split),Val(Emulated))
                 _store_chunks!(probabilities(i),band,rest,Val(Split))
                 wait_stores()
                 fence_before_thread_sync()
@@ -413,7 +445,7 @@ O = softmax(Q Kᵀ / √d) V for BF16 `q`, `k`, `v` (d×seq×(batch·heads)), d 
 counts ring stages of a K or V block's share (4 by default for one CTA, 8
 for pairs, whose stages are half as large).
 """
-function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,causal::Bool=false,dynamic::Bool=causal,o=nothing) where T
+function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,causal::Bool=false,dynamic::Bool=causal,emulate::Tuple=(),o=nothing) where T
     d, sq, bh = size(q); skv = size(k,2)
     ctas in (1,2) || throw(ArgumentError("one CTA or a CTA pair"))
     split in (1,2,3) || throw(ArgumentError("P is published after one to three of its four chunks"))
@@ -429,10 +461,10 @@ function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};cta
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     o = o === nothing ? similar(q) : o
     scale = Float32(1/sqrt(d))
-    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic))
+    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
     blocks = ctas*min((sq÷(256ctas))*bh,sms÷ctas)
-    launch() = GC.@preserve tq tk tv (dynamic && fill!(counter,Int32(0)); kernel(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic);threads=512,blocks,shmem,clustersize=ctas))
+    launch() = GC.@preserve tq tk tv (dynamic && fill!(counter,Int32(0)); kernel(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate);threads=512,blocks,shmem,clustersize=ctas))
     kernel, launch, o
 end
