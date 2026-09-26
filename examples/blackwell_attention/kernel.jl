@@ -139,9 +139,12 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
     blocks = seq_kv ÷ Int32(128)
     # Item `t`: its head, first query row and key blocks. Causal items walk
     # each head's query blocks longest first, and stop at their diagonal:
-    # the last block is the second tile's, fully masked for the first.
+    # the last block is the second tile's alone.
     @inline item(t) = (unchecked_div(t,nq),(Causal ? nq-Int32(1)-unchecked_rem(t,nq) : unchecked_rem(t,nq))*Int32(256CTAs)+rank*Int32(256))
     @inline count(q0) = Causal ? (q0 ÷ Int32(128))+Int32(2) : blocks
+    # Tile i's blocks: a causal item's first tile ends a block before the
+    # second, at its own diagonal.
+    @inline tile_count(q0,i) = count(q0)-(Causal && i == 0 ? Int32(1) : Int32(0))
     # The items: every `stride`th from `first_tile`, or (`Dynamic`) handed out
     # by the load thread from a global counter, longest first, through two
     # item slots; -1 ends the work.
@@ -163,7 +166,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
             more(t) || break
             m = -Inf32; l = 0f0
             _, q0 = item(t)
-            nb = count(q0)
+            nb = tile_count(q0,i)
             for j in Int32(0):nb-Int32(1)
                 wait(sfull(i),k&Int32(1))
                 fence_after_thread_sync()
@@ -173,7 +176,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                                      load_async(rows,window(scores(i),(band,Int32(64)),(32,32))),
                                      load_async(rows,window(scores(i),(band,Int32(96)),(32,32))))
                 s = (wait_load(pending[1]),wait_load(pending[2]),wait_load(pending[3]),wait_load(pending[4]))
-                if Causal && j >= nb-Int32(2)               # keys past this row's diagonal do not count
+                if Causal && j >= count(q0)-Int32(2)        # keys past this row's diagonal do not count
                     r = q0+Int32(128)*i+row
                     key = Int32(128)*j
                     s = (_mask(s[1],key,r),_mask(s[2],key+Int32(32),r),_mask(s[3],key+Int32(64),r),_mask(s[4],key+Int32(96),r))
@@ -218,7 +221,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
         end
     elseif warp < Int32(12)
         release_registers(Val(64))
-        k = Int32(0); n = Int32(0)                          # blocks and items so far
+        k0 = Int32(0); k1 = Int32(0); n = Int32(0)          # each tile's blocks, and items so far
         t = first_tile
         while true
             t = next_item(t,n)
@@ -226,6 +229,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
             head, q0 = item(t)
             for j in Int32(0):count(q0)-Int32(1)
                 for i in Int32(0):Int32(1)
+                    j < tile_count(q0,i) || continue
+                    k = i == Int32(0) ? k0 : k1
                     wait(sfull(i),k&Int32(1))               # O includes the previous block
                     if j > Int32(0)
                         ptx"bar.sync"(handoff(i)%UInt32,UInt32(64))
@@ -242,8 +247,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                         fence_before_thread_sync()
                     end
                     release_to_mma(pready(i),paired(i))
+                    i == Int32(0) ? (k0 += Int32(1)) : (k1 += Int32(1))
                 end
-                k += Int32(1)
             end
             dst = @inbounds GlobalTile(pointer(o,Int32(1)+head*seq*Int32(128)),Layout((seq,static(128)),(static(128),static(1))),16)
             for i in Int32(0):Int32(1)
@@ -263,7 +268,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
     else
         release_registers(Val(64))
         if tid == Int32(384) && rank == Int32(0)            # warp 12: the MMA thread (of the pair)
-            c = Int32(0); k = Int32(0); n = Int32(0)        # stages, blocks and tiles so far
+            c = Int32(0); k0 = Int32(0); k1 = Int32(0); n = Int32(0)   # stages, each tile's blocks, items
             @inline ready(s) = (wait(kvfull(s%Int32(Stages)),(s÷Int32(Stages))&Int32(1)); fence_after_thread_sync())
             @inline stage_of(s) = kvstage(s%Int32(Stages))
             @inline release(s) = commit(kvempty(s%Int32(Stages)))
@@ -294,28 +299,38 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                 c += Int32(1)
                 for j in Int32(1):blocks_t-Int32(1)
                     # Each block is awaited where it is first read: V before
-                    # the first P V, K before the first Q Kᵀ, behind it.
+                    # the first P V, K before the first Q Kᵀ, behind it. A
+                    # causal item's first tile finishes a block early.
                     ready(c)
                     vb = @inbounds operand(pv,OperandB(),shared_tile(tv,stage_of(c)))
                     kb = @inbounds operand(qk,OperandB(),shared_tile(tk,stage_of(c+Int32(1))))
                     PTX.Utils.@unroll for i in 0:1
-                        pv_step(i,vb,k,j > Int32(1))
-                        i == 0 && ready(c+Int32(1))
-                        @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
-                        commit(sfull(i))
+                        pv_step(i,vb,i == 0 ? k0 : k1,j > Int32(1))
+                        if i == 0 && Causal && j == blocks_t-Int32(1)
+                            commit(ofull(0))
+                            ready(c+Int32(1))               # the second tile's Q Kᵀ still reads K
+                        else
+                            i == 0 && ready(c+Int32(1))
+                            @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
+                            commit(sfull(i))
+                        end
+                        i == 0 ? (k0 += Int32(1)) : (k1 += Int32(1))
                     end
                     release(c); release(c+Int32(1))
-                    c += Int32(2); k += Int32(1)
+                    c += Int32(2)
                 end
                 commit(qempty(0)); commit(qempty(1))
                 ready(c)
                 vb = @inbounds operand(pv,OperandB(),shared_tile(tv,stage_of(c)))
                 PTX.Utils.@unroll for i in 0:1
-                    pv_step(i,vb,k,blocks_t > Int32(1))
-                    commit(ofull(i))
+                    if !(i == 0 && Causal)                  # done already
+                        pv_step(i,vb,i == 0 ? k0 : k1,blocks_t > Int32(1))
+                        commit(ofull(i))
+                        i == 0 ? (k0 += Int32(1)) : (k1 += Int32(1))
+                    end
                 end
                 release(c)
-                c += Int32(1); k += Int32(1); n += Int32(1)
+                c += Int32(1); n += Int32(1)
                 Dynamic || (t += stride)
             end
         elseif tid == Int32(416)                            # warp 13: the load thread
