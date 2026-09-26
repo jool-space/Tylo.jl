@@ -271,7 +271,9 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                         end
                         fence_before_thread_sync()
                     end
-                    release_to_mma(pready(i),paired(i))
+                    # At an item's first block O is free once the previous
+                    # item's epilogue has read it, which released it then.
+                    (j > Int32(0) || n == Int32(0)) && release_to_mma(pready(i),paired(i))
                     i == Int32(0) ? (k0 += Int32(1)) : (k1 += Int32(1))
                 end
             end
@@ -286,6 +288,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                     @inbounds store!(window(dst,(q0+Int32(128)*i+band,Int32(32q)),(32,32)),Fragment{BFloat16}(values .* inverse),lane)
                 end
                 fence_before_thread_sync()
+                release_to_mma(pready(i),paired(i))         # the next item's first P V of this tile may begin
             end
             n += Int32(1)
             Dynamic || (t += stride)
