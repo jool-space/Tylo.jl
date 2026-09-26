@@ -40,12 +40,21 @@ Base.@propagate_inbounds function tma_load!(dst::SharedTile{T,L},
     nothing
 end
 Base.@propagate_inbounds function tma_load!(dst::SharedTile{T,L},
-        b::TMABinding{TMATile{T,S,A,W},D,3},origin::Tuple{Int32,Int32,Int32},barrier::Barrier) where {T,L,S,A,W,D}
+        b::TMABinding{TMATile{T,S,A,W},D,3},origin::Tuple{Int32,Int32,Int32},barrier::Barrier;cta::Union{Nothing,Integer}=nothing) where {T,L,S,A,W,D}
     _check_tma(dst,b,origin)
-    PTX.Utils.@unroll 8 for s in 0:_stripes(b.plan)-1
-        bytes, inner = s*_stripe_bytes(b.plan), Int32(s)*_stripe_extent(b.plan)
-        ptx"cp.async.bulk.tensor.3d.shared::cta.global.tile.mbarrier::complete_tx::bytes"(
-            reinterpret(Core.LLVMPtr{UInt8,3},dst.ptr)+bytes,b.descriptor,origin[A]+inner,origin[3-A],origin[3],barrier.ptr)
+    if cta === nothing
+        PTX.Utils.@unroll 8 for s in 0:_stripes(b.plan)-1
+            bytes, inner = s*_stripe_bytes(b.plan), Int32(s)*_stripe_extent(b.plan)
+            ptx"cp.async.bulk.tensor.3d.shared::cta.global.tile.mbarrier::complete_tx::bytes"(
+                reinterpret(Core.LLVMPtr{UInt8,3},dst.ptr)+bytes,b.descriptor,origin[A]+inner,origin[3-A],origin[3],barrier.ptr)
+        end
+    else
+        remote = reinterpret(Core.LLVMPtr{UInt8,3},UInt64(ptx"mapa.shared::cluster.u32"(_smem_address(barrier.ptr),cta % UInt32)))
+        PTX.Utils.@unroll 8 for s in 0:_stripes(b.plan)-1
+            bytes, inner = s*_stripe_bytes(b.plan), Int32(s)*_stripe_extent(b.plan)
+            ptx"cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.tile.mbarrier::complete_tx::bytes"(
+                reinterpret(Core.LLVMPtr{UInt8,3},dst.ptr)+bytes,b.descriptor,origin[A]+inner,origin[3-A],origin[3],remote)
+        end
     end
     nothing
 end
@@ -85,8 +94,8 @@ Base.@constprop :aggressive @inline wait_tma_stores(n::Integer) = ptx"cp.async.b
 # Origins of any integer type, as the Int32 coordinates TMA takes.
 Base.@propagate_inbounds tma_load!(dst::SharedTile,b::TMABinding,origin::Tuple{Integer,Integer},barrier::Barrier;cta::Union{Nothing,Integer}=nothing) =
     tma_load!(dst,b,map(x -> x % Int32,origin),barrier;cta)
-Base.@propagate_inbounds tma_load!(dst::SharedTile,b::TMABinding,origin::Tuple{Integer,Integer,Integer},barrier::Barrier) =
-    tma_load!(dst,b,map(x -> x % Int32,origin),barrier)
+Base.@propagate_inbounds tma_load!(dst::SharedTile,b::TMABinding,origin::Tuple{Integer,Integer,Integer},barrier::Barrier;cta::Union{Nothing,Integer}=nothing) =
+    tma_load!(dst,b,map(x -> x % Int32,origin),barrier;cta)
 Base.@propagate_inbounds tma_store!(b::TMABinding,src::SharedTile,origin::Tuple{Integer,Integer}) =
     tma_store!(b,src,map(x -> x % Int32,origin))
 Base.@propagate_inbounds tma_store!(b::TMABinding,src::SharedTile,origin::Tuple{Integer,Integer,Integer}) =

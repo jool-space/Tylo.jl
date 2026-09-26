@@ -120,7 +120,7 @@ origin starts a 16-byte chunk; the hardware rejects other origins.
 Nothing else is inserted: initialize and publish the barrier first, and
 release the consumers of `dst` before reusing it.
 
-With a cluster rank `cta` (two-dimensional bindings), the copy completes on
+With a cluster rank `cta`, the copy completes on
 the barrier at the same address in that CTA, this one or its CTA-pair peer,
 so that one barrier tracks both halves of a CTA-pair MMA's operands.
 """
