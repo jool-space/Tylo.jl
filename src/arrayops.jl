@@ -109,8 +109,33 @@ end
 
 @inline _rebuild_fragment(f::Fragment,data) = Fragment(data,Layouts.layout(f))
 @inline function _materialize_fragment(anchor::F,bc) where F<:Fragment
-    values = @rtuple(i -> _broadcast_value(bc,anchor,Val(i)), 1:_local_count(F))
+    values = _pairable(bc) && iseven(_local_count(F)) ? _pairwise_values(anchor,bc) :
+        @rtuple(i -> _broadcast_value(bc,anchor,Val(i)), 1:_local_count(F))
     _rebuild_fragment(anchor,values)
+end
+
+# Broadcasts that are FP32 throughout, of functions with a pair form, run
+# two slots at a time (see packed.jl).
+@inline _pairable(::Fragment{Float32}) = true
+@inline _pairable(::Float32) = true
+@inline _pairable(x) = false
+@inline _pairable(bc::Base.Broadcast.Broadcasted) = _pair_op(bc.f) !== :none && _all_pairable(bc.args)
+@inline _all_pairable(::Tuple{}) = true
+@inline _all_pairable(xs::Tuple) = _pairable(first(xs)) && _all_pairable(Base.tail(xs))
+@inline _pair_value(x::Float32,anchor,i) = F32x2(x)
+@inline _pair_value(x::Fragment,anchor,::Val{I}) where I =
+    F32x2(_broadcast_value(x,anchor,Val(I)),_broadcast_value(x,anchor,Val(I+1)))
+@inline function _pair_value(bc::Base.Broadcast.Broadcasted,anchor,i)
+    args = _pair_arguments(bc.args,anchor,i)
+    _pair_op(bc.f) === :packed && return bc.f(args...)
+    F32x2(bc.f(map(a -> _lanes(a)[1],args)...),bc.f(map(a -> _lanes(a)[2],args)...))
+end
+@inline _pair_arguments(::Tuple{},anchor,i) = ()
+@inline _pair_arguments(xs::Tuple,anchor,i) =
+    (_pair_value(first(xs),anchor,i),_pair_arguments(Base.tail(xs),anchor,i)...)
+@inline function _pairwise_values(anchor::F,bc) where F<:Fragment
+    pairs = @rtuple(j -> _pair_value(bc,anchor,Val(2j-1)), 1:_local_count(F)÷2)
+    @rtuple(i -> _lanes(pairs[(i+1)÷2])[2-i%2], 1:_local_count(F))
 end
 @inline function Base.copy(bc::Base.Broadcast.Broadcasted{FragmentStyle})
     anchor = _broadcast_anchor(bc)

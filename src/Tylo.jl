@@ -32,6 +32,7 @@ end
 include("tuples.jl")
 include("integers.jl")
 include("elements.jl")
+include("packed.jl")
 include("layouts/layouts.jl")
 import .Layouts: Layout, @Layout, Ownership, distribute, coordinate, compose, window, tile
 include("fragments.jl")

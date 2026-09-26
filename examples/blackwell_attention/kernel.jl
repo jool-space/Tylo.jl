@@ -45,7 +45,14 @@ using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_bef
 # `x`, once `token` exists: a data dependence the compilers cannot see through.
 @inline _after(token::UInt64,x) = ifelse(token == typemax(UInt64),zero(x),x)
 # A row's sum as one chain from `init`: every addition waits for `init`.
-@inline _chainsum(init,x) = foldl(+,x.data;init)
+# Pairs of values add at once (Tylo's FP32 pairs), then the two lanes.
+@generated function _chainsum(init,x::Fragment{Float32,N}) where N
+    chain = :(Tylo.F32x2(init,0f0))
+    for k in 1:N÷2
+        chain = :($chain+Tylo.F32x2(d[$(2k-1)],d[$(2k)]))
+    end
+    :(Base.@inline; d = x.data; (a,b) = Tylo._lanes($chain); a+b)
+end
 # A chunk of a row's scores, 32 keys from `first`, with keys past `row` masked.
 @inline _mask(x,first::Int32,row::Int32) = Fragment(ntuple(e -> ifelse(first+Int32(e-1) <= row,x.data[e],-Inf32),Val(32)),Tylo.Layouts.layout(x))
 # P's first `Split` chunks and the rest, from the row's four.

@@ -15,6 +15,26 @@
     end
 end
 
+# FP32 sums: a tree over pairs of values (packed where the target has it),
+# then the two lanes.
+@generated function _local_reduce(::typeof(+),x::NTuple{N,Float32}) where N
+    (N >= 4 && iseven(N)) || return :(Base.@inline; $(_local_tree(N)))
+    function tree(first,last)
+        first == last && return :(F32x2(x[$(2first-1)],x[$(2first)]))
+        mid = (first+last)÷2
+        :($(tree(first,mid))+$(tree(mid+1,last)))
+    end
+    quote
+        Base.@inline
+        a, b = _lanes($(tree(1,N÷2)))
+        a+b
+    end
+end
+function _local_tree(N)
+    tree(first,last) = first == last ? :(x[$first]) : :($(tree(first,(first+last)÷2))+$(tree((first+last)÷2+1,last)))
+    tree(1,N)
+end
+
 # Warp communication exists only on the device: CUDACoreExt overrides these
 # in the device method table, so host calls raise instead of miscompiling.
 "Butterfly reduction over lane offsets W/2 down to 1."

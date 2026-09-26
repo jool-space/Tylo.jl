@@ -106,3 +106,5 @@ end
 @inline softmax_logsumexp(state::SoftmaxState) =
     ((running_maximum, normalizer) -> normalizer == 0f0 ? -Inf32 : running_maximum + log(normalizer)).(
         state.maximum, state.sum)
+# The device's exp2 applies to each lane of a pair.
+_pair_op(::typeof(_ex2)) = :lane

@@ -41,6 +41,13 @@ julia> exp.(f .- m)
 Fragment((0.36787945f0, 0.13533528f0, 1.0f0, 1.0f0), Ownership((2, 2), @Layout (1, 4) (0, 1)))
 ```
 
+FP32 arithmetic runs on pairs of slots: a broadcast that is FP32 throughout,
+of `+`, `-`, `*`, `muladd` and functions applied per value such as `exp2`
+or `max`, and an FP32 `sum`, compute two values at a time as `<2 x float>`.
+On sm_100 and later that is one packed instruction (`FFMA2`, `FADD2`,
+`FMUL2`) for two values; elsewhere LLVM splits it back into the scalar
+instructions it would have emitted anyway.
+
 Fragments of different ownerships do not mix: that would need values to
 move between threads, which Tylo does only when asked.
 
