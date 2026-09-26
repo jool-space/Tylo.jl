@@ -118,7 +118,7 @@ function fp8_attention(q::CuArray{T,3},k::CuArray{T,3},vt::CuArray{T,3};stages::
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     o = o === nothing ? CuArray{BFloat16}(undef,d,sq,bh) : o
     scale = Float32(1/sqrt(d))
-    kernel = @cuda launch=false minthreads=384 fp8_attention_kernel!(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages))
+    kernel = @cuda launch=false minthreads=384 maxregs=168 fp8_attention_kernel!(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     blocks = min((sq÷128)*bh,CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
     launch() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages);threads=384,blocks,shmem)

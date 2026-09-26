@@ -73,26 +73,32 @@ function Tylo.machine_code(@nospecialize(f),@nospecialize(types::Type{<:Tuple});
     maxregs === nothing || push!(options,:maxregs => maxregs)
     config = CUDACore.compiler_config(arch === nothing ? CUDACore.device() : nothing;options...)
     job = CUDACore.GPUCompiler.CompilerJob(CUDACore.GPUCompiler.methodinstance(typeof(f),types),config)
-    # Without debug information: its strings name Julia functions, which a
-    # search of the PTX would otherwise match.
-    stripped = CUDACore.GPUCompiler.CompilerJob(job.source,CUDACore.GPUCompiler.CompilerConfig(config;strip=true))
+    # Compiled exactly as CUDACore compiles it: stripping the debug
+    # information changes the code LLVM generates (registers, schedules).
     asm, _ = try
         CUDACore.GPUCompiler.JuliaContext() do ctx
-            CUDACore.invoke_frozen(CUDACore.GPUCompiler.compile,:asm,stripped)
+            CUDACore.invoke_frozen(CUDACore.GPUCompiler.compile,:asm,job)
         end
     catch err
         throw(Tylo._compile_failure(f,types,err))
     end
-    ptx = String(asm)
+    source = String(asm)
+    # The PTX kept for reading and searching, without the debug directives:
+    # their file names and strings would match searches for instructions.
+    ptx = replace(source,r"^[ \t]*\.section[ \t]+\.debug_\w+\s*\{.*?\}[ \t]*\n"ms => "",
+                         r"^[ \t]*\.(?:file|loc)\b[^\n]*\n"m => "")
     entry = something(match(r"\.visible \.entry\s+([\w$]+)",ptx),(;captures=["?"])).captures[1]
     target = match(r"^\.target\s+(sm_\w+)"m,ptx)
     target === nothing && error("no target in the PTX")
     gpu = String(target[1])
     image, log = mktempdir() do dir
         input, output = joinpath(dir,"kernel.ptx"), joinpath(dir,"kernel.cubin")
-        write(input,ptx)
+        write(input,source)
         buffer = IOBuffer()
-        process = run(pipeline(ignorestatus(`$(CUDACore.CUDA_Compiler.ptxas()) --verbose --gpu-name $gpu --output-file $output $input`);
+        # CUDACore's ptxas options at this debug level.
+        level = Base.JLOptions().debug_level
+        debug = level == 1 ? ["--generate-line-info"] : level >= 2 ? ["--device-debug"] : String[]
+        process = run(pipeline(ignorestatus(`$(CUDACore.CUDA_Compiler.ptxas()) $debug --verbose --gpu-name $gpu --output-file $output $input`);
                                stdout=buffer,stderr=buffer))
         log = String(take!(buffer))
         success(process) || error("ptxas failed for $entry:\n$log")
@@ -114,8 +120,22 @@ end
 Tylo._machine_code_call(f,args::Tuple;kwargs...) =
     Tylo.machine_code(f,Tuple{map(a -> Core.Typeof(CUDACore.cudaconvert(a)),args)...};kwargs...)
 
-# The machine code of a kernel compiled by `@cuda launch=false`.
-Tylo.machine_code(k::CUDACore.HostKernel{F,TT}) where {F,TT} = Tylo.machine_code(k.f,TT)
+# The machine code of a kernel compiled by `@cuda launch=false`. The kernel
+# does not remember its compile options, so they are inferred from the
+# loaded function, or taken from `kwargs`, and the result is checked against
+# it: an audit of other code than the kernel runs would mislead.
+function Tylo.machine_code(k::CUDACore.HostKernel{F,TT};kwargs...) where {F,TT}
+    attributes = CUDACore.attributes(k.fun)
+    registers = Int(attributes[CUDACore.FUNC_ATTRIBUTE_NUM_REGS])
+    local_bytes = Int(attributes[CUDACore.FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES])
+    limit = Int(attributes[CUDACore.FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK])
+    candidates = isempty(kwargs) ? [(;),(;threads=limit),(;threads=limit,maxregs=registers)] : [(;kwargs...)]
+    for options in candidates
+        code = Tylo.machine_code(k.f,TT;options...)
+        Tylo.registers(code) == registers && Tylo._stack_frame(code) == local_bytes && return code
+    end
+    throw(ArgumentError("the loaded kernel uses $registers registers and $local_bytes bytes of local memory, which recompiling $(isempty(kwargs) ? "with the options it may have been launched with" : "with the given options") does not reproduce; pass them: machine_code(kernel; threads=..., maxregs=...)"))
+end
 
 function Tylo.tune(prepare,candidates;samples::Integer=15,audit=true,target::Real=2e-4)
     trials = Tylo.Trial[]

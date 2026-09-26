@@ -35,3 +35,20 @@
     @test unchecked_div(Int32(-7),Int32(2)) === Int32(-3) && unchecked_rem(Int32(-7),Int32(2)) === Int32(-1)
     @test unchecked_div(UInt32(7),UInt32(2)) === UInt32(3) && unchecked_rem(UInt32(7),UInt32(2)) === UInt32(1)
 end
+
+# ptxas's performance warnings are informational: the code runs, slower. A
+# kernel whose setmaxnreg ptxas ignored keeps every warp at the launch's
+# budget, and the roles meant to receive more registers spill.
+@testset "ptxas performance warnings" begin
+    log = """
+    ptxas info    : (C7508) Potential Performance Loss: 'setmaxnreg' ignored; unable to determine register count at entry.
+    ptxas info    : Used 128 registers, used 16 barriers, 144 bytes cumulative stack size
+        144 bytes stack frame, 172 bytes spill stores, 176 bytes spill loads
+    """
+    code = Tylo.MachineCode("k","sm_100a","",UInt8[],"",log,() -> "")
+    findings = audit(code;spills=false)
+    @test only(findings).kind === :ptxas
+    @test occursin("C7508",only(findings).message) && occursin("maxregs",only(findings).hint)
+    @test isempty(audit(code;spills=false,ptxas=false))
+    @test Tylo._stack_frame(code) == 144 && Tylo.registers(code) == 128
+end

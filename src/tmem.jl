@@ -45,7 +45,7 @@ Base.@propagate_inbounds function tmem_location(tile::TmemTile{T}, coordinate::T
         throw(BoundsError(tile, coordinate))
     slot_index = tile.layout(coordinate)
     @boundscheck 0 <= slot_index < 128 * 1024 || throw(BoundsError(tile, coordinate))
-    slot = UInt32(slot_index)
+    slot = slot_index % UInt32                           # in range when checked; no InexactError path
     packing = UInt32(_tmem_packing(T))
     lane = (tile.address >> UInt32(16)) + slot % UInt32(128)
     column = (tile.address & UInt32(0xffff)) + slot ÷ UInt32(128) ÷ packing

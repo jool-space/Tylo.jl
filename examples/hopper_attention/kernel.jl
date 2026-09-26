@@ -303,7 +303,7 @@ function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages
         shmem += 24+transfer_bytes(tq)
         shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
         counter = CuArray(Int32[0])
-        kernel = @cuda launch=false minthreads=384 persistent_attention_kernel!(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(causal),Val(dynamic),Val(heads_inner))
+        kernel = @cuda launch=false minthreads=384 maxregs=168 persistent_attention_kernel!(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(causal),Val(dynamic),Val(heads_inner))
         CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
         blocks = min((sq÷128)*bh,CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
         function launch_persistent()
@@ -312,7 +312,7 @@ function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages
         end
         return kernel, launch_persistent, o
     end
-    kernel = @cuda launch=false minthreads=384 attention_kernel!(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong))
+    kernel = @cuda launch=false minthreads=384 maxregs=168 attention_kernel!(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     launch() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong);threads=384,blocks=(sq÷128,bh),shmem)
     kernel, launch, o

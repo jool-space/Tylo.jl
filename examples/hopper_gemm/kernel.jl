@@ -143,7 +143,7 @@ function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Intege
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     c = c === nothing ? CuArray{BFloat16}(undef,nt,m) : c
     (m÷(128cluster)) % group == 0 || throw(ArgumentError("row tiles must be a multiple of the group"))
-    kernel = @cuda launch=false minthreads=384 hopper_gemm_kernel!(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster))
+    kernel = @cuda launch=false minthreads=384 maxregs=168 hopper_gemm_kernel!(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     tiles = (m÷128)*(nt÷n)
     sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)

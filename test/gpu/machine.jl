@@ -15,6 +15,18 @@ function stepped_roots!(y,x,step)
     nothing
 end
 const STEPPED_LINE = 12
+# 96 values live at once: more than the 64 registers a 1024-thread bound
+# leaves. (Tuples shorter than 32, whose `map` unrolls.)
+function register_pressure!(y,x)
+    a = ntuple(j -> @inbounds(x[j]),Val(24)); b = ntuple(j -> @inbounds(x[j+24]),Val(24))
+    c = ntuple(j -> @inbounds(x[j+48]),Val(24)); d = ntuple(j -> @inbounds(x[j+72]),Val(24))
+    for _ in 1:8
+        a = map(v -> v*v+0.5f0,a); b = map(v -> v*v+0.25f0,b)
+        c = map(v -> v*v+0.125f0,c); d = map(v -> v*v+0.0625f0,d)
+    end
+    @inbounds y[threadIdx().x] = (sum(a)+sum(b))+(sum(c)+sum(d))
+    nothing
+end
 function indexed_tuple!(y,x,i)
     values = ntuple(j -> @inbounds(x[j]),Val(16))
     @inbounds y[1] = values[i]                        # a tuple indexed at run time
@@ -96,9 +108,22 @@ if runtime_supported(@__FILE__)
           startswith(code.arch,"sm_$(device_capability().major)$(device_capability().minor)")
     @test isempty(audit(@machine_code clean_scale!(y,x)))
 end
+# A kernel remembers no compile options: machine_code infers them from the
+# loaded function and checks that it reproduced it.
+@testset "machine_code of a compiled kernel" begin
+    x = CuArray(rand(Float32,96)); y = similar(x)
+    free = @cuda launch=false register_pressure!(y,x)
+    bounded = @cuda launch=false minthreads=1024 register_pressure!(y,x)
+    for k in (free,bounded)
+        code = machine_code(k)
+        @test Tylo.registers(code) == CUDACore.registers(k)
+        @test occursin(".reqntid 1024",code.ptx) == (k === bounded)
+    end
+    @test_throws ArgumentError machine_code(bounded;maxregs=255)
+end
 end
 
-const UNALIGNED_LINE = 106
+const UNALIGNED_LINE = 131
 function unaligned_sum!(y,x)
     scratch = CuStaticSharedArray(Float32,32)
     p = reinterpret(Core.LLVMPtr{Float32,3},pointer(scratch))

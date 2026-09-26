@@ -28,7 +28,17 @@ Compile the kernel `f` for argument `types` (device-side types, a `Tuple`
 type) as `@cuda` would, without a device when `arch` names the target
 (`CUDACore.SMVersion(9,0,:arch)`, say) and for the current device
 otherwise. `threads` is the block size the kernel requires, which bounds
-its registers. Requires CUDACore.
+its registers, and `maxregs` its stated register maximum (which
+`setmaxnreg` needs). The code is compiled exactly as CUDACore compiles it,
+debug information included, since dropping it changes what LLVM generates;
+the `ptx` kept for reading omits the debug directives. Requires CUDACore.
+
+    machine_code(kernel; threads=..., maxregs=...)
+
+The machine code of a kernel compiled by `@cuda launch=false`. A kernel does
+not remember its compile options: they are inferred from the loaded
+function, or passed, and the result is checked against the function's
+registers and stack, so that the code audited is the code that runs.
 
     @machine_code [arch=...] [threads=...] f(args...)
 
@@ -94,8 +104,8 @@ end
     Finding
 
 One way a kernel's machine code falls short of what Tylo's kernels promise:
-`kind` is `:call`, `:local_memory`, `:spill`, `:unaligned` or
-`:wgmma_serialized`;
+`kind` is `:call`, `:local_memory`, `:spill`, `:unaligned`,
+`:wgmma_serialized` or `:ptxas`;
 `message` says what; `sources` lists the Julia frames responsible, when
 they can be traced, as `"file.jl:line (function)"` chains; `hint` says how
 such code is usually fixed, when the cause is a known one.
@@ -108,7 +118,7 @@ struct Finding
 end
 
 """
-    audit(code::MachineCode; calls=true, local_memory=true, spills=true, alignment=true, wgmma=true) -> Vector{Finding}
+    audit(code::MachineCode; calls=true, local_memory=true, spills=true, alignment=true, wgmma=true, ptxas=true) -> Vector{Finding}
 
 Check the machine code against the properties Tylo's kernels promise, and
 return what fails (empty when it all holds):
@@ -129,8 +139,12 @@ return what fails (empty when it all holds):
   after each instruction, when it cannot prove the pipeline safe, and says
   so only in a performance warning; the SASS then has more
   `WARPGROUP.ARRIVE`s than the PTX has `wgmma.fence`s.
+- `ptxas`: ptxas reports no other performance loss. Its warnings are
+  informational and the code still runs, which makes them easy to miss:
+  `setmaxnreg` ignored (C7508) leaves every warp at the launch's register
+  budget, so a role that was to receive more spills instead.
 """
-function audit(code::MachineCode; calls::Bool=true, local_memory::Bool=true, spills::Bool=true, alignment::Bool=true, wgmma::Bool=true)
+function audit(code::MachineCode; calls::Bool=true, local_memory::Bool=true, spills::Bool=true, alignment::Bool=true, wgmma::Bool=true, ptxas::Bool=true)
     findings = Finding[]
     if calls
         targets = kernel_calls(code)
@@ -190,6 +204,14 @@ function audit(code::MachineCode; calls::Bool=true, local_memory::Bool=true, spi
                 "Any call in the kernel does this, even on another warp's path; fix those first. Otherwise registers of a pending accumulator were touched before its wait."))
         end
     end
+    if ptxas
+        for m in eachmatch(r"\((C\d{4})\) Potential Performance Loss:\s*([^\n]*)",code.log)
+            occursin(r"wgmma",m[2]) && continue                  # reported as :wgmma_serialized
+            hint = m[1] == "C7508" ?
+                "setmaxnreg needs the kernel's register maximum stated, not only its thread count: launch with maxregs = 65536 ÷ threads (maxregs=128 for 512 threads)." : ""
+            push!(findings,Finding(:ptxas,"ptxas $(m[1]): $(strip(m[2]))",String[],hint))
+        end
+    end
     findings
 end
 
@@ -227,6 +249,9 @@ kernel_calls(code::MachineCode) =
 "Bytes of local memory the kernel declares in its PTX."
 local_bytes(code::MachineCode) =
     sum((parse(Int,m[1]) for m in eachmatch(r"\.local\s[^;]*\[(\d+)\]",entry_ptx(code))); init=0)
+
+"Bytes of stack frame per thread, as ptxas reports them: local arrays and spills."
+_stack_frame(code::MachineCode) = (m = match(r"(\d+) bytes stack frame",code.log); m === nothing ? 0 : parse(Int,m[1]))
 
 "Registers per thread, as ptxas reports them."
 registers(code::MachineCode) = (m = match(r"Used (\d+) registers",code.log); m === nothing ? 0 : parse(Int,m[1]))

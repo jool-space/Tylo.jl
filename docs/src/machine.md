@@ -52,6 +52,12 @@ code = machine_code(kernel!, Tuple{CuDeviceMatrix{Float32,1}, WGMMAAtom{BFloat16
 @test isempty(audit(code))
 ```
 
+A kernel from `@cuda launch=false` has its own: `machine_code(kernel)`. The
+kernel does not remember the options it was compiled with (`minthreads`,
+`maxregs`), and they change the code, so `machine_code` infers them from
+the loaded function and checks that it reproduced it, registers and stack,
+or is told them. Either way the code audited is the code that runs.
+
 ## What the audit checks
 
 - **Calls.** A kernel should call nothing. Every call is out-of-line code,
@@ -70,6 +76,12 @@ code = machine_code(kernel!, Tuple{CuDeviceMatrix{Float32,1}, WGMMAAtom{BFloat16
   says so only as a performance warning. The audit counts
   `WARPGROUP.ARRIVE`s in the SASS against `wgmma.fence`s in the PTX, and
   reports the reason ptxas gave.
+- **Other ptxas warnings.** ptxas reports lost performance as information
+  and compiles on. The costly one for warp-specialized kernels: given a
+  block size but no stated register maximum, ptxas may drop the
+  `setmaxnreg`s (C7508), so no role receives the registers it was to get,
+  and the one that needed them spills. Launch such kernels with
+  `maxregs = 65536 ÷ threads` as well as `minthreads`.
 
 A kernel that does not compile at all is often one that Julia had to box
 a variable in: a closure inside the kernel assigns a name the kernel also

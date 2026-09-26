@@ -21,8 +21,13 @@ end
 ```
 
 With 384 threads, 128 × 40 + 256 × 232 registers fit the 64K register
-file. ptxas honors these only when the block size is fixed at compile
-time: compile with `@cuda ... minthreads=384` (`.reqntid`).
+file. ptxas applies these limits only when both the block size and the
+register maximum are fixed at compile time: compile with
+`@cuda ... minthreads=384 maxregs=168` (65536 ÷ threads, rounded down to
+a multiple of 8). Given the thread count alone, ptxas may ignore the
+instructions and say so only in a performance warning (C7508, which
+[`audit`](@ref) reports); every warp then keeps the launch's budget, and
+the roles meant to receive more registers spill.
 """
 function release_registers end
 @doc (@doc release_registers) function acquire_registers end

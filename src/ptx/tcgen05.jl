@@ -141,11 +141,26 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
     quote
         Base.@inline
         @boundscheck _k_extent(a) >= $K && _k_extent(b) >= $K || throw(BoundsError())
-        dstart = _tmem_start(d)
+        a = _at_issue(a); b = _at_issue(b)
+        dstart = _opaque(_tmem_start(d))
         $(issues...)
         nothing
     end
 end
+# Each call derives its K steps' descriptors and TMEM addresses from bases
+# the compiler must take as produced at the call. Otherwise LLVM hoists every
+# step's operand out of the loops around the issue, as loop invariants: a
+# kernel that issues a few products per iteration then holds dozens of 64-bit
+# descriptors at once, which the MMA warp's small register budget cannot, and
+# spills. At the call they are one addition each.
+for (T,width,constraint) in ((UInt64,64,"l"),(UInt32,32,"r"))
+    ir = PTX.convergent_asm_ir("mov.b$width \$0, \$1;","=$constraint,$constraint",T,[T])
+    @eval @inline _opaque(x::$T) = Base.llvmcall(($ir,"entry"),$T,Tuple{$T},x)
+end
+@inline _at_issue(o::Tcgen05Operand{P,Role,Major,T,L}) where {P,Role,Major,T,L} =
+    Tcgen05Operand{P,Role,Major,T,L}(_opaque(o.base),_opaque(o.at),o.layout,o.origin)
+@inline _at_issue(t::TmemTile) = TmemTile(eltype(t),_opaque(t.address),t.layout)
+
 @inline commit_mma(barrier::Barrier) =
     ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cta.b64"(_smem_address(barrier.ptr))
 @inline commit_mma(a::Tcgen05Atom,barrier::Barrier) =
