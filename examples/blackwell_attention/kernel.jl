@@ -252,11 +252,14 @@ function blackwell_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale
                 release(c)
                 c += Int32(1)
                 for j in Int32(1):blocks-Int32(1)
-                    ready(c); ready(c+Int32(1))
+                    # Each block is awaited where it is first read: V before
+                    # the first P V, K before the first Q Kᵀ, behind it.
+                    ready(c)
                     vb = @inbounds operand(pv,OperandB(),shared_tile(tv,stage_of(c)))
                     kb = @inbounds operand(qk,OperandB(),shared_tile(tk,stage_of(c+Int32(1))))
                     PTX.Utils.@unroll for i in 0:1
                         pv_step(i,vb,k,j > Int32(1))
+                        i == 0 && ready(c+Int32(1))
                         @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
                         commit(sfull(i))
                     end
