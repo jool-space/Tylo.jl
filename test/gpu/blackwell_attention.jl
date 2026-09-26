@@ -11,7 +11,7 @@ include("../../examples/blackwell_attention/kernel.jl")
         tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
         tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),1)),PTX.TMADescriptorPtr,3}
         tv = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),2)),PTX.TMADescriptorPtr,3}
-        tt = Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tv,Int32,Int32,Float32,Val{4ctas},Val{ctas}}
+        tt = Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tv,Int32,Int32,Float32,Val{4ctas},Val{ctas},Val{3}}
         code = Tylo.machine_code(blackwell_attention_kernel!,tt;arch,threads=512,maxregs=128)
         save_code("blackwell-attention-ctas$ctas",code)
         # No spills anywhere: the softmax warps hold a row at 192 registers,
@@ -34,7 +34,7 @@ include("../../examples/blackwell_attention/kernel.jl")
     # says so in a warning: the audit reports it.
     tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
     tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,Int32,Int32,Float32,Val{4},Val{1}};arch,threads=512)
+    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,Int32,Int32,Float32,Val{4},Val{1},Val{3}};arch,threads=512)
     @test :ptxas in getfield.(audit(unstated),:kind)
 end
 
@@ -59,6 +59,13 @@ if runtime_supported(@__FILE__)
         fill!(o,BFloat16(NaN)); launch(); synchronize()
         @test maximum(abs.(Float64.(Array(o)) .- reference(q,k,v))) < 0.03
         @test isempty(audit(machine_code(kernel)))
+    end
+    # P published after one or two of its chunks instead of three.
+    for ctas in (1,2), split in (1,2)
+        q,k,v = (BFloat16.(randn(rng,Float32,128,1024,2)) for _ in 1:3)
+        _, launch, o = blackwell_attention(CuArray(q),CuArray(k),CuArray(v);ctas,split)
+        fill!(o,BFloat16(NaN)); launch(); synchronize()
+        @test maximum(abs.(Float64.(Array(o)) .- reference(q,k,v))) < 0.03
     end
 end
 end

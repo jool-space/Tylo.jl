@@ -46,8 +46,21 @@ using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_bef
 @inline _after(token::UInt64,x) = ifelse(token == typemax(UInt64),zero(x),x)
 # A row's sum as one chain from `init`: every addition waits for `init`.
 @inline _chainsum(init,x) = foldl(+,x.data;init)
+# P's first `Split` chunks and the rest, from the row's four.
+@inline _first(s,c,m,::Val{1}) = (_exponentials(s[1],c,m),)
+@inline _first(s,c,m,::Val{2}) = (_exponentials(s[1],c,m),_exponentials(s[2],c,m))
+@inline _first(s,c,m,::Val{3}) = (_exponentials(s[1],c,m),_exponentials(s[2],c,m),_exponentials(s[3],c,m))
+@inline _rest(s,c,m,::Val{1}) = (_exponentials(s[2],c,m),_exponentials(s[3],c,m),_exponentials(s[4],c,m))
+@inline _rest(s,c,m,::Val{2}) = (_exponentials(s[3],c,m),_exponentials(s[4],c,m))
+@inline _rest(s,c,m,::Val{3}) = (_exponentials(s[4],c,m),)
+# Chunks of P into TMEM, 32 keys each, the first at key 32`First`.
+@generated function _store_chunks!(t,band,chunks::NTuple{N,Any},::Val{First}) where {N,First}
+    stores = [:(@inbounds store_async!(window(t,(band,Int32($(32(First+q)))),(32,32)),Fragment{BFloat16}(chunks[$(q+1)]))) for q in 0:N-1]
+    :(Base.@inline; $(stores...); nothing)
+end
 
-function blackwell_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Float32,::Val{Stages},::Val{CTAs}=Val(1)) where {Stages,CTAs}
+function blackwell_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Float32,::Val{Stages},::Val{CTAs}=Val(1),
+                                     ::Val{Split}=Val(3)) where {Stages,CTAs,Split}
     qk = Tcgen05Atom((128CTAs,128,16),BFloat16)             # S = Q Kᵀ: 128 rows per CTA × 128 keys
     pv = Tcgen05Atom((128CTAs,128,16),BFloat16)             # O += P V: 128 rows per CTA × d
     qbytes, kvbytes = transfer_bytes(tq), transfer_bytes(tk)  # a Q tile; this CTA's share of a K or V block
@@ -142,38 +155,36 @@ function blackwell_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale
                                      load_async(rows,window(scores(i),(band,Int32(96)),(32,32))))
                 s = (wait_load(pending[1]),wait_load(pending[2]),wait_load(pending[3]),wait_load(pending[4]))
                 top = max(_rowmax(s[1]),_rowmax(s[2]),_rowmax(s[3]),_rowmax(s[4]))*c2
-                if j == Int32(0)
+                factor = 1f0
+                if j == Int32(0) || top-m > 8f0             # the maximum moves: rescale O and the sum
+                    j > Int32(0) && (factor = Tylo._ex2(m-top))
                     m = top
-                else
-                    factor = 1f0
-                    if top-m > 8f0                          # the maximum moves: rescale O and the sum
-                        factor = Tylo._ex2(m-top)
-                        m = top
-                    end
+                end
+                p = _first(s,c2,m,Val(Split))
+                if j > Int32(0)
                     unsafe_store!(factors,factor,row+Int32(128)*i+Int32(1),Val(4))
                     ptx"bar.arrive"(handoff(i)%UInt32,UInt32(64))
                     l *= factor
                 end
-                # Three chunks of P, published; then the last and the row sum.
-                # Nothing orders pure arithmetic after a store or an arrival,
-                # so the work that must wait takes an input through the
-                # arrival's token: the compilers cannot hoist it above.
-                p = (_exponentials(s[1],c2,m),_exponentials(s[2],c2,m),_exponentials(s[3],c2,m))
-                PTX.Utils.@unroll for q in 0:2
-                    @inbounds store_async!(window(probabilities(i),(band,Int32(32q)),(32,32)),Fragment{BFloat16}(p[q+1]))
-                end
+                # `Split` chunks of P, published; then the rest and the row
+                # sum. Nothing orders pure arithmetic after a store or an
+                # arrival, so the work that must wait takes an input through
+                # the arrival's token: the compilers cannot hoist it above.
+                _store_chunks!(probabilities(i),band,p,Val(0))
                 wait_stores()
                 fence_before_thread_sync()
                 token = ptx"mbarrier.arrive.shared.b64"(pready(i).ptr)
                 CTAs == 1 || release_to_mma(pready(i),paired(i))
-                last = _exponentials(s[4],c2,_after(token,m))
-                @inbounds store_async!(window(probabilities(i),(band,Int32(96)),(32,32)),Fragment{BFloat16}(last))
+                basis = _after(token,m)
+                rest = _rest(s,c2,basis,Val(Split))
+                _store_chunks!(probabilities(i),band,rest,Val(Split))
                 wait_stores()
                 fence_before_thread_sync()
                 token = ptx"mbarrier.arrive.shared.b64"(plast(i).ptr)
                 CTAs == 1 || release_to_mma(plast(i),pairlast(i))
                 zero = _after(token,0f0)
-                l += (_chainsum(zero,p[1])+_chainsum(zero,p[2]))+(_chainsum(zero,p[3])+_chainsum(zero,last))
+                chunks = (p...,rest...)
+                l += (_chainsum(zero,chunks[1])+_chainsum(zero,chunks[2]))+(_chainsum(zero,chunks[3])+_chainsum(zero,chunks[4]))
                 k += Int32(1)
             end
             unsafe_store!(sums,l,row+Int32(128)*i+Int32(1),Val(4))
@@ -233,10 +244,10 @@ function blackwell_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale
             @inline function pv_step(i,vb,k,accumulate)
                 wait(CTAs == 1 ? pready(i) : paired(i),k&Int32(1))
                 fence_after_thread_sync()
-                @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(0)),(128,96)),vb,96,accumulate)
+                @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(0)),(128,32Split)),vb,32Split,accumulate)
                 wait(CTAs == 1 ? plast(i) : pairlast(i),k&Int32(1))
                 fence_after_thread_sync()
-                @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(96)),(128,32)),operand(vb,(Int32(96),Int32(0))),32,true)
+                @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(32Split)),(128,128-32Split)),operand(vb,(Int32(32Split),Int32(0))),128-32Split,true)
             end
             t = first_tile
             while t < tiles
@@ -324,9 +335,10 @@ O = softmax(Q Kᵀ / √d) V for BF16 `q`, `k`, `v` (d×seq×(batch·heads)), d 
 counts ring stages of a K or V block's share (4 by default for one CTA, 8
 for pairs, whose stages are half as large).
 """
-function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};ctas::Integer=1,stages::Integer=4ctas,o=nothing) where T
+function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,o=nothing) where T
     d, sq, bh = size(q); skv = size(k,2)
     ctas in (1,2) || throw(ArgumentError("one CTA or a CTA pair"))
+    split in (1,2,3) || throw(ArgumentError("P is published after one to three of its four chunks"))
     d == 128 && size(k) == size(v) == (d,skv,bh) && sq % (256ctas) == 0 && skv % 128 == 0 ||
         throw(ArgumentError("d must be 128, the query length a multiple of $(256ctas) and the key length of 128"))
     tq = prepare_tma(TMATile(T,(128,128),2),q)                 # 128 query rows × d
@@ -336,10 +348,10 @@ function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};cta
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     o = o === nothing ? similar(q) : o
     scale = Float32(1/sqrt(d))
-    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas))
+    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
     blocks = ctas*min((sq÷(256ctas))*bh,sms÷ctas)
-    launch() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas);threads=512,blocks,shmem,clustersize=ctas)
+    launch() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split);threads=512,blocks,shmem,clustersize=ctas)
     kernel, launch, o
 end
