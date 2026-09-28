@@ -101,7 +101,7 @@ end
 
 function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int32,scale::Float32,::Val{Stages},::Val{CTAs}=Val(1),
                                      ::Val{Split}=Val(3),::Val{Causal}=Val(false),::Val{Dynamic}=Val(Causal),
-                                     ::Val{Emulated}=Val(())) where {Stages,CTAs,Split,Causal,Dynamic,Emulated}
+                                     ::Val{Emulated}=Val(()),timeline=nothing) where {Stages,CTAs,Split,Causal,Dynamic,Emulated}
     qk = Tcgen05Atom((128CTAs,128,16),BFloat16)             # S = Q Kᵀ: 128 rows per CTA × 128 keys
     pv = Tcgen05Atom((128CTAs,128,16),BFloat16)             # O += P V: 128 rows per CTA × d
     qbytes, kvbytes = transfer_bytes(tq), transfer_bytes(tk)  # a Q tile; this CTA's share of a K or V block
@@ -216,6 +216,15 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
     # Named barriers 1-8 pair softmax warp (tile i, band b) with correction warp b.
     @inline handoff(i) = Int32(1)+Int32(4)*i+warp%Int32(4)
     rows = distribute((32,32),32;vector=32,axis=2)          # TMEM transfers: lane t holds row t, 32 columns
+    # With a `Timeline`, each role's first lane records its steps (recorder =
+    # warp): a softmax warp at slots 6k.. of its kth block, events 1 waiting
+    # for S, 2 S ready, 3 S read, 4 P published but the last chunk, 5 all,
+    # 6 summed; a correction warp at 3s.. of its sth step, 10+i waiting for
+    # tile i's O, 12+i the factor, 14+i O released; the MMA thread at
+    # 8k+4i.. of tile i's kth P V, 20+i waiting for P, 22+i the first part
+    # issued, 24+i the rest, 26+i the next S issued; the load thread at 2x..
+    # of stage fill x, 30 waiting for the stage, 31 free.
+    @inline mark(slot,event) = (timeline === nothing || (lane == Int32(0) && record!(timeline,warp,slot,event)); nothing)
     if warp < Int32(8)
         acquire_registers(Val(192))
         i = warp ÷ Int32(4)
@@ -228,7 +237,9 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
             _, q0 = item(t)
             nb = tile_count(q0,i)
             for j in Int32(0):nb-Int32(1)
+                mark(6k,1)
                 wait(sfull(i),k&Int32(1))
+                mark(6k+Int32(1),2)
                 fence_after_thread_sync()
                 # The row in four loads and one wait.
                 pending = @inbounds (load_async(rows,window(scores(i),(band,Int32(0)),(32,32))),
@@ -236,6 +247,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                                      load_async(rows,window(scores(i),(band,Int32(64)),(32,32))),
                                      load_async(rows,window(scores(i),(band,Int32(96)),(32,32))))
                 s = (wait_load(pending[1]),wait_load(pending[2]),wait_load(pending[3]),wait_load(pending[4]))
+                mark(6k+Int32(2),3)
                 if Causal && j >= count(q0)-Int32(2)        # keys past this row's diagonal do not count
                     r = q0+Int32(128)*i+row
                     key = Int32(128)*j
@@ -262,6 +274,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                 fence_before_thread_sync()
                 token = ptx"mbarrier.arrive.shared.b64"(pready(i).ptr)
                 CTAs == 1 || release_to_mma(pready(i),paired(i))
+                mark(6k+Int32(3),4)
                 basis = _after(token,m)
                 rest = _rest(s,c2,basis,Val(Split),Val(Emulated))
                 _store_chunks!(probabilities(i),band,rest,Val(Split))
@@ -269,9 +282,11 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                 fence_before_thread_sync()
                 token = ptx"mbarrier.arrive.shared.b64"(plast(i).ptr)
                 CTAs == 1 || release_to_mma(plast(i),pairlast(i))
+                mark(6k+Int32(4),5)
                 zero = _after(token,0f0)
                 chunks = (p...,rest...)
                 l += (_chainsum(zero,chunks[1])+_chainsum(zero,chunks[2]))+(_chainsum(zero,chunks[3])+_chainsum(zero,chunks[4]))
+                mark(6k+Int32(5),6)
                 k += Int32(1)
             end
             unsafe_store!(sums,l,row+Int32(128)*(i+Int32(2)*(n&Int32(1)))+Int32(1),Val(4))
@@ -291,13 +306,16 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                 for i in Int32(0):Int32(1)
                     j < tile_count(q0,i) || continue
                     k = i == Int32(0) ? k0 : k1
+                    step = Int32(3)*(k0+k1)
                     if j > Int32(0)
                         # O includes the previous block. (At an item's first
                         # block there is nothing to wait for: the tile may be
                         # a block ahead while the other's epilogue runs, and
                         # a wait two phases behind would not end.)
+                        mark(step,10+i)
                         wait(sfull(i),k&Int32(1))
                         ptx"bar.sync"(handoff(i)%UInt32,UInt32(64))
+                        mark(step+Int32(1),12+i)
                         factor = unsafe_load(factors,row+Int32(128)*i+Int32(1),Val(4))
                         if vote_any_sync(0xffffffff,factor < 1f0)
                             fence_after_thread_sync()
@@ -313,6 +331,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                     # At an item's first block O is free once the previous
                     # item's epilogue has read it, which released it then.
                     (j > Int32(0) || n == Int32(0)) && release_to_mma(pready(i),paired(i))
+                    mark(step+Int32(2),14+i)
                     i == Int32(0) ? (k0 += Int32(1)) : (k1 += Int32(1))
                 end
             end
@@ -340,12 +359,15 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
             @inline stage_of(s) = kvstage(s%Int32(Stages))
             @inline release(s) = commit(kvempty(s%Int32(Stages)))
             @inline function pv_step(i,vb,k,accumulate)
+                mark(Int32(8)*k+Int32(4i),20+i)
                 wait(CTAs == 1 ? pready(i) : paired(i),k&Int32(1))
                 fence_after_thread_sync()
                 @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(0)),(128,32Split)),vb,32Split,accumulate)
+                mark(Int32(8)*k+Int32(4i+1),22+i)
                 wait(CTAs == 1 ? plast(i) : pairlast(i),k&Int32(1))
                 fence_after_thread_sync()
                 @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(32Split)),(128,128-32Split)),operand(vb,(Int32(32Split),Int32(0))),128-32Split,true)
+                mark(Int32(8)*k+Int32(4i+2),24+i)
             end
             t = first_tile
             while true
@@ -380,6 +402,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                             i == 0 && ready(c+Int32(1))
                             @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
                             commit(sfull(i))
+                            mark(Int32(8)*(i == 0 ? k0 : k1)+Int32(4i+3),26+i)
                         end
                         i == 0 ? (k0 += Int32(1)) : (k1 += Int32(1))
                     end
@@ -405,7 +428,9 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
             # Stage `x` of the ring: returns the next.
             @inline function load(x,binding,origin)
                 r = x%Int32(Stages)
+                mark(Int32(2)*x,30)
                 x >= Int32(Stages) && wait(kvempty(r),((x÷Int32(Stages))-Int32(1))&Int32(1))
+                mark(Int32(2)*x+Int32(1),31)
                 rank == Int32(0) && arrive!(kvfull(r),CTAs*kvbytes)
                 @inbounds tma_load!(shared_tile(binding,kvstage(r)),binding,origin,kvfull(r);cta=completion())
                 x+Int32(1)
@@ -450,9 +475,11 @@ O = softmax(Q Kᵀ / √d) V for BF16 `q`, `k`, `v` (d×seq×(batch·heads)), d 
 128, the key length a multiple of 128 and the query length of 256 per CTA:
 `ctas = 2` makes CTA pairs compute 512 rows with 256-row products. `stages`
 counts ring stages of a K or V block's share (4 by default for one CTA, 8
-for pairs, whose stages are half as large).
+for pairs, whose stages are half as large). With a `timeline`
+(`Timeline(CUDACore.zeros(UInt64,capacity,14,blocks))`), each warp role
+records its steps (see the kernel for the events).
 """
-function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,causal::Bool=false,dynamic::Bool=causal,emulate::Tuple=(),o=nothing) where T
+function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,causal::Bool=false,dynamic::Bool=causal,emulate::Tuple=(),o=nothing,timeline=nothing) where T
     d, sq, bh = size(q); skv = size(k,2)
     ctas in (1,2) || throw(ArgumentError("one CTA or a CTA pair"))
     split in (1,2,3) || throw(ArgumentError("P is published after one to three of its four chunks"))
@@ -468,10 +495,10 @@ function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};cta
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     o = o === nothing ? similar(q) : o
     scale = Float32(1/sqrt(d))
-    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate))
+    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline)
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
     blocks = ctas*min((sq÷(256ctas))*bh,sms÷ctas)
-    launch() = GC.@preserve tq tk tv (dynamic && fill!(counter,Int32(0)); kernel(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate);threads=512,blocks,shmem,clustersize=ctas))
+    launch() = GC.@preserve tq tk tv (dynamic && fill!(counter,Int32(0)); kernel(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline;threads=512,blocks,shmem,clustersize=ctas))
     kernel, launch, o
 end

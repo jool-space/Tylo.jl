@@ -17,7 +17,7 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
        reinterpret_tile, load_async, wait_load, store_async!, wait_stores,
        SoftmaxState, softmax_update, softmax_merge, softmax_normalize,
        Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU,
-       machine_code, @machine_code, audit, tune, unchecked_div, unchecked_rem
+       machine_code, @machine_code, audit, tune, Timeline, record!, events, spans, unchecked_div, unchecked_rem
 
 # Inspection, validation and less common operations are public, used qualified.
 @static if VERSION >= v"1.11.0-DEV.469"
@@ -52,6 +52,7 @@ include("tcgen05.jl")
 include("derive.jl")
 include("machine.jl")
 include("tune.jl")
+include("timeline.jl")
 
 # GPU implementations load with PTX.jl. CPU layout/fragment operations have
 # no dependency on a CUDA compiler, device, or instruction implementation.

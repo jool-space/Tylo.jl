@@ -2,7 +2,7 @@
 CurrentModule = Tylo
 ```
 
-# Machine code and tuning
+# Machine code, tuning and timelines
 
 Tylo's operations promise particular instructions: a vector of the widest
 width the layouts allow, one `ldmatrix` per block group, WGMMA that runs
@@ -126,3 +126,31 @@ Tuning: 48 of 48 candidates timed
 
 On a GB10 at 2048³ the fastest of 48 configurations is 18% faster than the
 example's default, `(64, 64, 32)` with 2×2 warps.
+
+## Timelines
+
+The machine code says what a kernel does; a [`Timeline`](@ref) says when.
+In a warp-specialized kernel the roles wait on each other through barriers,
+and which of them waits, how long and for what decides its speed more than
+any single instruction. [`record!`](@ref) stores the SM's clock with an
+event number from one thread; the host reads the records back as
+[`events`](@ref) and measures between them with [`spans`](@ref):
+
+```julia
+function kernel!(..., timeline)
+    ...
+    lane == 0 && record!(timeline, warp, 2step, 1)      # waiting for S
+    wait(sfull, phase)
+    lane == 0 && record!(timeline, warp, 2step+1, 2)    # S is ready
+    ...
+end
+
+timeline = Timeline(CUDACore.zeros(UInt64, 1024, 16, blocks))
+@cuda kernel!(..., timeline); synchronize()
+median(spans(timeline, 1 => 2))                          # cycles spent waiting for S
+```
+
+A record costs a clock read and a global store, so a kernel takes the
+timeline as an argument that is `nothing` when it does not record: the
+calls fold away, and the machine code is that of the plain kernel.
+`examples/blackwell_attention` records every role's steps this way.

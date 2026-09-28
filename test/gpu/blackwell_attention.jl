@@ -11,7 +11,7 @@ include("../../examples/blackwell_attention/kernel.jl")
         tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
         tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),1)),PTX.TMADescriptorPtr,3}
         tv = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),2)),PTX.TMADescriptorPtr,3}
-        tt = Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tv,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4ctas},Val{ctas},Val{3},Val{false},Val{false},Val{()}}
+        tt = Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tv,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4ctas},Val{ctas},Val{3},Val{false},Val{false},Val{()},Nothing}
         code = Tylo.machine_code(blackwell_attention_kernel!,tt;arch,threads=512,maxregs=128)
         save_code("blackwell-attention-ctas$ctas",code)
         # No spills anywhere: the softmax warps hold a row at 192 registers,
@@ -34,7 +34,7 @@ include("../../examples/blackwell_attention/kernel.jl")
     # out dynamically.
     let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3},
         tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4},Val{1},Val{3},Val{true},Val{true},Val{()}};arch,threads=512,maxregs=128)
+        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4},Val{1},Val{3},Val{true},Val{true},Val{()},Nothing};arch,threads=512,maxregs=128)
         save_code("blackwell-attention-causal",code)
         @test isempty(audit(code))
         @test count("USETMAXREG",Tylo.kernel_sass(code)) == 3
@@ -43,7 +43,7 @@ include("../../examples/blackwell_attention/kernel.jl")
     # says so in a warning: the audit reports it.
     tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
     tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{()}};arch,threads=512)
+    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{CuDeviceArray{BFloat16,3,1},tq,tk,tq,CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{()},Nothing};arch,threads=512)
     @test :ptxas in getfield.(audit(unstated),:kind)
 end
 
