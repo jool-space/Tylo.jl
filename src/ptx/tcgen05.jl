@@ -109,6 +109,13 @@ accumulator `d`, from one thread. `a` is a [`Tcgen05Operand`](@ref) or a
 [`Tcgen05Operand`](@ref). With `accumulate=false` the first instruction
 overwrites `d`. Nothing waits: order TMEM and shared-memory readiness with
 fences and barriers, and observe completion through [`commit_mma`](@ref).
+
+Issue from [`elect_one`](@ref) in a warp that runs the whole MMA role, not
+from a lone thread: ptxas then keeps the descriptors in uniform registers.
+(In the Blackwell attention example, issue from one thread cost 3-13%.)
+The issuing thread proceeds while the tensor cores accept instructions,
+a few ahead of those executing; commits take their place in the same
+queue.
 """
 Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::TmemTile,a,b,k::Integer,accumulate::Bool) =
     _mma(atom,d,a,b,Val(Int(k)),accumulate)

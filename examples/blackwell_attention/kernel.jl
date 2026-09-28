@@ -15,12 +15,13 @@ using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_bef
 #                    over them in BF16;
 #   warps 8-11       correction: rescales O in TMEM when a row's maximum has
 #                    grown, and finally normalizes and stores O;
-#   warp 12          MMA: one thread issues S = Q Kᵀ and O += P V;
+#   warp 12          MMA: issues S = Q Kᵀ and O += P V from one elected
+#                    lane;
 #   warp 13          loads: one thread streams Q, then K and V blocks of 128
 #                    keys through a ring of shared stages.
 #
 # TMEM holds S of both tiles (columns 0-255, P over the second half of each)
-# and O of both (256-511). Per tile, the MMA thread issues O += P V for the
+# and O of both (256-511). Per tile, the MMA warp issues O += P V for the
 # previous block, then S = Q Kᵀ for this one into the same columns (the
 # tensor pipe runs in order), and commits `sfull`: once S is ready and O
 # final up to the previous block. The softmax takes the new row maxima,
@@ -32,11 +33,11 @@ using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_bef
 #
 # With `CTAs = 2`, the two CTAs of a cluster compute 512 rows together, each
 # its own two tiles, and every product is one CTA-pair instruction (M = 256)
-# that the even CTA's MMA thread issues: each CTA holds half of a K block (64
+# that the even CTA's MMA warp issues: each CTA holds half of a K block (64
 # keys) and half of a V block (64 of d), so a stage is half as large and the
 # ring twice as deep. Both CTAs' loads complete on the even CTA's barriers;
 # commits arrive in both; the softmax and correction warps of both CTAs
-# release P and O to the MMA thread through the even CTA's `paired` and
+# release P and O to the MMA warp through the even CTA's `paired` and
 # `pairlast` barriers.
 # A thread's row of a fragment in the row-per-lane ownership.
 @inline _rowmax(x) = maximum(x;dims=2).data[1]
@@ -159,7 +160,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
     tmem = unsafe_load(slot)
     rank = CTAs == 1 ? Int32(0) : cluster_rank()
     # Commits arrive in both CTAs of a pair; loads complete on the even CTA's
-    # barriers; P and O are released to the even CTA's MMA thread.
+    # barriers; P and O are released to the even CTA's MMA warp.
     @inline commit(b) = CTAs == 1 ? commit_mma(b) : commit_mma(qk,b,UInt16(0b11))
     @inline completion() = CTAs == 1 ? nothing : 0
     @inline function release_to_mma(local_barrier,pair_barrier)
@@ -220,7 +221,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
     # warp): a softmax warp at slots 6k.. of its kth block, events 1 waiting
     # for S, 2 S ready, 3 S read, 4 P published but the last chunk, 5 all,
     # 6 summed; a correction warp at 3s.. of its sth step, 10+i waiting for
-    # tile i's O, 12+i the factor, 14+i O released; the MMA thread at
+    # tile i's O, 12+i the factor, 14+i O released; the MMA warp at
     # 8k+4i.. of tile i's kth P V, 20+i waiting for P, 22+i the first part
     # issued, 24+i the rest, 26+i the next S issued; the load thread at 2x..
     # of stage fill x, 30 waiting for the stage, 31 free.
@@ -353,20 +354,23 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
         end
     else
         release_registers(Val(64))
-        if tid == Int32(384) && rank == Int32(0)            # warp 12: the MMA thread (of the pair)
+        if warp == Int32(12) && rank == Int32(0)            # warp 12: the MMA warp (of the pair)
+            # The whole warp runs the role, so that its counters and
+            # descriptors are warp-uniform, and one lane issues.
+            leader = elect_one()
             c = Int32(0); k0 = Int32(0); k1 = Int32(0); n = Int32(0)   # stages, each tile's blocks, items
             @inline ready(s) = (wait(kvfull(s%Int32(Stages)),(s÷Int32(Stages))&Int32(1)); fence_after_thread_sync())
             @inline stage_of(s) = kvstage(s%Int32(Stages))
-            @inline release(s) = commit(kvempty(s%Int32(Stages)))
+            @inline release(s) = (leader && commit(kvempty(s%Int32(Stages))); nothing)
             @inline function pv_step(i,vb,k,accumulate)
                 mark(Int32(8)*k+Int32(4i),20+i)
                 wait(CTAs == 1 ? pready(i) : paired(i),k&Int32(1))
                 fence_after_thread_sync()
-                @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(0)),(128,32Split)),vb,32Split,accumulate)
+                leader && @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(0)),(128,32Split)),vb,32Split,accumulate)
                 mark(Int32(8)*k+Int32(4i+1),22+i)
                 wait(CTAs == 1 ? plast(i) : pairlast(i),k&Int32(1))
                 fence_after_thread_sync()
-                @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(32Split)),(128,128-32Split)),operand(vb,(Int32(32Split),Int32(0))),128-32Split,true)
+                leader && @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(32Split)),(128,128-32Split)),operand(vb,(Int32(32Split),Int32(0))),128-32Split,true)
                 mark(Int32(8)*k+Int32(4i+2),24+i)
             end
             t = first_tile
@@ -381,8 +385,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                 ready(c)
                 kb = @inbounds operand(qk,OperandB(),shared_tile(tk,stage_of(c)))
                 PTX.Utils.@unroll for i in 0:1
-                    @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
-                    commit(sfull(i))
+                    leader && @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
+                    leader && commit(sfull(i))
                 end
                 release(c)
                 c += Int32(1)
@@ -396,12 +400,12 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                     PTX.Utils.@unroll for i in 0:1
                         pv_step(i,vb,i == 0 ? k0 : k1,j > Int32(1))
                         if i == 0 && Causal && j == blocks_t-Int32(1)
-                            commit(ofull(0))
+                            leader && commit(ofull(0))
                             ready(c+Int32(1))               # the second tile's Q Kᵀ still reads K
                         else
                             i == 0 && ready(c+Int32(1))
-                            @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
-                            commit(sfull(i))
+                            leader && @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
+                            leader && commit(sfull(i))
                             mark(Int32(8)*(i == 0 ? k0 : k1)+Int32(4i+3),26+i)
                         end
                         i == 0 ? (k0 += Int32(1)) : (k1 += Int32(1))
@@ -409,13 +413,13 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                     release(c); release(c+Int32(1))
                     c += Int32(2)
                 end
-                commit(qempty(0)); commit(qempty(1))
+                leader && commit(qempty(0)); leader && commit(qempty(1))
                 ready(c)
                 vb = @inbounds operand(pv,OperandB(),shared_tile(tv,stage_of(c)))
                 PTX.Utils.@unroll for i in 0:1
                     if !(i == 0 && Causal)                  # done already
                         pv_step(i,vb,i == 0 ? k0 : k1,blocks_t > Int32(1))
-                        commit(ofull(i))
+                        leader && commit(ofull(i))
                         i == 0 ? (k0 += Int32(1)) : (k1 += Int32(1))
                     end
                 end

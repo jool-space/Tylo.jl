@@ -23,6 +23,7 @@ function spinning!(timeline)
         while CUDACore.clock(UInt64)-start < UInt64(2000)*UInt64(warp+1) end
         tid % Int32(32) == Int32(0) && record!(timeline,warp,2step+Int32(1),2)
     end
+    tid == Int32(0) && record!(timeline,4,0,9)                 # no such recorder: dropped
     nothing
 end
 
@@ -32,7 +33,7 @@ end
     synchronize()
     list = events(timeline)
     @test length(list) == 2*4*16                            # 8 of 10 steps fit
-    @test all(e -> e.event == (iseven(e.slot) ? 1 : 2),list)
+    @test all(e -> e.event == (iseven(e.slot) ? 1 : 2),list)   # and none of recorder 4
     for w in 0:3
         s = spans(timeline,1 => 2;recorders=(w,))
         @test length(s) == 2*8 && all(x -> 2000(w+1) <= x < 2000(w+1)+2000,s)

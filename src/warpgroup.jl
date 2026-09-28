@@ -42,3 +42,17 @@ ptxas, which then treats warpgroup collectives (WGMMA, `setmaxnreg`) in it
 as divergent; branch on `warp_uniform(thread ÷ 128)` instead.
 """
 function warp_uniform end
+
+"""
+    elect_one() -> Bool
+
+True in one lane of the warp, the same one each time; every lane of the
+warp must call it (`elect.sync`). A role that issues single-thread
+instructions, such as tcgen05's [`mma`](@ref) and [`commit_mma`](@ref),
+runs on the whole warp and issues from `elect_one()`: its loop counters and
+descriptors are then warp-uniform, and ptxas keeps them in uniform
+registers. Run on one thread (`thread == k`), the same role is divergent
+code, and ptxas moves each descriptor into uniform registers anew, in a
+loop, at every instruction.
+"""
+function elect_one end

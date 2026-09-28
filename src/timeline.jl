@@ -32,8 +32,9 @@ Adapt.adapt_structure(to,t::Timeline) = Timeline(Adapt.adapt(to,t.records))
     record!(timeline, recorder, slot, event)
 
 In a kernel: store the SM's clock with `event` (0-255) as record `slot` of
-`recorder` in this block, both counted from 0. Slots past the timeline's
-capacity are dropped. The executing thread records; a warp records from one
+`recorder` in this block, both counted from 0. Records outside the
+timeline (a slot past its capacity, a recorder or block it has no room for)
+are dropped. The executing thread records; a warp records from one
 of its lanes. The clock read keeps its place among memory operations and
 barriers, not among pure arithmetic around it.
 """
