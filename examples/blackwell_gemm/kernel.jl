@@ -9,16 +9,16 @@ include(joinpath(@__DIR__,"..","hopper_gemm","kernel.jl"))     # tile_order
 # matrix), in BF16 with FP32 accumulation.
 #
 # Each CTA walks tiles with three roles. One thread of warp 0 loads A and B
-# stages with TMA. One thread of warp 1 issues the tile's tcgen05 MMAs into a
-# TMEM accumulator and hands each stage back with `commit_mma`, which arrives
-# once the MMAs reading it have completed. The four warps of warpgroup 1 read
+# stages with TMA. Warp 1 issues the tile's tcgen05 MMAs, from one lane, into
+# a TMEM accumulator and hands each stage back with `commit_mma`, which
+# arrives once the MMAs reading it have completed. The four warps of warpgroup 1 read
 # the finished accumulator out of TMEM, lane band by lane band, and store it.
 # The accumulator is double-buffered in TMEM (2N of the 512 columns), so the
 # epilogue of one tile overlaps the MMAs of the next.
 #
 # With a CTA-pair atom (M = 256), the two CTAs of a cluster compute a 256×N
 # tile together: each loads its 128 rows of A and half of the tile's columns
-# of B, and the even CTA's MMA thread multiplies both halves at once. Its
+# of B, and the even CTA's MMA warp multiplies both halves at once. Its
 # `full` barriers count the bytes of both CTAs' loads (`tma_load!` with
 # `cta = 0`); its commits arrive in both CTAs, releasing each one's stages and
 # starting each one's epilogue; both epilogues release the accumulator to it.
@@ -88,7 +88,9 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,::Val{Stages
             end
         end
     elseif warp == Int32(1)
-        if tid == Int32(32) && rank == Int32(0)
+        if rank == Int32(0)
+            # The whole warp runs the role, so that its counters and
+            # descriptors are warp-uniform; one lane issues.
             i = Int32(0)
             j = Int32(0)                                    # tiles issued by this CTA
             t = first_tile

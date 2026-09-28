@@ -165,7 +165,9 @@ A [`Tcgen05Atom`](@ref) is one thread's `tcgen05.mma`: A and B are shared
 descriptors from `operand` (K-major or MN-major), or A a TMEM tile, and the
 accumulator is a [`TmemTile`](@ref), `accumulator(atom, address)`.
 `mma(atom, d, a, b, K, accumulate)` issues the K steps and
-`commit_mma(atom, barrier)` arrives when they finish. `tmem_allocate!`,
+`commit_mma(atom, barrier)` arrives when they finish. A warp that runs the
+MMA role calls both from all its lanes: one lane, elected in each
+instruction, issues, and ptxas issues in line from uniform registers. `tmem_allocate!`,
 `tmem_deallocate!` and `tmem_relinquish_permit` manage the columns. The
 hardware swizzles by address bits, so swizzled operands start on
 1024-byte boundaries; dynamic shared memory that follows static shared
@@ -173,7 +175,7 @@ variables is not aligned that far on its own.
 
 An atom with M = 256 is a CTA pair's instruction (`.cta_group::2`): the two
 CTAs of a cluster whose ranks differ in the last bit each hold 128 rows of A
-and half of B's columns at the same shared addresses, one thread of the pair
+and half of B's columns at the same shared addresses, one warp of the pair
 issues the MMA, and each CTA's TMEM receives its 128 rows of the product.
 The pair's loads complete on one barrier with `tma_load!(...; cta = 0)`, and
 `commit_mma(atom, barrier, ctas)` arrives in every CTA of the mask. Every
@@ -206,7 +208,7 @@ waits on a different scope:
 | `tma_load!` | `wait(barrier, parity)` | the barrier's arrivals and transaction bytes |
 | `tma_store!` | `commit_tma_stores()`, `wait_tma_reads(n)`, `wait_tma_stores(n)` | the thread's bulk groups |
 | `mma_async` | `wait_mma(pending[, n])` | the warpgroup's WGMMA groups |
-| tcgen05 `mma` | `commit_mma(atom, barrier[, ctas])`, then `wait` | the issuing thread's MMAs |
+| tcgen05 `mma` | `commit_mma(atom, barrier[, ctas])`, then `wait` | the issuing lane's MMAs |
 | `copy_async!` | `commit_copies(barrier)`, then `wait` | the thread's cp.async copies, as one arrival |
 | `load_async` | `wait_load(pending)` | the thread's TMEM loads |
 | `store_async!` | `wait_stores()` | the thread's TMEM stores |

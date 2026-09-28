@@ -104,18 +104,23 @@ _step_expr(name,::Type{<:TmemTile},::Type,DK) = :(_step($name,Val($DK)))
     mma(atom::Tcgen05Atom, d::TmemTile, a, b, K, accumulate::Bool)
 
 Issue `K ÷ k` instructions, for a constant `K`, accumulating `a*b` over logical K into the TMEM
-accumulator `d`, from one thread. `a` is a [`Tcgen05Operand`](@ref) or a
+accumulator `d`, from one lane of the threads calling it. `a` is a [`Tcgen05Operand`](@ref) or a
 `TmemTile` of the atom's A type in the accumulator convention; `b` is a
 [`Tcgen05Operand`](@ref). With `accumulate=false` the first instruction
 overwrites `d`. Nothing waits: order TMEM and shared-memory readiness with
 fences and barriers, and observe completion through [`commit_mma`](@ref).
 
-Issue from [`elect_one`](@ref) in a warp that runs the whole MMA role, not
-from a lone thread: ptxas then keeps the descriptors in uniform registers.
-(In the Blackwell attention example, issue from one thread cost 3-13%.)
-The issuing thread proceeds while the tensor cores accept instructions,
-a few ahead of those executing; commits take their place in the same
-queue.
+Call it from every lane of a warp that runs the whole MMA role, converged:
+one lane, elected in each instruction, issues, and ptxas keeps the
+descriptors in uniform registers and the instructions in line.
+[`commit_mma`](@ref), called by the same lanes, commits from the same lane
+(`elect.sync` elects the same one of the same lanes). From a lone thread
+(`thread == k`) the role is divergent code, and ptxas moves each descriptor
+into uniform registers anew, in a loop, at every instruction (3-13% of the
+Blackwell attention example); called under a branch (`leader && mma(...)`),
+each instruction still sits in a loop over the lanes that might issue it.
+The issuing warp proceeds while the tensor cores accept instructions, a few
+ahead of those executing; commits take their place in the same queue.
 """
 Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::TmemTile,a,b,k::Integer,accumulate::Bool) =
     _mma(atom,d,a,b,Val(Int(k)),accumulate)
@@ -140,10 +145,9 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
         return :(throw(ArgumentError("B operand belongs to a different atom or role")))
     bmajor = OB.parameters[3]
     idesc = instruction_descriptor(inst;a_major=amajor,b_major=bmajor)
-    instruction = Meta.parse("ptx\"tcgen05.mma.cta_group::$(ctas(inst)).kind::$(_tcgen05_kind(eltype(inst,OperandA())))\"")
-    TA = eltype(inst,OperandA())
-    issues = [:($instruction(dstart,_k_step(a,Val($(kk*katom))),_k_step(b,Val($(kk*katom))),
-                             $idesc,$(kk == 0 ? :accumulate : true)))
+    group, kind = Val(ctas(inst)), Val(_tcgen05_kind(eltype(inst,OperandA())))
+    issues = [:(_issue_mma($group,$kind,dstart,_k_step(a,Val($(kk*katom))),_k_step(b,Val($(kk*katom))),
+                           $idesc,$(kk == 0 ? :accumulate : true)))
               for kk in 0:K÷katom-1]
     quote
         Base.@inline
@@ -153,6 +157,29 @@ Base.@constprop :aggressive Base.@propagate_inbounds mma(atom::Tcgen05Atom,d::Tm
         $(issues...)
         nothing
     end
+end
+# One instruction, from one lane of those executing: the election and the
+# guard are in the instruction's own asm. Called by a converged warp, ptxas
+# then sees exactly one issuing lane and issues in line with the warp's
+# uniform registers; guarded by a branch instead (`leader && mma(...)`), it
+# wraps every instruction in a loop over the lanes that might issue.
+# `elect.sync` elects deterministically, so the lane that commits is the
+# lane that issued.
+const _ELECTED = "\t.reg .pred e;\n\t.reg .b32 m;\n\tactivemask.b32 m;\n\telect.sync _|e, m;\n\t"
+for group in (1,2), kind in (:f16,:tf32,:f8f6f4,:i8), (A,constraint,operand) in ((UInt64,"l","\$1"),(UInt32,"r","[\$1]"))
+    asm = "{\n" * _ELECTED * ".reg .pred p;\n\tsetp.ne.b32 p, \$4, 0;\n\t" *
+          "@e tcgen05.mma.cta_group::$group.kind::$kind [\$0], $operand, \$2, \$3, p;\n\t}"
+    ir = PTX.convergent_asm_ir(asm,"r,$constraint,l,r,r,~{memory}",Nothing,[UInt32,A,UInt64,UInt32,UInt32])
+    @eval @inline _issue_mma(::Val{$group},::Val{$(QuoteNode(kind))},d::UInt32,a::$A,b::UInt64,idesc::UInt32,accumulate::Bool) =
+        Base.llvmcall(($ir,"entry"),Nothing,Tuple{UInt32,$A,UInt64,UInt32,UInt32},d,a,b,idesc,UInt32(accumulate))
+end
+for group in (1,2)
+    one = PTX.convergent_asm_ir("{\n" * _ELECTED * "@e tcgen05.commit.cta_group::$group.mbarrier::arrive::one.shared::cluster.b64 [\$0];\n\t}",
+                                "r,~{memory}",Nothing,[UInt32])
+    multicast = PTX.convergent_asm_ir("{\n" * _ELECTED * "@e tcgen05.commit.cta_group::$group.mbarrier::arrive::one.multicast::cluster.shared::cluster.b64 [\$0], \$1;\n\t}",
+                                      "r,h,~{memory}",Nothing,[UInt32,UInt16])
+    @eval @inline _commit(::Val{$group},address::UInt32) = Base.llvmcall(($one,"entry"),Nothing,Tuple{UInt32},address)
+    @eval @inline _commit(::Val{$group},address::UInt32,mask::UInt16) = Base.llvmcall(($multicast,"entry"),Nothing,Tuple{UInt32,UInt16},address,mask)
 end
 # Each call derives its K steps' descriptors and TMEM addresses from bases
 # the compiler must take as produced at the call. Otherwise LLVM hoists every
@@ -168,15 +195,9 @@ end
     Tcgen05Operand{P,Role,Major,T,L}(_opaque(o.base),_opaque(o.at),o.layout,o.origin)
 @inline _at_issue(t::TmemTile) = TmemTile(eltype(t),_opaque(t.address),t.layout)
 
-@inline commit_mma(barrier::Barrier) =
-    ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cta.b64"(_smem_address(barrier.ptr))
-@inline commit_mma(a::Tcgen05Atom,barrier::Barrier) =
-    ctas(a) == 1 ? commit_mma(barrier) :
-    ptx"tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.b64"(_smem_address(barrier.ptr))
-@inline commit_mma(a::Tcgen05Atom,barrier::Barrier,mask::UInt16) =
-    ctas(a) == 1 ?
-    ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.multicast::cluster.shared::cluster.b64"(_smem_address(barrier.ptr),mask) :
-    ptx"tcgen05.commit.cta_group::2.mbarrier::arrive::one.multicast::cluster.shared::cluster.b64"(_smem_address(barrier.ptr),mask)
+@inline commit_mma(barrier::Barrier) = _commit(Val(1),_smem_address(barrier.ptr))
+@inline commit_mma(a::Tcgen05Atom,barrier::Barrier) = _commit(Val(ctas(a)),_smem_address(barrier.ptr))
+@inline commit_mma(a::Tcgen05Atom,barrier::Barrier,mask::UInt16) = _commit(Val(ctas(a)),_smem_address(barrier.ptr),mask)
 
 @inline function _check_tmem_columns(c)
     ispow2(c) && 32 <= c <= 512 || throw(ArgumentError("TMEM allocations are powers of two from 32 to 512 columns"))

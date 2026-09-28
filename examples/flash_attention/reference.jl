@@ -184,7 +184,7 @@ const FAB_SMEM_BYTES = FAB_SMEM_TMEM + 8
 
 # TMEM columns: S/P at stage*128, O at 256 + stage*128.
 
-const FAB_MMA_TID  = UInt32(384)   # warp 12 lane 0
+const FAB_MMA_TID  = UInt32(384)   # warp 12
 const FAB_LOAD_TID = UInt32(448)   # warp 14 lane 0
 
 # ── compile-time config ─────────────────────────────────────────────────
@@ -295,9 +295,21 @@ end
     return row + UInt32(FAB_BN), ph
 end
 
+# The MMA warp issues and commits from one elected lane: `elect.sync` in
+# each instruction's own asm, where ptxas sees the one issuing lane (the same
+# for every instruction) and issues in line.
+for (name, A, c, a) in ((:fab_mma_ss, UInt64, "l", "\$1"), (:fab_mma_ts, UInt32, "r", "[\$1]"))
+    ir = PTX.convergent_asm_ir("{\n\t.reg .pred e, p;\n\telect.sync _|e, -1;\n\tsetp.ne.b32 p, \$4, 0;\n\t" *
+                               "@e tcgen05.mma.cta_group::1.kind::f16 [\$0], $a, \$2, \$3, p;\n\t}",
+                               "r,$c,l,r,r,~{memory}", Nothing, [UInt32, A, UInt64, UInt32, UInt32])
+    @eval @inline $name(d::UInt32, a::$A, b::UInt64, idesc::UInt32, acc::Bool) =
+        Base.llvmcall(($ir, "entry"), Nothing, Tuple{UInt32, $A, UInt64, UInt32, UInt32}, d, a, b, idesc, UInt32(acc))
+end
+const FAB_COMMIT_IR = PTX.convergent_asm_ir("{\n\t.reg .pred e;\n\telect.sync _|e, -1;\n\t" *
+    "@e tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [\$0];\n\t}",
+    "r,~{memory}", Nothing, [UInt32])
 @inline fab_commit(mbar_ptr) =
-    ptx"tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cta.b64"(
-        smem_addr_u32(mbar_ptr))
+    Base.llvmcall((FAB_COMMIT_IR, "entry"), Nothing, Tuple{UInt32}, smem_addr_u32(mbar_ptr))
 
 # Descriptor offset (16B units) for k-atom kk of a K-major 128-col bf16
 # tile: k-atoms 0-3 live in stripe 0 (+32 B each), 4-7 in stripe 1 (+16 KiB).
@@ -330,10 +342,10 @@ end
 @inline function fab_qk_mma(::Val{STAGE}, ::Val{KIDX}, tmem::UInt32, ops,
                              bars::BarrierSet) where {STAGE, KIDX}
     d = tmem + UInt32(STAGE * 128)
-    for kk in 0:7
+    @unroll for kk in 0:7              # (the issue is convergent asm: LLVM leaves such loops rolled)
         da = ops.dq0 + UInt64(STAGE * FAB_SLOT_UNITS) + fab_kmaj_off(kk)
         db = ops.dk0 + UInt64(KIDX * 2 * FAB_SLOT_UNITS) + fab_kmaj_off(kk)
-        ptx"tcgen05.mma.cta_group::1.kind::f16"(d, da, db, ops.idesc_qk, kk != 0)
+        fab_mma_ss(d, da, db, ops.idesc_qk, kk != 0)
     end
     fab_commit(bars.s_full[STAGE])
 end
@@ -353,22 +365,24 @@ end
     d = tmem + UInt32(256 + STAGE * 128)
     NG = SPLITP ? 2 : 4        # publish groups per tile (halves / quarters)
     W  = 8 ÷ NG                # k-atoms per group
-    for g in 0:(NG - 1)
-        # the group's barriers share ph_pq: flip once per tile, at return
-        fab_wait(dbg, bars.p_q[STAGE, g], ph_pq, Val(5))
-        if g == 0
-            ph_or = fab_wait(dbg, bars.o_resc[STAGE, PAR], ph_or, Val(6))
+    # (Unrolled by hand: the issue is convergent asm, whose loops LLVM
+    # leaves rolled.) A group's first k-atom waits for its publish.
+    @unroll for kk in 0:7
+        if kk % W == 0
+            g = kk ÷ W
+            # the group's barriers share ph_pq: flip once per tile, at return
+            fab_wait(dbg, bars.p_q[STAGE, g], ph_pq, Val(5))
+            if g == 0
+                ph_or = fab_wait(dbg, bars.o_resc[STAGE, PAR], ph_or, Val(6))
+            end
+            ptx"tcgen05.fence::after_thread_sync"()
         end
-        ptx"tcgen05.fence::after_thread_sync"()
-        for kk in (W * g):(W * g + W - 1)
-            # `% UInt32`: the unchecked conversion is exact by construction
-            # (kk ∈ 0:7); the checked UInt32() truncation would leave a
-            # live InexactError branch in the loop-carried form.
-            a = tmem + ((STAGE * 128 + kk * 8) % UInt32)
-            db = ops.dv0 + ((VIDX * 2 * FAB_SLOT_UNITS + kk * 128) % UInt64)
-            ptx"tcgen05.mma.cta_group::1.kind::f16"(d, a, db, ops.idesc_pv,
-                                                    !(first_accum & (kk == 0)))
-        end
+        # `% UInt32`: the unchecked conversion is exact by construction
+        # (kk ∈ 0:7); the checked UInt32() truncation would leave a
+        # live InexactError branch in the loop-carried form.
+        a = tmem + ((STAGE * 128 + kk * 8) % UInt32)
+        db = ops.dv0 + ((VIDX * 2 * FAB_SLOT_UNITS + kk * 128) % UInt64)
+        fab_mma_ts(d, a, db, ops.idesc_pv, !(first_accum & (kk == 0)))
     end
     # deferred-rescale handshake: correction may only touch O after this
     # tile's PV has fully accumulated
@@ -750,9 +764,9 @@ function fab_kernel!(
     end
 
     # =====================================================================
-    # MMA dispatch warp (single thread)
+    # MMA dispatch warp (the whole warp; one lane issues)
     # =====================================================================
-    if tid == FAB_MMA_TID
+    if tid >> UInt32(5) == FAB_MMA_TID >> UInt32(5)
         ops = fab_mma_operands(q_ptr, kv_ptr)
 
         sp = Val(CFG.splitp)

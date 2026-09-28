@@ -129,10 +129,11 @@ Base.size(o::Tcgen05Operand) = size(o.layout)
     commit_mma([atom,] barrier::Barrier[, ctas::UInt16])
 
 Arrive on `barrier` once all prior `tcgen05.mma` instructions issued by
-this thread have completed: one of the phase's expected arrivals. Single
-thread; no wait is implied. With a mask of cluster ranks `ctas`, arrive on
-the barrier at the same address in each of those CTAs. Without an atom,
-the instructions are single-CTA ones.
+the calling thread, or warp, have completed: one of the phase's expected
+arrivals. As with [`mma`](@ref), one lane of those calling issues, the one
+that issued the MMAs; no wait is implied. With a mask of cluster ranks
+`ctas`, arrive on the barrier at the same address in each of those CTAs.
+Without an atom, the instructions are single-CTA ones.
 """
 function commit_mma end
 """

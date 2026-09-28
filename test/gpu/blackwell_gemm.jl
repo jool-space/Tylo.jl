@@ -14,6 +14,10 @@ include("../../examples/blackwell_gemm/kernel.jl")
         code = compile_kernel(blackwell_gemm_kernel!,tt;arch=CUDACore.SMVersion(10,0,:arch),threads=256)
         save_code("blackwell-gemm-ctas$ctas-n$n-s$stages",code)
         @test isempty(audit(code))
+        # The MMA warp issues in line: no MMA sits in a loop over the lanes
+        # that might issue it.
+        sass = split(Tylo.kernel_sass(code),'\n')
+        @test !any(i -> occursin("UTCHMMA",sass[i]) && any(l -> occursin("BRA.U.ANY",l),sass[i+1:min(i+4,end)]),eachindex(sass))
         body = entry_body(code.ptx)
         # One stage is four MMAs, every tcgen05 instruction in one CTA group.
         @test count("tcgen05.mma.cta_group::$ctas.kind::f16",body) == 4
