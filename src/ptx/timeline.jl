@@ -1,11 +1,20 @@
 # The clock read is volatile asm with a memory clobber: it stays among the
 # memory operations and barriers around it, and repeated reads stay apart.
-@inline function record!(t::Timeline,recorder::Integer,slot::Integer,event::Integer)
+@inline function recorder(t::Timeline,r::Integer)
     records = t.records
+    capacity, recorders, blocks = size(records)
     block = ptx"mov.u32"(PTX.@sreg_str("%ctaid.x")) % Int
-    if 0 <= slot < size(records,1) && 0 <= recorder < size(records,2) && block < size(records,3)
+    inside = 0 <= r < recorders && block < blocks
+    Recorder(pointer(records)+8capacity*(Int(r)+recorders*block),inside ? capacity % Int32 : Int32(0))
+end
+@inline recorder(::Nothing,r::Integer) = nothing
+
+@inline function record!(r::Recorder,slot::Integer,event::Integer)
+    if slot % UInt32 < r.capacity % UInt32
         clock = ptx"mov.u64"(PTX.@sreg_str("%clock64"))
-        @inbounds records[Int(slot)+1,Int(recorder)+1,block+1] = (clock << 8) | (event % UInt64 & 0xff)
+        unsafe_store!(r.records,clock | (UInt64(event % UInt8) << 56),Int(slot)+1,Val(8))
     end
     nothing
 end
+@inline record!(::Nothing,slot::Integer,event::Integer) = nothing
+@inline record!(t::Timeline,r::Integer,slot::Integer,event::Integer) = record!(recorder(t,r),slot,event)

@@ -4,8 +4,8 @@
 @testset "Timeline records" begin
     # Two records by hand: time counts from the block's first record.
     records = zeros(UInt64,4,2,1)
-    records[1,1,1] = (UInt64(1000) << 8) | 1; records[2,1,1] = (UInt64(1500) << 8) | 2
-    records[1,2,1] = (UInt64(1200) << 8) | 1
+    records[1,1,1] = (UInt64(1) << 56) | 1000; records[2,1,1] = (UInt64(2) << 56) | 1500
+    records[1,2,1] = (UInt64(1) << 56) | 1200
     t = Timeline(records)
     @test [(e.recorder,e.event,e.time) for e in events(t)] == [(0,1,0),(1,1,200),(0,2,500)]
     @test spans(t,1 => 2) == [500]
@@ -17,11 +17,12 @@ end
 function spinning!(timeline)
     tid = Int32(threadIdx().x)-Int32(1)
     warp = tid ÷ Int32(32)
+    mine = recorder(timeline,warp)
     for step in Int32(0):Int32(9)
-        tid % Int32(32) == Int32(0) && record!(timeline,warp,2step,1)
+        tid % Int32(32) == Int32(0) && record!(mine,2step,1)
         start = CUDACore.clock(UInt64)
         while CUDACore.clock(UInt64)-start < UInt64(2000)*UInt64(warp+1) end
-        tid % Int32(32) == Int32(0) && record!(timeline,warp,2step+Int32(1),2)
+        tid % Int32(32) == Int32(0) && record!(mine,2step+Int32(1),2)
     end
     tid == Int32(0) && record!(timeline,4,0,9)                 # no such recorder: dropped
     nothing

@@ -133,15 +133,17 @@ The machine code says what a kernel does; a [`Timeline`](@ref) says when.
 In a warp-specialized kernel the roles wait on each other through barriers,
 and which of them waits, how long and for what decides its speed more than
 any single instruction. [`record!`](@ref) stores the SM's clock with an
-event number from one thread; the host reads the records back as
-[`events`](@ref) and measures between them with [`spans`](@ref):
+event number from one thread, in the records of a [`recorder`](@ref); the
+host reads them back as [`events`](@ref) and measures between them with
+[`spans`](@ref):
 
 ```julia
 function kernel!(..., timeline)
+    mine = recorder(timeline, warp)                       # nothing without a timeline
     ...
-    lane == 0 && record!(timeline, warp, 2step, 1)      # waiting for S
+    lane == 0 && record!(mine, 2step, 1)                  # waiting for S
     wait(sfull, phase)
-    lane == 0 && record!(timeline, warp, 2step+1, 2)    # S is ready
+    lane == 0 && record!(mine, 2step+1, 2)                # S is ready
     ...
 end
 
@@ -150,7 +152,8 @@ timeline = Timeline(CUDACore.zeros(UInt64, 1024, 16, blocks))
 median(spans(timeline, 1 => 2))                          # cycles spent waiting for S
 ```
 
-A record costs a clock read and a global store, so a kernel takes the
-timeline as an argument that is `nothing` when it does not record: the
-calls fold away, and the machine code is that of the plain kernel.
+A record costs a clock read, an OR and a global store, a handful of
+instructions, so a kernel takes the timeline as an argument that is
+`nothing` when it does not record: the calls fold away, and the machine
+code is that of the plain kernel.
 `examples/blackwell_attention` records every role's steps this way.
