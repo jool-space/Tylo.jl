@@ -60,9 +60,10 @@ if runtime_supported(@__FILE__)
         o
     end
     rng = MersenneTwister(3)
-    # One block; several; more tiles than SMs, so that CTAs walk several; and
-    # scores whose row maxima move by far more than the rescale threshold.
-    for ctas in (1,2), (sq,skv,bh,amp) in ((512,128,1,1f0),(512,1024,2,1f0),(2048,1024,80,1f0),(512,512,3,8f0))
+    # One block; several; more tiles than SMs, so that CTAs walk several, of
+    # several blocks and of one; and scores whose row maxima move by far more
+    # than the rescale threshold.
+    for ctas in (1,2), (sq,skv,bh,amp) in ((512,128,1,1f0),(512,1024,2,1f0),(2048,1024,80,1f0),(2048,128,40,1f0),(512,512,3,8f0))
         q = BFloat16.(amp .* randn(rng,Float32,128,sq,bh))
         k = BFloat16.(randn(rng,Float32,128,skv,bh)); v = BFloat16.(randn(rng,Float32,128,skv,bh))
         kernel, launch, o = blackwell_attention(CuArray(q),CuArray(k),CuArray(v);ctas)

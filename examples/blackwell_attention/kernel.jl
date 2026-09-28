@@ -105,7 +105,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
     qk = Tcgen05Atom((128CTAs,128,16),BFloat16)             # S = Q Kᵀ: 128 rows per CTA × 128 keys
     pv = Tcgen05Atom((128CTAs,128,16),BFloat16)             # O += P V: 128 rows per CTA × d
     qbytes, kvbytes = transfer_bytes(tq), transfer_bytes(tk)  # a Q tile; this CTA's share of a K or V block
-    workspace = @inbounds CuDynamicSharedArray(UInt8,176+16Stages+2048+1024+2qbytes+Stages*kvbytes)
+    workspace = @inbounds CuDynamicSharedArray(UInt8,192+16Stages+3072+1024+2qbytes+Stages*kvbytes)
     raw = pointer(workspace)
     @inline qfull(i) = Barrier(raw,i)                       # tile i's queries have arrived
     @inline qempty(i) = Barrier(raw+16,i)                   # tile i's queries may be replaced
@@ -113,17 +113,19 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
     @inline pready(i) = Barrier(raw+48,i)                   # P's first 96 keys are written and O rescaled
     @inline plast(i) = Barrier(raw+64,i)                    # P's last 32 keys are written
     @inline ofull(i) = Barrier(raw+80,i)                    # O of tile i is final
-    @inline summed(i) = Barrier(raw+96,i)                   # the row sums of tile i are written
-    @inline paired(i) = Barrier(raw+112,i)                  # pready of both CTAs (the even CTA's)
-    @inline pairlast(i) = Barrier(raw+128,i)                # plast of both CTAs (the even CTA's)
-    @inline itemready(b) = Barrier(raw+144,b)               # item slot b holds the next item (`Dynamic`)
-    @inline kvfull(s) = Barrier(raw+160,s)                  # stage s holds a K or V block
-    @inline kvempty(s) = Barrier(raw+160+8Stages,s)         # stage s may be refilled
-    slot = reinterpret(Core.LLVMPtr{UInt32,PTX.AS.Shared},raw+160+16Stages)
-    ids = reinterpret(Core.LLVMPtr{Int32,PTX.AS.Shared},raw+164+16Stages)            # [slot]: an item, or -1
-    factors = reinterpret(Core.LLVMPtr{Float32,PTX.AS.Shared},raw+176+16Stages)      # [row, tile]: rescale factor
-    sums = factors+1024                                                              # [row, tile]: row sum
-    start = raw+176+16Stages+2048
+    @inline summed(i,b) = Barrier(raw+96,i+2b)              # the row sums of tile i in buffer b are written
+    @inline paired(i) = Barrier(raw+128,i)                  # pready of both CTAs (the even CTA's)
+    @inline pairlast(i) = Barrier(raw+144,i)                # plast of both CTAs (the even CTA's)
+    @inline itemready(b) = Barrier(raw+160,b)               # item slot b holds the next item (`Dynamic`)
+    @inline kvfull(s) = Barrier(raw+176,s)                  # stage s holds a K or V block
+    @inline kvempty(s) = Barrier(raw+176+8Stages,s)         # stage s may be refilled
+    slot = reinterpret(Core.LLVMPtr{UInt32,PTX.AS.Shared},raw+176+16Stages)
+    ids = reinterpret(Core.LLVMPtr{Int32,PTX.AS.Shared},raw+180+16Stages)            # [slot]: an item, or -1
+    factors = reinterpret(Core.LLVMPtr{Float32,PTX.AS.Shared},raw+192+16Stages)      # [row, tile]: rescale factor
+    # [row, tile, item parity]: row sums, two items' worth, since the softmax
+    # may finish an item of one block before the correction has read the last.
+    sums = factors+1024
+    start = raw+192+16Stages+3072
     base = start+((UInt32(0)-PTX.smem_addr_u32(start)) & UInt32(1023))
     @inline qstage(i) = base+i*Int32(qbytes)
     @inline kvstage(s) = base+Int32(2qbytes)+s*Int32(kvbytes)
@@ -138,7 +140,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
             initialize!(pready(i),CTAs == 1 ? 128+4 : 128)  # the softmax threads (and correction warps)
             initialize!(plast(i),128)
             initialize!(ofull(i),1)
-            initialize!(summed(i),128)
+            initialize!(summed(i,0),128)
+            initialize!(summed(i,1),128)
             initialize!(paired(i),8CTAs)                    # softmax and correction warps of both CTAs
             initialize!(pairlast(i),4CTAs)
             initialize!(itemready(i),1)
@@ -271,8 +274,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                 l += (_chainsum(zero,chunks[1])+_chainsum(zero,chunks[2]))+(_chainsum(zero,chunks[3])+_chainsum(zero,chunks[4]))
                 k += Int32(1)
             end
-            unsafe_store!(sums,l,row+Int32(128)*i+Int32(1),Val(4))
-            arrive!(summed(i))
+            unsafe_store!(sums,l,row+Int32(128)*(i+Int32(2)*(n&Int32(1)))+Int32(1),Val(4))
+            arrive!(summed(i,n&Int32(1)))
             n += Int32(1)
             Dynamic || (t += stride)
         end
@@ -288,8 +291,12 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
                 for i in Int32(0):Int32(1)
                     j < tile_count(q0,i) || continue
                     k = i == Int32(0) ? k0 : k1
-                    wait(sfull(i),k&Int32(1))               # O includes the previous block
                     if j > Int32(0)
+                        # O includes the previous block. (At an item's first
+                        # block there is nothing to wait for: the tile may be
+                        # a block ahead while the other's epilogue runs, and
+                        # a wait two phases behind would not end.)
+                        wait(sfull(i),k&Int32(1))
                         ptx"bar.sync"(handoff(i)%UInt32,UInt32(64))
                         factor = unsafe_load(factors,row+Int32(128)*i+Int32(1),Val(4))
                         if vote_any_sync(0xffffffff,factor < 1f0)
@@ -311,8 +318,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::Int
             end
             dst = @inbounds GlobalTile(pointer(o,Int32(1)+head*seq*Int32(128)),Layout((seq,static(128)),(static(128),static(1))),16)
             for i in Int32(0):Int32(1)
-                wait(summed(i),n&Int32(1))
-                inverse = 1f0/unsafe_load(sums,row+Int32(128)*i+Int32(1),Val(4))
+                wait(summed(i,n&Int32(1)),(n>>1)&Int32(1))
+                inverse = 1f0/unsafe_load(sums,row+Int32(128)*(i+Int32(2)*(n&Int32(1)))+Int32(1),Val(4))
                 wait(ofull(i),n&Int32(1))
                 fence_after_thread_sync()
                 for q in 0:3
@@ -457,7 +464,7 @@ function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};cta
     tq = prepare_tma(TMATile(T,(128,128),2),q)                 # 128 query rows × d
     tk = prepare_tma(TMATile(T,(128,128÷ctas),1),k)            # d × this CTA's keys of a block
     tv = prepare_tma(TMATile(T,(128,128÷ctas),2),v)            # a block's keys × this CTA's columns of d
-    shmem = 176+16stages+2048+1024+2transfer_bytes(tq)+stages*transfer_bytes(tk)
+    shmem = 192+16stages+3072+1024+2transfer_bytes(tq)+stages*transfer_bytes(tk)
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     o = o === nothing ? similar(q) : o
     scale = Float32(1/sqrt(d))
