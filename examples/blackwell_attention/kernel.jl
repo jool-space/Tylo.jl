@@ -4,8 +4,10 @@ using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_bef
 
 # FlashAttention's forward pass on datacenter Blackwell, O = softmax(Q Kᵀ ·
 # scale) V, in the style of FlashAttention-4. Q, K, V and O are
-# d×seq×(batch·heads) BF16 arrays (d contiguous), d = 128, as for the Hopper
-# kernel.
+# d×seq×heads(×batch) BF16 arrays, d = 128, contiguous along d and otherwise
+# of any strides (TMA descriptors of three or four axes; O's rows are
+# addressed from its strides), K and V with fewer heads than Q when query
+# heads share them (grouped-query attention).
 #
 # A persistent CTA of sixteen warps computes 256 query rows at a time, as two
 # tiles of 128 whose work interleaves on the tensor cores:
@@ -33,9 +35,12 @@ using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_bef
 # The CTAs are persistent and take items (a head's 256 query rows) in
 # rounds. When the last round is partial, most CTAs would idle through it:
 # its items are split instead, along the keys into `parts` ranges of key
-# blocks, one to a CTA. Each part writes its rows' normalized results and
-# base-2 log-sum-exps to a scratch slot, and the part that finishes last,
-# as an atomic count tells, merges them.
+# blocks, one to a CTA. The part that finishes last, as an atomic count
+# tells, merges them: it keeps its own in TMEM, and the others write their
+# rows' normalized results and base-2 log-sum-exps to scratch slots. In two
+# parts, with one CTA per item, the parts fall to the two CTAs of a cluster
+# (`Clustered`): each merges one tile, reading the other's part of it from
+# the other's shared memory.
 #
 # With `CTAs = 2`, the two CTAs of a cluster compute 512 rows together, each
 # its own two tiles, and every product is one CTA-pair instruction (M = 256)
@@ -238,9 +243,58 @@ end
     nothing
 end
 
-function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,heads::Int32,scale::Float32,whole::Int32,parts::Int32,::Val{Stages},::Val{CTAs}=Val(1),
+# The end of a part of an item split in two between the CTAs of a cluster
+# (`Clustered`): each CTA merges one tile of the item, rank r tile r, with
+# the other CTA's part of it, which that CTA stages in its own shared memory
+# (`buffer`, the free K and V stages: normalized, then its rows' base-2
+# log-sum-exps) and releases at cluster scope on this CTA's `exported`; this
+# CTA reads it there. (The kernel's closing cluster barrier keeps both CTAs'
+# shared memory until both have read.)
+@inline function finish_pair!(exported,buffer,dst,words,sums,maxima,parity,rows,q0,band,lane,tid)
+    me = cluster_rank(); other = Int32(1)-me
+    r = band+lane                                       # this thread's row of a tile
+    stat(i) = r+Int32(128)*(i+Int32(2)*parity)+Int32(1)
+    logsums = reinterpret(Core.LLVMPtr{Float32,PTX.AS.Shared},buffer+Int32(65536))
+    l = unsafe_load(sums,stat(other),Val(4))
+    for q in 0:3
+        values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*other+Int32(32q)),(32,32))))
+        _stage_part!(buffer,Int32(0),q,r,Tylo._values(values .* (1f0/l)))
+    end
+    unsafe_store!(logsums,unsafe_load(maxima,stat(other),Val(4))+ptx"lg2.approx.ftz.f32"(l),r+Int32(1),Val(4))
+    ptx"bar.sync"(UInt32(9),UInt32(128))
+    if tid == Int32(256)
+        remote = ptx"mapa.shared::cluster.u32"(PTX.smem_addr_u32(exported.ptr),other % UInt32)
+        ptx"mbarrier.arrive.release.cluster.shared::cluster.b64"(reinterpret(Core.LLVMPtr{UInt64,3},UInt64(remote)))
+    end
+    while !ptx"mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64"(exported.ptr,UInt32(0)) end
+    peer = ptx"mapa.shared::cluster.u32"(PTX.smem_addr_u32(buffer),other % UInt32)
+    at(offset) = reinterpret(Core.LLVMPtr{Float32,3},UInt64(peer+offset))
+    theirs = ptx"ld.shared::cluster.f32"(at(UInt32(65536)+UInt32(4)*(r % UInt32)))
+    l = unsafe_load(sums,stat(me),Val(4))
+    mine = unsafe_load(maxima,stat(me),Val(4))+ptx"lg2.approx.ftz.f32"(l)
+    top = max(mine,theirs)
+    wm, wo = Tylo._ex2(mine-top), Tylo._ex2(theirs-top)
+    inverse = 1f0/(wm+wo)
+    scale, weight = wm*inverse/l, wo*inverse
+    for q in 0:3
+        chunk = ntuple(g -> ptx"ld.shared::cluster.v4.f32"(at(_part_offset(Int32(0),Int32(q),Int32(g-1),r) % UInt32)),Val(8))
+        values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*me+Int32(32q)),(32,32))))
+        merged = _merge_pair(Tylo._values(values),scale,weight,chunk)
+        @inbounds store!(window(dst,(q0+Int32(128)*me+band,Int32(32q)),(32,32)),Fragment{BFloat16}(Fragment(merged,rows)),lane)
+    end
+    nothing
+end
+@inline _merge_pair(values::NTuple{32,Float32},scale::Float32,weight::Float32,chunk) =
+    ntuple(e -> muladd(weight,chunk[(e-1)÷4+1][(e-1)%4+1],scale*values[e]),Val(32))
+
+# A tile's origin in a binding of heads (three axes, one batch) or of heads
+# and batches (four).
+@inline _at(::Tylo.TMABinding{P,D,3},x,y,h,b) where {P,D} = (x,y,h)
+@inline _at(::Tylo.TMABinding{P,D,4},x,y,h,b) where {P,D} = (x,y,h,b)
+
+function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,counts::NTuple{3,Int32},scale::Float32,whole::Int32,parts::Int32,::Val{Stages},::Val{CTAs}=Val(1),
                                      ::Val{Split}=Val(3),::Val{Causal}=Val(false),::Val{Dynamic}=Val(Causal),
-                                     ::Val{Emulated}=Val(()),timeline=nothing) where {Stages,CTAs,Split,Causal,Dynamic,Emulated}
+                                     ::Val{Emulated}=Val(()),timeline=nothing,::Val{Clustered}=Val(false)) where {Stages,CTAs,Split,Causal,Dynamic,Emulated,Clustered}
     qk = Tcgen05Atom((128CTAs,128,16),BFloat16)             # S = Q Kᵀ: 128 rows per CTA × 128 keys
     pv = Tcgen05Atom((128CTAs,128,16),BFloat16)             # O += P V: 128 rows per CTA × d
     qbytes, kvbytes = transfer_bytes(tq), transfer_bytes(tk)  # a Q tile; this CTA's share of a K or V block
@@ -299,7 +353,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,he
     end
     warp == Int32(12) && tmem_allocate!(qk,slot,512)
     fence_before_thread_sync()
-    CTAs == 1 ? sync_threads() : cluster_sync()
+    CTAs == 1 && !Clustered ? sync_threads() : cluster_sync()
     fence_after_thread_sync()
     tmem = unsafe_load(slot)
     rank = CTAs == 1 ? Int32(0) : cluster_rank()
@@ -318,8 +372,10 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,he
     @inline scores(i) = @inbounds window(words,(0,128i),(128,128))
     @inline probabilities(i) = @inbounds window(halves,(0,256i+128),(128,128))    # over S's second half
     @inline output(i) = @inbounds window(words,(0,256+128i),(128,128))
-    seq = size(o,2) % Int32
+    seq = o.seq
     nq = seq ÷ Int32(256CTAs)                               # query blocks of a CTA (pair)
+    # Heads of all batches, of one, and query heads per K and V head.
+    heads, per_batch, group = counts
     tiles = nq*heads
     # (Read where each role starts, after its register reallocation: a value
     # live across it would be spilled.)
@@ -333,7 +389,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,he
     # sections whose K and V fit in L2 (about 50 MB), and within a section
     # every head's longest block before any shorter one. (Head by head, a
     # long item would still be handed out near the end.)
-    fit = max(Int32(1),unchecked_div(Int32(50_000_000),Int32(512)*seq_kv))
+    fit = max(Int32(1),unchecked_div(Int32(50_000_000),Int32(512)*seq_kv))*group
     section = min(Int32(1) << (Int32(31)-leading_zeros(fit) % Int32),heads)
     @inline function item(t)
         if Causal
@@ -501,7 +557,9 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,he
                     i == Int32(0) ? (k0 += Int32(1)) : (k1 += Int32(1))
                 end
             end
-            dst = @inbounds GlobalTile(pointer(o,Int32(1)+head*seq*Int32(128)),Layout((seq,static(128)),(static(128),static(1))),16)
+            batch = unchecked_div(head,per_batch)
+            at = Int64(head-batch*per_batch)*o.head+Int64(batch)*o.batch   # elements to this head's first row
+            dst = @inbounds GlobalTile(o.ptr+2at,Layout((seq,static(128)),(o.row,static(1))),16)
             if w < Int32(0)
                 for i in Int32(0):Int32(1)
                     wait(summed(i,n&Int32(1)),(n>>1)&Int32(1))
@@ -521,8 +579,12 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,he
                     wait(ofull(i),n&Int32(1))
                 end
                 fence_after_thread_sync()
-                a = unchecked_div(w,parts)
-                finish_part!(scratch,counter,merging,copied,kvstage(Int32(0)),dst,words,sums,maxima,n&Int32(1),rows,a,parts,w-a*parts,units-whole,q0,rank,band,lane,tid,Val(CTAs))
+                if Clustered
+                    finish_pair!(copied(Int32(0)),kvstage(Int32(0)),dst,words,sums,maxima,n&Int32(1),rows,q0,band,lane,tid)
+                else
+                    a = unchecked_div(w,parts)
+                    finish_part!(scratch,counter,merging,copied,kvstage(Int32(0)),dst,words,sums,maxima,n&Int32(1),rows,a,parts,w-a*parts,units-whole,q0,rank,band,lane,tid,Val(CTAs))
+                end
                 fence_before_thread_sync()
                 for i in Int32(0):Int32(1)
                     release_to_mma(pready(i),paired(i))
@@ -634,41 +696,51 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,he
                 end
                 head, q0, b0, blocks_t, _ = unit(t)
                 half = rank*Int32(128÷CTAs)                 # this CTA's keys of K, columns of V
+                batch = unchecked_div(head,per_batch)       # the batch, its query head and their K and V head
+                h = head-batch*per_batch
+                hk = unchecked_div(h,group)
                 for i in Int32(0):Int32(1)
                     n >= Int32(1) && wait(qempty(i),(n-Int32(1))&Int32(1))
                     rank == Int32(0) && arrive!(qfull(i),CTAs*qbytes)
-                    @inbounds tma_load!(shared_tile(tq,qstage(i)),tq,(q0+Int32(128)*i,Int32(0),head),qfull(i);cta=completion())
-                    i == Int32(0) && (c = load(c,tk,(Int32(0),Int32(128)*b0+half,head)))
+                    @inbounds tma_load!(shared_tile(tq,qstage(i)),tq,_at(tq,q0+Int32(128)*i,Int32(0),h,batch),qfull(i);cta=completion())
+                    i == Int32(0) && (c = load(c,tk,_at(tk,Int32(0),Int32(128)*b0+half,hk,batch)))
                 end
                 for j in b0+Int32(1):b0+blocks_t-Int32(1)
-                    c = load(c,tv,(Int32(128)*(j-Int32(1)),half,head))
-                    c = load(c,tk,(Int32(0),Int32(128)*j+half,head))
+                    c = load(c,tv,_at(tv,Int32(128)*(j-Int32(1)),half,hk,batch))
+                    c = load(c,tk,_at(tk,Int32(0),Int32(128)*j+half,hk,batch))
                 end
-                c = load(c,tv,(Int32(128)*(b0+blocks_t-Int32(1)),half,head))
+                c = load(c,tv,_at(tv,Int32(128)*(b0+blocks_t-Int32(1)),half,hk,batch))
                 n += Int32(1)
                 t = Dynamic ? gridDim().x % Int32+CUDACore.atomic_add!(pointer(counter),Int32(1)) : t+stride
             end
         end
     end
     fence_before_thread_sync()
-    CTAs == 1 ? sync_threads() : cluster_sync()             # no TMEM access remains in either CTA
+    CTAs == 1 && !Clustered ? sync_threads() : cluster_sync()   # no TMEM access (nor a merge's read) remains in either CTA
     fence_after_thread_sync()
     warp == Int32(12) && tmem_deallocate!(qk,tmem,512)
     nothing
 end
 
 """
-    blackwell_attention(q, k, v; stages, ctas=1, tail=true, emulate) -> (kernel, launch, o)
+    blackwell_attention(q, k, v; stages, ctas=1, tail=true, emulate, o) -> (kernel, launch, o)
 
-O = softmax(Q Kᵀ / √d) V for BF16 `q`, `k`, `v` (d×seq×(batch·heads)), d =
-128, the key length a multiple of 128 and the query length of 256 per CTA:
-`ctas = 2` makes CTA pairs compute 512 rows with 256-row products. `stages`
+O = softmax(Q Kᵀ / √d) V for BF16 `q` (d×seq×heads, or d×seq×heads×batch),
+`k` and `v` (d×seq_kv×heads_kv[×batch]), d = 128, the key length a multiple
+of 128 and the query length of 256 per CTA: `ctas = 2` makes CTA pairs
+compute 512 rows with 256-row products. With fewer K and V heads than query
+heads (grouped-query attention), every `heads ÷ heads_kv` consecutive query
+heads share one. The arrays are `CuArray`s or strided views of them,
+contiguous along d, with every other stride a multiple of 16 bytes:
+PyTorch's (batch, seq, heads, d) tensor, a d×heads×seq×batch array in
+Julia, is `PermutedDimsArray(x, (1,3,2,4))`, and binds in place. O (by
+default laid out as `q`) takes the same forms. `stages`
 counts ring stages of a K or V block's share (4 by default for one CTA, 8
 for pairs, whose stages are half as large). Persistent CTAs (or pairs) take
 the items in rounds; with `tail` (not causal), the items of a last, partial
 round, or of a first one when there are fewer items than SMs, are split
 along the keys among the CTAs that would idle, and merged by the part that
-finishes last. `emulate` lists the pairs (0-15) of a 32-key chunk whose
+finishes last (or, in two parts, by both, in clusters of two). `emulate` lists the pairs (0-15) of a 32-key chunk whose
 exponentials the middle two of a row's four chunks compute on the FMA pipe
 rather than MUFU, by default 6 of them (24 of 128 keys, about
 FlashAttention-4's share): MUFU would otherwise be as busy as the tensor
@@ -676,20 +748,27 @@ pipe. With a `timeline`
 (`Timeline(CUDACore.zeros(UInt64,capacity,14,blocks))`), each warp role
 records its steps (see the kernel for the events).
 """
-function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,causal::Bool=false,dynamic::Bool=causal,emulate::Tuple=(3,4,8,9,13,14),tail::Bool=!causal,o=nothing,timeline=nothing) where T
-    d, sq, bh = size(q); skv = size(k,2)
+function blackwell_attention(q::AbstractArray{T,N},k::AbstractArray{T,N},v::AbstractArray{T,N};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,causal::Bool=false,dynamic::Bool=causal,emulate::Tuple=(3,4,8,9,13,14),tail::Bool=!causal,o=nothing,timeline=nothing) where {T,N}
+    N in (3,4) || throw(ArgumentError("q, k and v are d×seq×heads or d×seq×heads×batch"))
+    d, sq, heads = size(q); skv, heads_kv = size(k,2), size(k,3)
+    batch = N == 4 ? size(q,4) : 1
     ctas in (1,2) || throw(ArgumentError("one CTA or a CTA pair"))
     split in (1,2,3) || throw(ArgumentError("P is published after one to three of its four chunks"))
     causal && !(ctas == 1 && size(q,2) == size(k,2)) && throw(ArgumentError("causal attention runs in one CTA, with equal sequence lengths"))
     dynamic && ctas != 1 && throw(ArgumentError("dynamic scheduling hands items to single CTAs"))
-    d == 128 && size(k) == size(v) == (d,skv,bh) && sq % (256ctas) == 0 && skv % 128 == 0 ||
+    size(k) == size(v) && size(k,1) == d && (N == 3 || size(k,4) == batch) && heads % heads_kv == 0 ||
+        throw(ArgumentError("k and v share a shape, with q's d and batch, and a number of heads dividing q's"))
+    d == 128 && sq % (256ctas) == 0 && skv % 128 == 0 ||
         throw(ArgumentError("d must be 128, the query length a multiple of $(256ctas) and the key length of 128"))
+    bh = heads*batch
     tq = prepare_tma(TMATile(T,(128,128),2),q)                 # 128 query rows × d
     tk = prepare_tma(TMATile(T,(128,128÷ctas),1),k)            # d × this CTA's keys of a block
     tv = prepare_tma(TMATile(T,(128,128÷ctas),2),v)            # a block's keys × this CTA's columns of d
     shmem = 208+16stages+5120+1024+2transfer_bytes(tq)+stages*transfer_bytes(tk)
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
-    o = o === nothing ? similar(q) : o
+    o = o === nothing ? _like(q) : o
+    size(o) == size(q) || throw(DimensionMismatch("o has q's shape"))
+    out = _rows(o)
     scale = Float32(1/sqrt(d))
     sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
     tiles = (sq÷(256ctas))*bh
@@ -699,12 +778,30 @@ function blackwell_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};cta
     parts < 2 && (parts = 1)
     whole = parts > 1 ? rounds*most : tiles
     grid = min(whole+(tiles-whole)*parts,most)
+    # An item's two parts fall to CTAs 2a and 2a+1: clusters of two merge
+    # them in shared memory.
+    clustered = ctas == 1 && parts == 2 && iseven(grid)
     # The next dynamic item, the CTAs done taking them, then each split
     # item's parts finished and written, per CTA of a pair: the kernel leaves all at zero.
-    counter = CuArray(zeros(Int32,2+2*(tiles-whole)*ctas))
-    scratch = CuArray{Float32}(undef,max(1,(tiles-whole)*parts*256ctas*129))
-    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,Int32(skv),Int32(bh),scale,Int32(whole),Int32(parts),Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline)
+    split_scratch = parts > 1 && !clustered
+    counter = CuArray(zeros(Int32,2+(split_scratch ? 2*(tiles-whole)*ctas : 0)))
+    scratch = CuArray{Float32}(undef,split_scratch ? (tiles-whole)*parts*256ctas*129 : 1)
+    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(out,tq,tk,tv,counter,scratch,Int32(skv),map(Int32,(bh,heads,heads÷heads_kv)),scale,Int32(whole),Int32(parts),Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline,Val(clustered))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
-    launch() = GC.@preserve tq tk tv counter scratch kernel(o,tq,tk,tv,counter,scratch,Int32(skv),Int32(bh),scale,Int32(whole),Int32(parts),Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline;threads=512,blocks=ctas*grid,shmem,clustersize=ctas)
+    launch() = GC.@preserve o tq tk tv counter scratch kernel(out,tq,tk,tv,counter,scratch,Int32(skv),map(Int32,(bh,heads,heads÷heads_kv)),scale,Int32(whole),Int32(parts),Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline,Val(clustered);threads=512,blocks=ctas*grid,shmem,clustersize=clustered ? 2 : ctas)
     kernel, launch, o
 end
+# O as the kernel writes it: the address of its first element, the query
+# length, and the strides in elements of a row, a head and a batch.
+_address(a::CUDACore.StridedCuArray) = pointer(a)
+_address(a::PermutedDimsArray) = _address(parent(a))
+_address(a) = throw(ArgumentError("o is a CuArray, or a strided view or permutation of one"))
+function _rows(o::AbstractArray{T}) where T
+    address, st = _address(o), strides(o)
+    st[1] == 1 && UInt(address) % 16 == 0 && all(s -> (s*sizeof(T)) % 16 == 0,Base.tail(st)) ||
+        throw(ArgumentError("o is contiguous along d, 16-byte aligned, and its other strides multiples of 16 bytes"))
+    (; ptr=reinterpret(Core.LLVMPtr{T,1},UInt64(address)),seq=Int32(size(o,2)),row=Int32(st[2]),head=Int64(st[3]),batch=Int64(ndims(o) == 4 ? st[4] : 0))
+end
+# A new array of q's shape laid out as q: permuted as q is.
+_like(q::PermutedDimsArray{T,N,perm}) where {T,N,perm} = PermutedDimsArray(similar(parent(q)),perm)
+_like(q) = similar(q)
