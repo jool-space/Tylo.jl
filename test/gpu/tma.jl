@@ -118,6 +118,16 @@ if runtime_supported(@__FILE__)
         @test Array(out) == expected
     end
     @test_throws ArgumentError prepare_tma(plan,CuArray(host);bounds=(81,100,3))
+    # A box wholly outside, past an axis's end or the last matrix, arrives
+    # as zeros and completes its barrier.
+    out=CuArray(fill(BFloat16(9),64,64))
+    for origin in ((0,100,0),(0,5000,2),(80,0,1),(0,0,3))
+        GC.@preserve binding begin
+            @cuda threads=32 shmem=transfer_bytes(plan)+1056 tma_roundtrip!(out,binding,map(Int32,origin),Int32(2))
+            synchronize()
+        end
+        @test all(iszero,Array(out))
+    end
     # Strided sources: a (d, heads, seq, batch) array permuted to (d, seq,
     # heads, batch), and a view of it, bind in place; the origin's third
     # and fourth coordinates select head and batch.

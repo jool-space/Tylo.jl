@@ -118,7 +118,8 @@ of a binding of higher rank) into the canonical shared tile `dst`. One
 thread issues it. The copy completes on `barrier`, whose current phase
 must expect its [`transfer_bytes`](@ref) (`arrive!(barrier, bytes)`);
 [`wait`](@ref Base.wait(::Barrier,::Integer)) for that phase before reading
-`dst`. Elements outside the tensor's bounds arrive as zeros. The inner
+`dst`. Elements outside the tensor's bounds arrive as zeros. (a box wholly
+outside, as zeros throughout: its bytes still complete the barrier). The inner
 origin starts a 16-byte chunk; the hardware rejects other origins.
 Nothing else is inserted: initialize and publish the barrier first, and
 release the consumers of `dst` before reusing it.
