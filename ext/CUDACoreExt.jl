@@ -42,15 +42,24 @@ end
 # types move as unsigned words of their size.
 _tma_dtype(::Type{T}) where T = T === Tylo.BFloat16 ? :bf16 : T === Float16 ? :f16 : T === Float32 ? :f32 :
     sizeof(T) == 1 ? :u8 : sizeof(T) == 2 ? :u16 : :u32
-function Tylo.prepare_tma(p::TMATile{T,S,A,W},array::CuArray{T,N};bounds=size(array)) where {T,S,A,W,N}
-    N in (2,3) || throw(ArgumentError("TMA binds a matrix or a batch of matrices"))
+# The device address of a strided array's first element: dimensions
+# permuted in a view keep their parent's address.
+_first_address(a::CUDACore.StridedCuArray) = pointer(a)
+_first_address(a::PermutedDimsArray) = _first_address(parent(a))
+_first_address(a) = nothing
+function Tylo.prepare_tma(p::TMATile{T,S,A,W},array::AbstractArray{T,N};bounds=size(array)) where {T,S,A,W,N}
+    2 <= N <= 5 || throw(ArgumentError("TMA binds a matrix or matrices along up to three batch axes"))
     length(bounds) == N && all(map((b,s) -> 0 < b <= s,bounds,size(array))) || throw(ArgumentError("bounds exceed the array or are empty"))
-    UInt(pointer(array)) % 16 == 0 && (size(array,1)*sizeof(T)) % 16 == 0 ||
-        throw(ArgumentError("TMA source pointer and column stride must be 16-byte aligned"))
-    strides = N == 2 ? (sizeof(T)*size(array,1),) : (sizeof(T)*size(array,1),sizeof(T)*size(array,1)*size(array,2))
-    box = N == 2 ? Tylo._box(p) : (Tylo._box(p)...,1)     # one stripe per copy
-    tmap = GC.@preserve array PTX.tensor_map_encode_tiled(_tma_dtype(T),UInt(pointer(array)),
-        map(Int,bounds),strides,box;swizzle=Symbol(:B,W))
+    address = _first_address(array)
+    address === nothing && throw(ArgumentError("TMA binds a CuArray, or a strided view or permutation of one"))
+    elements = strides(array)
+    elements[1] == 1 || throw(ArgumentError("TMA sources are contiguous along their first axis"))
+    bytes = map(s -> sizeof(T)*s,Base.tail(elements))
+    UInt(address) % 16 == 0 && all(b -> b > 0 && b % 16 == 0,bytes) ||
+        throw(ArgumentError("TMA source pointer and strides must be positive multiples of 16 bytes"))
+    box = (Tylo._box(p)...,ntuple(_ -> 1,Val(N-2))...)     # one stripe of one matrix per copy
+    tmap = GC.@preserve array PTX.tensor_map_encode_tiled(_tma_dtype(T),UInt(address),
+        map(Int,bounds),bytes,box;swizzle=Symbol(:B,W))
     uploaded = PTX.upload_tma_descriptor(tmap)
     Tylo.HostTMA(p,array,uploaded.ptr,uploaded.blob,Val(N))
 end

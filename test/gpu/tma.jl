@@ -118,6 +118,30 @@ if runtime_supported(@__FILE__)
         @test Array(out) == expected
     end
     @test_throws ArgumentError prepare_tma(plan,CuArray(host);bounds=(81,100,3))
+    # Strided sources: a (d, heads, seq, batch) array permuted to (d, seq,
+    # heads, batch), and a view of it, bind in place; the origin's third
+    # and fourth coordinates select head and batch.
+    host=BFloat16.(reshape(mod.(0:64*3*96*2-1,113),64,3,96,2))
+    source=CuArray(host)
+    out=CuArray{BFloat16}(undef,64,64)
+    for (array,cropped) in ((PermutedDimsArray(source,(1,3,2,4)),host),(PermutedDimsArray(view(source,:,:,17:96,:),(1,3,2,4)),host[:,:,17:96,:]))
+        binding=prepare_tma(plan,array)
+        @test typeof(CUDACore.cudaconvert(binding)) <: Tylo.TMABinding{<:Any,<:Any,4}
+        for (h,b,k,r) in ((0,0,0,0),(2,1,0,32),(1,1,16,48))
+            GC.@preserve binding begin
+                @cuda threads=32 shmem=transfer_bytes(plan)+1056 tma_roundtrip!(out,binding,(Int32(k),Int32(r),Int32(h),Int32(b)),Int32(2))
+                synchronize()
+            end
+            expected=zeros(BFloat16,64,64)
+            for rr in 1:64, kk in 1:64
+                r+rr <= size(cropped,3) && k+kk <= 64 && (expected[kk,rr]=cropped[k+kk,h+1,r+rr,b+1])
+            end
+            @test Array(out) == expected
+        end
+    end
+    @test_throws ArgumentError prepare_tma(plan,PermutedDimsArray(source,(2,1,3,4)))   # the inner axis is strided
+    @test_throws ArgumentError prepare_tma(plan,view(source,5:64,:,:,:))               # 8 bytes past alignment
+    @test_throws ArgumentError prepare_tma(plan,reshape(source,64,3,96,1,1,2))         # six axes
 end
 
 @testset "TMA stores: element widths, swizzle rows, logical axes and clipping" begin
@@ -168,6 +192,16 @@ end
         16+r <= 36 && 8+c <= 64 && (expected[16+r,8+c,2]=Float32(r+32(c-1)))
     end
     @test Array(dst) == expected
+    # Five axes, permuted: the store lands in one matrix of the parent.
+    parent_dst=CuArray(fill(111f0,32,2,64,3,2))
+    binding=prepare_tma(plan,PermutedDimsArray(parent_dst,(1,3,2,4,5)))
+    GC.@preserve binding begin
+        @cuda threads=32 shmem=transfer_bytes(plan)+8*128 tma_store_kernel!(src,binding,(Int32(0),Int32(0),Int32(1),Int32(2),Int32(1)))
+        synchronize()
+    end
+    expected=fill(111f0,32,2,64,3,2)
+    expected[:,2,:,3,2]=Array(src)
+    @test Array(parent_dst) == expected
 end
 else
     @test_skip false # TMA runtime requires CC >= 9.0

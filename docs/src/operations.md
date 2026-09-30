@@ -95,8 +95,10 @@ MMA).
 A [`TMATile`](@ref) describes a 2-D tile that the tensor memory
 accelerator moves between global memory and swizzled shared storage: along
 its inner axis, up to eight swizzle rows (stripes) of 32, 64 or 128 bytes.
-`prepare_tma(plan, array)` encodes and uploads its descriptor on the host;
-in the kernel, `tma_load!(shared_tile(binding, ptr), binding, origin,
+`prepare_tma(plan, array)` encodes and uploads its descriptor on the host,
+for a matrix or matrices along up to three more axes, of a `CuArray` or a
+strided view or permutation of one (so a PyTorch-layout tensor binds
+without a copy); in the kernel, `tma_load!(shared_tile(binding, ptr), binding, origin,
 barrier)` copies the tile (one box per stripe) and completes on the
 barrier, and `tma_store!` writes back in bulk groups. The shared storage,
 `shared_layout(plan)`, is the canonical swizzled encoding `ldmatrix`, WGMMA

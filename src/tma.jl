@@ -68,8 +68,8 @@ end
 # Host bindings retain BOTH the source tensor and the descriptor allocation.
 # Adaptation creates the isbits device carrier without address-space casts in
 # device IR. No lifetime claim is attached to the borrowed device value. `R`
-# is the array rank the descriptor was encoded for: 2 for one matrix, 3 for
-# a batch of matrices along the third axis (one tile of one batch per copy).
+# is the array rank the descriptor was encoded for: 2 for one matrix, 3-5 for
+# matrices along up to three batch axes (one tile of one matrix per copy).
 struct HostTMA{P,A,D,B,R}
     plan::P
     source::A
@@ -92,12 +92,15 @@ swizzle_bytes(b::Union{HostTMA,TMABinding}) = swizzle_bytes(b.plan)
 """
     prepare_tma(plan, array; bounds=size(array))
 
-Encode and upload a descriptor on the host. `array` is a dense device matrix
-stored as (inner, outer), irrespective of the plan's logical axis order, or a
-three-dimensional array of such matrices along its third axis, in which case
-origins take a third coordinate selecting the matrix and every matrix is
-bounded separately. It must have a 16-byte-aligned pointer and column
-stride. `bounds` names the logical extents when the array is padded: copies
+Encode and upload a descriptor on the host. `array` is a device matrix
+stored as (inner, outer), irrespective of the plan's logical axis order, or
+an array of such matrices along up to three further axes, in which case
+origins take one more coordinate per axis selecting the matrix and every
+matrix is bounded separately. It is a `CuArray` or a strided view or
+`PermutedDimsArray` of one, contiguous along its first axis, with a
+16-byte-aligned pointer and every other stride a positive multiple of 16
+bytes: a (d, heads, seq, batch) array permuted to (d, seq, heads, batch)
+binds without a copy. `bounds` names the logical extents when the array is padded: copies
 zero-fill loads and skip stores beyond them. The returned binding retains
 array and descriptor storage; keep it
 alive through all launches and graph replays. One binding serves loads and
@@ -110,8 +113,8 @@ function prepare_tma end
     tma_load!(dst, binding, origin, barrier::Barrier; cta=nothing)
 
 Issue one TMA copy of the binding's box at a zero-based logical `origin` (a
-pair of integers, or a triple whose third coordinate selects the matrix of
-a three-dimensional binding) into the canonical shared tile `dst`. One
+pair of integers, followed by the matrix's coordinates along the batch axes
+of a binding of higher rank) into the canonical shared tile `dst`. One
 thread issues it. The copy completes on `barrier`, whose current phase
 must expect its [`transfer_bytes`](@ref) (`arrive!(barrier, bytes)`);
 [`wait`](@ref Base.wait(::Barrier,::Integer)) for that phase before reading
