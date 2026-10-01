@@ -1,5 +1,6 @@
 module StreamingAttention
 using Tylo, PTX, CUDACore, BFloat16s
+using CUDACore: i32
 using Tylo.Layouts: @Layout
 
 # One CTA owns 128 queries of one head as two groups of four warps; each
@@ -18,8 +19,8 @@ function configuration(;causal::Bool=false)
     v=TMATile(BFloat16,(64,64),1) # (keys, dims), keys contiguous
     Config(;scores,output,q,k,v,causal)
 end
-const TILE_BYTES=Int32(8192) # one 64×64 BF16 tile; pointer offsets are bytes
-const STAGES=Int32(4)
+const TILE_BYTES=8192i32 # one 64×64 BF16 tile; pointer offsets are bytes
+const STAGES=4i32
 # Four barriers, then (from a 1024-byte boundary, the swizzle period) two Q
 # tiles and the stages, K and V of each.
 @inline layout()=SharedLayout((;
@@ -31,7 +32,7 @@ const STAGES=Int32(4)
 # optional Boolean mask. Masked scores become -Inf. Mask reads are clamped
 # into bounds and combined without short-circuits, so no element branches.
 @inline _mask_bit(::Nothing,kc,qr,m,n)=true
-@inline _mask_bit(mask,kc,qr,m,n)=@inbounds mask[min(kc,n-Int32(1))+Int32(1),min(qr,m-Int32(1))+Int32(1)]
+@inline _mask_bit(mask,kc,qr,m,n)=@inbounds mask[min(kc,n-1i32)+1i32,min(qr,m-1i32)+1i32]
 @inline function mask_scores(a,mask,tid,row,key,m,n,causal::Bool)
     keep=map(coordinates(a,tid)) do (r,c)
         qr,kc=row+r,key+c
@@ -77,18 +78,18 @@ end
 
 # One warp's Q rows as the four K-step A operands, held for the whole stream.
 Base.@propagate_inbounds function q_fragments(atom,sq,warp,lane)
-    r=warp*Int32(16)
-    (load_fragment(atom,OperandA(),window(sq,(r,Int32(0)),(16,16)),lane),load_fragment(atom,OperandA(),window(sq,(r,Int32(16)),(16,16)),lane),
-     load_fragment(atom,OperandA(),window(sq,(r,Int32(32)),(16,16)),lane),load_fragment(atom,OperandA(),window(sq,(r,Int32(48)),(16,16)),lane))
+    r=warp*16i32
+    (load_fragment(atom,OperandA(),window(sq,(r,0i32),(16,16)),lane),load_fragment(atom,OperandA(),window(sq,(r,16i32),(16,16)),lane),
+     load_fragment(atom,OperandA(),window(sq,(r,32i32),(16,16)),lane),load_fragment(atom,OperandA(),window(sq,(r,48i32),(16,16)),lane))
 end
 @inline _head_pointer(a,head)=pointer(a)+Int(head)*(size(a,1)*size(a,2))*sizeof(eltype(a))
 
 # Tile t's K and V land in its stage of the ring.
 @inline function load_tile!(kb,vb,smem,s,t,head)
     at=smem.kv[s.slot]
-    key=t*Int32(64)
-    @inbounds tma_load!(shared_tile(kb,at),kb,(Int32(0),key,head),s.full)
-    @inbounds tma_load!(shared_tile(vb,at+TILE_BYTES),vb,(key,Int32(0),head),s.full)
+    key=t*64i32
+    @inbounds tma_load!(shared_tile(kb,at),kb,(0i32,key,head),s.full)
+    @inbounds tma_load!(shared_tile(vb,at+TILE_BYTES),vb,(key,0i32,head),s.full)
     nothing
 end
 
@@ -96,35 +97,35 @@ end
 # output(64,M,H), mask(N,M) or nothing. n is the logical key count. No
 # scores or probabilities are stored to global memory.
 function attention_kernel!(output,qb,kb,vb,mask,m::Int32,n::Int32,config::Config)
-    tid=Int32(threadIdx().x)-Int32(1)
+    tid=Int32(threadIdx().x)-1i32
     g=tid>>7               # warp group
-    wtid=tid&Int32(127)
+    wtid=tid&127i32
     warp=wtid>>5
-    lane=tid&Int32(31)
-    row0=(Int32(blockIdx().x)-Int32(1))*Int32(128)
-    row=row0+g*Int32(64)   # this group's first query row
-    head=Int32(blockIdx().y)-Int32(1)
+    lane=tid&31i32
+    row0=(Int32(blockIdx().x)-1i32)*128i32
+    row=row0+g*64i32   # this group's first query row
+    head=Int32(blockIdx().y)-1i32
     smem=bind(layout(),pointer(@inbounds CuDynamicSharedArray(UInt8,shared_bytes(layout()))))
     # Tile t's stage: the producer and both groups count tiles. A stage is
     # refilled only once both groups have passed it, which the turns order.
     tiles_ring=Ring(smem.full)
     # Barrier turn[0] admits group 0 to the tensor pipe, turn[1] group 1.
     turn=named_barriers((;turn=named(2;threads=256))).turn
-    limit=config.causal ? min(n,row0+Int32(128)) : n
-    tiles=(limit+Int32(63))÷Int32(64)
-    if tid==Int32(0)
+    limit=config.causal ? min(n,row0+128i32) : n
+    tiles=(limit+63i32)÷64i32
+    if tid==0i32
         initialize!(smem)
         fence_barrier_init()
     end
     sync_threads()
-    if tid==Int32(0)
+    if tid==0i32
         # Both Q tiles and tile 0 complete the first stage's barrier.
         s=tiles_ring[0]
-        arrive!(s.full,2TILE_BYTES+(tiles>Int32(0) ? 2TILE_BYTES : Int32(0)))
-        @inbounds tma_load!(shared_tile(qb,smem.q[0]),qb,(row0,Int32(0),head),s.full)
-        @inbounds tma_load!(shared_tile(qb,smem.q[1]),qb,(row0+Int32(64),Int32(0),head),s.full)
-        tiles>Int32(0) && load_tile!(kb,vb,smem,s,Int32(0),head)
-        for t in Int32(1):min(tiles,Int32(3))-Int32(1)
+        arrive!(s.full,2TILE_BYTES+(tiles>0i32 ? 2TILE_BYTES : 0i32))
+        @inbounds tma_load!(shared_tile(qb,smem.q[0]),qb,(row0,0i32,head),s.full)
+        @inbounds tma_load!(shared_tile(qb,smem.q[1]),qb,(row0+64i32,0i32,head),s.full)
+        tiles>0i32 && load_tile!(kb,vb,smem,s,0i32,head)
+        for t in 1i32:min(tiles,3i32)-1i32
             s=tiles_ring[t]
             arrive!(s.full,2TILE_BYTES)
             load_tile!(kb,vb,smem,s,t,head)
@@ -140,21 +141,21 @@ function attention_kernel!(output,qb,kb,vb,mask,m::Int32,n::Int32,config::Config
     # Block b of a group issues PV of tile b-1 and QK of tile b; the groups
     # take turns, so one group's softmax overlaps the other's MMAs. Each
     # turn counts both groups: one arrives without waiting, the other waits.
-    for b in Int32(0):tiles-Int32(1)
-        (b>Int32(0) || g==Int32(1)) && wait(@inbounds turn[g])
-        b>Int32(0) && (out=weighted_values(config.output,w,shared_tile(vb,smem.kv[tiles_ring[b-Int32(1)].slot]+TILE_BYTES),out,lane))
+    for b in 0i32:tiles-1i32
+        (b>0i32 || g==1i32) && wait(@inbounds turn[g])
+        b>0i32 && (out=weighted_values(config.output,w,shared_tile(vb,smem.kv[tiles_ring[b-1i32].slot]+TILE_BYTES),out,lane))
         wait(tiles_ring[b])
         s=scores(config.scores,qf,shared_tile(kb,smem.kv[tiles_ring[b].slot]),lane)
-        arrive!(@inbounds turn[Int32(1)-g])
-        if tid==Int32(128) && b+Int32(3)<tiles
+        arrive!(@inbounds turn[1i32-g])
+        if tid==128i32 && b+3i32<tiles
             # Tile b+3's stage held tile b-1, whose last readers were both
             # groups' blocks b, and group 1's has just finished.
-            next=tiles_ring[b+Int32(3)]
+            next=tiles_ring[b+3i32]
             arrive!(next.full,2TILE_BYTES)
-            load_tile!(kb,vb,smem,next,b+Int32(3),head)
+            load_tile!(kb,vb,smem,next,b+3i32,head)
         end
-        key=b*Int32(64)
-        plain=key+Int32(64)<=n && (!config.causal || key<row) && mask === nothing
+        key=b*64i32
+        plain=key+64i32<=n && (!config.causal || key<row) && mask === nothing
         s=plain ? s .* 0.125f0 : mask_scores(s,mask,wtid,row,key,m,n,config.causal)
         update=softmax_update(state,s)
         out=out .* update.rescale
@@ -162,16 +163,16 @@ function attention_kernel!(output,qb,kb,vb,mask,m::Int32,n::Int32,config::Config
         state=update.state
     end
     # The last block: PV of the last tile; group 0 admits group 1 once more.
-    (g==Int32(1) || tiles>Int32(0)) && wait(@inbounds turn[g])
-    tiles>Int32(0) && (out=weighted_values(config.output,w,shared_tile(vb,smem.kv[tiles_ring[tiles-Int32(1)].slot]+TILE_BYTES),out,lane))
-    g==Int32(0) && arrive!(@inbounds turn[1])
+    (g==1i32 || tiles>0i32) && wait(@inbounds turn[g])
+    tiles>0i32 && (out=weighted_values(config.output,w,shared_tile(vb,smem.kv[tiles_ring[tiles-1i32].slot]+TILE_BYTES),out,lane))
+    g==0i32 && arrive!(@inbounds turn[1])
     dst=@inbounds GlobalTile(_head_pointer(output,head),@Layout(($m, 64), (64, 1)),16)
     result=softmax_normalize(out,state)
     # The last tile of a sequence stores through the bounds.
-    @inbounds if row+Int32(64)<=m
-        store!(window(dst,(row,Int32(0)),(64,64)),result,wtid)
+    @inbounds if row+64i32<=m
+        store!(window(dst,(row,0i32),(64,64)),result,wtid)
     else
-        store!(window(bound(dst,size(dst)),(row,Int32(0)),(64,64)),result,wtid)
+        store!(window(bound(dst,size(dst)),(row,0i32),(64,64)),result,wtid)
     end
     nothing
 end

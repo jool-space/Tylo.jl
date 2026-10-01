@@ -1,4 +1,5 @@
 using Tylo, CUDACore, BFloat16s
+using CUDACore: i32
 using Tylo.Layouts: @Layout, Swizzle, compose, cosize
 
 function gemm_config(::Type{T}=BFloat16; block=(64,64,32),warps=(2,2),swizzled=true,stages=2,bounds=false,relu=false) where T
@@ -52,7 +53,7 @@ end
 end
 
 # 16-byte rows: the base and every leading dimension a multiple of 16 bytes.
-@inline aligned16(p,ld) = reinterpret(UInt64,p) % UInt64(16) == 0 && (ld*Int32(sizeof(eltype(p)))) % Int32(16) == 0
+@inline aligned16(p,ld) = reinterpret(UInt64,p) % UInt64(16) == 0 && (ld*Int32(sizeof(eltype(p)))) % 16i32 == 0
 
 # This example owns the pipeline. Tylo's operations do not impose CTA roles,
 # allocation policy or buffer reuse; the two barriers have distinct purposes.
@@ -79,17 +80,17 @@ end
     stages = config.stages
     layout = gemm_shared(config,T)
     smem = bind(layout,pointer(@inbounds CuDynamicSharedArray(UInt8,shared_bytes(layout))))
-    tid = Int32(threadIdx().x)-Int32(1)
-    row = (Int32(blockIdx().x)-Int32(1))*Int32(bm)
-    col = (Int32(blockIdx().y)-Int32(1))*Int32(bn)
+    tid = Int32(threadIdx().x)-1i32
+    row = (Int32(blockIdx().x)-1i32)*Int32(bm)
+    col = (Int32(blockIdx().y)-1i32)*Int32(bn)
     iterations = config.bounds ? cld(k,Int32(bk)) : k ÷ Int32(bk)
-    for stage in Int32(0):min(stages,iterations)-Int32(1)
+    for stage in 0i32:min(stages,iterations)-1i32
         prefetch_stage!(smem,config,a,b,row,col,stage*Int32(bk),stage,tid)
     end
     acc = zero_accumulator(config.plan)
-    for i in Int32(0):iterations-Int32(1)
+    for i in 0i32:iterations-1i32
         stage = i % stages
-        if stages == 2 && i+Int32(1) < iterations
+        if stages == 2 && i+1i32 < iterations
             wait_copies(1)
         else
             wait_copies(0)

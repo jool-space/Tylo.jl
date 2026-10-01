@@ -1,4 +1,5 @@
 using Tylo, PTX, CUDACore, BFloat16s
+using CUDACore: i32
 using Tylo.Layouts: Layout, static
 using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_before_thread_sync, ctas
 include(joinpath(@__DIR__,"..","hopper_gemm","kernel.jl"))     # tile_order, Launch
@@ -41,18 +42,18 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,cfg::Config)
     smem = bind(layout,pointer(@inbounds CuDynamicSharedArray(UInt8,shared_bytes(layout))))
     stages = Ring(smem.full,smem.empty)
     accumulators = Ring(smem.ready,smem.drained)            # double-buffered in TMEM
-    tid = Int32(threadIdx().x)-Int32(1)
-    warp = warp_uniform(tid ÷ Int32(32))
-    if tid == Int32(0)
+    tid = Int32(threadIdx().x)-1i32
+    warp = warp_uniform(tid ÷ 32i32)
+    if tid == 0i32
         initialize!(smem)
         fence_barrier_init()
     end
-    warp == Int32(1) && tmem_allocate!(atom,pointer(smem.tmem),2N)
+    warp == 1i32 && tmem_allocate!(atom,pointer(smem.tmem),2N)
     fence_before_thread_sync()
     CTAs == 1 ? sync_threads() : cluster_sync()
     fence_after_thread_sync()
     tmem = smem.tmem[]
-    rank = CTAs == 1 ? Int32(0) : cluster_rank()
+    rank = CTAs == 1 ? 0i32 : cluster_rank()
     # A pair's commits arrive in both CTAs; multicast needs a cluster launch.
     @inline release(barrier) = CTAs == 1 ? commit_mma(atom,barrier) : commit_mma(atom,barrier,UInt16(0b11))
     # Shapes of any size: the last tiles and stage may be partial, their
@@ -61,15 +62,15 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,cfg::Config)
     tiles_m, tiles_n = cld(m,Int32(M)), cld(n,Int32(N))
     tiles = tiles_m*tiles_n
     count = cld(k,Int32(KS))
-    first_tile = (Int32(blockIdx().x)-Int32(1)) ÷ Int32(CTAs)
+    first_tile = (Int32(blockIdx().x)-1i32) ÷ Int32(CTAs)
     stride = gridDim().x ÷ Int32(CTAs)
-    if warp == Int32(0)
-        if tid == Int32(0)
-            i = Int32(0)                                    # stages filled
+    if warp == 0i32
+        if tid == 0i32
+            i = 0i32                                    # stages filled
             t = first_tile
             while t < tiles
                 tm, tn = tile_order(t,tiles_m,tiles_n,cfg.group)
-                for kk in Int32(0):count-Int32(1)
+                for kk in 0i32:count-1i32
                     s = stages[i]
                     acquire(s)
                     at = smem.stage[s.slot]
@@ -78,50 +79,50 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,cfg::Config)
                         @inbounds tma_load!(shared_tile(a,at),a,(tm*Int32(M),Int32(KS)*kk),s.full)
                         @inbounds tma_load!(shared_tile(b,at+transfer_bytes(a)),b,(Int32(KS)*kk,tn*Int32(N)),s.full)
                     else
-                        rank == Int32(0) && arrive!(s.full,CTAs*bytes)
-                        @inbounds tma_load!(shared_tile(a,at),a,(tm*Int32(M)+rank*Int32(128),Int32(KS)*kk),s.full;cta=0)
+                        rank == 0i32 && arrive!(s.full,CTAs*bytes)
+                        @inbounds tma_load!(shared_tile(a,at),a,(tm*Int32(M)+rank*128i32,Int32(KS)*kk),s.full;cta=0)
                         @inbounds tma_load!(shared_tile(b,at+transfer_bytes(a)),b,(Int32(KS)*kk,tn*Int32(N)+rank*Int32(N÷CTAs)),s.full;cta=0)
                     end
-                    i += Int32(1)
+                    i += 1i32
                 end
                 t += stride
             end
         end
-    elseif warp == Int32(1)
-        if rank == Int32(0)
+    elseif warp == 1i32
+        if rank == 0i32
             # The whole warp runs the role, so that its counters and
             # descriptors are warp-uniform; one lane issues.
-            i = Int32(0)                                    # stages consumed
-            j = Int32(0)                                    # tiles issued by this CTA
+            i = 0i32                                    # stages consumed
+            j = 0i32                                    # tiles issued by this CTA
             t = first_tile
             while t < tiles
                 u = accumulators[j]
                 acquire(u)
                 fence_after_thread_sync()
                 acc = accumulator(atom,tmem+UInt32(N)*(u.slot%UInt32))
-                for kk in Int32(0):count-Int32(1)
+                for kk in 0i32:count-1i32
                     s = stages[i]
                     wait(s)
                     fence_after_thread_sync()
                     at = smem.stage[s.slot]
                     @inbounds mma(atom,acc,operand(atom,OperandA(),shared_tile(a,at)),
-                                  operand(atom,OperandB(),shared_tile(b,at+transfer_bytes(a))),KS,kk != Int32(0))
+                                  operand(atom,OperandB(),shared_tile(b,at+transfer_bytes(a))),KS,kk != 0i32)
                     release(s.empty)                        # the stage is free once these MMAs complete
-                    i += Int32(1)
+                    i += 1i32
                 end
                 release(u.full)
-                j += Int32(1)
+                j += 1i32
                 t += stride
             end
         end
-    elseif warp >= Int32(4)
-        band = (warp-Int32(4))*Int32(32)                    # the TMEM lanes this warp may read
-        lane = tid%Int32(32)
+    elseif warp >= 4i32
+        band = (warp-4i32)*32i32                    # the TMEM lanes this warp may read
+        lane = tid%32i32
         # Tiles at the edges store through bounds; the others need none.
         out = @inbounds GlobalTile(pointer(c),Layout((tiles_m*Int32(M),tiles_n*Int32(N)),(n,static(1))),16)
         edge = @inbounds bound(out,(m,n))
         rows = distribute((32,32),32;vector=32,axis=2)      # lane t holds row t, 32 columns
-        j = Int32(0)
+        j = 0i32
         t = first_tile
         while t < tiles
             tm, tn = tile_order(t,tiles_m,tiles_n,cfg.group)
@@ -129,23 +130,23 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,cfg::Config)
             wait(u)
             fence_after_thread_sync()
             acc = accumulator(atom,tmem+UInt32(N)*(u.slot%UInt32))
-            row = tm*Int32(M)+rank*Int32(128)+band
-            inside = (tm+Int32(1))*Int32(M) <= m && (tn+Int32(1))*Int32(N) <= n
+            row = tm*Int32(M)+rank*128i32+band
+            inside = (tm+1i32)*Int32(M) <= m && (tn+1i32)*Int32(N) <= n
             for col in 0:32:N-32
                 values = Fragment{BFloat16}(wait_load(@inbounds load_async(rows,window(acc,(band,Int32(col)),(32,32)))))
                 origin = (row,tn*Int32(N)+Int32(col))
                 inside ? (@inbounds store!(window(out,origin,(32,32)),values,lane)) : (@inbounds store!(window(edge,origin,(32,32)),values,lane))
             end
             fence_before_thread_sync()
-            lane == Int32(0) && (CTAs == 1 ? arrive!(u.empty) : arrive!(u.empty;cta=0))
-            j += Int32(1)
+            lane == 0i32 && (CTAs == 1 ? arrive!(u.empty) : arrive!(u.empty;cta=0))
+            j += 1i32
             t += stride
         end
     end
     fence_before_thread_sync()
     CTAs == 1 ? sync_threads() : cluster_sync()             # no TMEM access remains in either CTA
     fence_after_thread_sync()
-    warp == Int32(1) && tmem_deallocate!(atom,tmem,2N)
+    warp == 1i32 && tmem_deallocate!(atom,tmem,2N)
     nothing
 end
 

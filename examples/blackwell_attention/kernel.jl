@@ -1,4 +1,5 @@
 using Tylo, PTX, CUDACore, BFloat16s
+using CUDACore: i32
 using Tylo.Layouts: Layout, static
 using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_before_thread_sync
 include(joinpath(@__DIR__,"..","launch.jl"))
@@ -74,17 +75,17 @@ end
 # scratch) for bulk copies, tile i at `buffer`+64i KB: for each 4 columns,
 # the tile's 128 rows, 4 values each, so that a warp's lanes (rows) write
 # and read 512 contiguous bytes.
-@inline _staged(buffer,i) = @inbounds SharedTile(reinterpret(Core.LLVMPtr{Float32,3},buffer)+Int32(65536)*i,
+@inline _staged(buffer,i) = @inbounds SharedTile(reinterpret(Core.LLVMPtr{Float32,3},buffer)+65536i32*i,
                                                  Layout((static(128),(static(4),static(32))),(static(4),(static(1),static(512)))),16)
 # The rows' base-2 log-sum-exps staged after a tile's part.
-@inline _logsums(part) = Scalars(reinterpret(Core.LLVMPtr{Float32,3},part+Int32(65536)),128)
+@inline _logsums(part) = Scalars(reinterpret(Core.LLVMPtr{Float32,3},part+65536i32),128)
 # Counts and flags in global memory, shared between CTAs, in the orderings
 # of PTX's memory model that the merge relies on.
-@inline _count!(p) = ptx"atom.add.relaxed.gpu.global.s32"(p,Int32(1))   # the count before
-@inline _publish!(p) = (ptx"fence.acq_rel.gpu"(); ptx"red.release.gpu.global.add.s32"(p,Int32(1)))
+@inline _count!(p) = ptx"atom.add.relaxed.gpu.global.s32"(p,1i32)   # the count before
+@inline _publish!(p) = (ptx"fence.acq_rel.gpu"(); ptx"red.release.gpu.global.add.s32"(p,1i32))
 @inline _observe(p) = ptx"ld.acquire.gpu.global.s32"(p)
-@inline _reset!(p) = ptx"st.relaxed.gpu.global.s32"(p,Int32(0))
-@inline _count_out!(p) = ptx"atom.add.acq_rel.gpu.global.s32"(p,Int32(1))   # the count before, ordered both ways
+@inline _reset!(p) = ptx"st.relaxed.gpu.global.s32"(p,0i32)
+@inline _count_out!(p) = ptx"atom.add.acq_rel.gpu.global.s32"(p,1i32)   # the count before, ordered both ways
 # A value another CTA wrote, from L2 (the SM's L1 is not coherent).
 @inline _load_l2(p) = ptx"ld.global.cg.f32"(p)
 # A merged row's largest log-sum-exp (online, over the parts), the inverse
@@ -94,9 +95,9 @@ end
     l = @inbounds smem.sums[stat]
     mine = @inbounds(smem.maxima[stat])+log2_approx(l)
     top = mine; total = 1f0
-    for p in Int32(0):parts-Int32(1)
+    for p in 0i32:parts-1i32
         p == own && continue
-        x = _load_l2(pointer(logsum(p))+Int32(4)*r)
+        x = _load_l2(pointer(logsum(p))+4i32*r)
         if x > top
             total = muladd(total,exp2_approx(top-x),1f0); top = x
         else
@@ -120,70 +121,70 @@ end
 # TMEM until the last, a tile while the next arrives.
 @inline function finish_part!(smem,merge,scratch,counter,dst,words,parity,rows,a,parts,own,slots,q0,rank,band,lane,tid,CTAs)
     buffer = smem.kv[0]
-    count = pointer(counter,Int32(3)+Int32(2)*(a*CTAs+rank))   # finished; written follows
+    count = pointer(counter,3i32+2i32*(a*CTAs+rank))   # finished; written follows
     first = a*parts
-    slot(p) = pointer(scratch,Int32(1)+(first+p)*(Int32(32768)*CTAs))+rank*Int32(131072)
-    half = Int32(65536)                                 # a tile's bytes
-    logsum(p) = Scalars(pointer(scratch,Int32(1)+slots*(Int32(32768)*CTAs)+(first+p)*(Int32(256)*CTAs)+rank*Int32(256)),256)
-    stat(i) = band+lane+Int32(128)*(i+Int32(2)*parity)
-    part(i) = Int32(128)*i+band+lane                    # this thread's row of the CTA's part
+    slot(p) = pointer(scratch,1i32+(first+p)*(32768i32*CTAs))+rank*131072i32
+    half = 65536i32                                 # a tile's bytes
+    logsum(p) = Scalars(pointer(scratch,1i32+slots*(32768i32*CTAs)+(first+p)*(256i32*CTAs)+rank*256i32),256)
+    stat(i) = band+lane+128i32*(i+2i32*parity)
+    part(i) = 128i32*i+band+lane                    # this thread's row of the CTA's part
     wait(merge)
-    if tid == Int32(256)
-        last = _count!(count) == parts-Int32(1)
+    if tid == 256i32
+        last = _count!(count) == parts-1i32
         smem.merging[] = Int32(last)
     end
     wait(merge)
-    if smem.merging[] == Int32(0)
-        for i in Int32(0):Int32(1)
+    if smem.merging[] == 0i32
+        for i in 0i32:1i32
             l = @inbounds smem.sums[stat(i)]
             for q in 0:3
-                values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*i+Int32(32q)),(32,32))))
+                values = wait_load(@inbounds load_async(rows,window(words,(band,256i32+128i32*i+Int32(32q)),(32,32))))
                 @inbounds store!(tile(_staged(buffer,i),(32,32),(band>>5,Int32(q))),values .* (1f0/l),lane)
             end
             @inbounds logsum(own)[part(i)] = @inbounds(smem.maxima[stat(i)])+log2_approx(l)
         end
         fence_async_shared()
         wait(merge)
-        if tid == Int32(256)
+        if tid == 256i32
             bulk_copy!(slot(own),buffer,131072)
             commit_tma_stores()
             wait_tma_stores(0)
             fence_async_global()
-            _publish!(count+Int32(4))                   # written
+            _publish!(count+4i32)                   # written
         end
         return nothing
     end
-    if tid == Int32(256)
-        while _observe(count+Int32(4)) != parts-Int32(1) end
-        _reset!(count); _reset!(count+Int32(4))
+    if tid == 256i32
+        while _observe(count+4i32) != parts-1i32 end
+        _reset!(count); _reset!(count+4i32)
         fence_async_global()
     end
     wait(merge)
-    tops = (_weights(smem,stat(Int32(0)),logsum,part(Int32(0)),parts,own),
-            _weights(smem,stat(Int32(1)),logsum,part(Int32(1)),parts,own))
-    k = Int32(0)
-    for p in Int32(0):parts-Int32(1)
+    tops = (_weights(smem,stat(0i32),logsum,part(0i32),parts,own),
+            _weights(smem,stat(1i32),logsum,part(1i32),parts,own))
+    k = 0i32
+    for p in 0i32:parts-1i32
         p == own && continue
-        if tid == Int32(256)
-            for i in Int32(0):Int32(1)
+        if tid == 256i32
+            for i in 0i32:1i32
                 arrive!(smem.copied[i],half)
                 bulk_copy!(buffer+i*half,slot(p)+i*half,half,smem.copied[i])
             end
         end
-        weights = (exp2_approx(_load_l2(pointer(logsum(p))+Int32(4)*part(Int32(0)))-tops[1][1])*tops[1][2],
-                   exp2_approx(_load_l2(pointer(logsum(p))+Int32(4)*part(Int32(1)))-tops[2][1])*tops[2][2])
-        final = k == parts-Int32(2)
-        for i in Int32(0):Int32(1)
+        weights = (exp2_approx(_load_l2(pointer(logsum(p))+4i32*part(0i32))-tops[1][1])*tops[1][2],
+                   exp2_approx(_load_l2(pointer(logsum(p))+4i32*part(1i32))-tops[2][1])*tops[2][2])
+        final = k == parts-2i32
+        for i in 0i32:1i32
             wait(Ring(smem.copied[i])[k])
-            scale = k == Int32(0) ? (i == Int32(0) ? tops[1][3] : tops[2][3]) : 1f0
-            weight = i == Int32(0) ? weights[1] : weights[2]
+            scale = k == 0i32 ? (i == 0i32 ? tops[1][3] : tops[2][3]) : 1f0
+            weight = i == 0i32 ? weights[1] : weights[2]
             for q in 0:3
-                o = @inbounds window(words,(band,Int32(256)+Int32(128)*i+Int32(32q)),(32,32))
+                o = @inbounds window(words,(band,256i32+128i32*i+Int32(32q)),(32,32))
                 values = wait_load(@inbounds load_async(rows,o))
                 theirs = @inbounds load_fragment(rows,tile(_staged(buffer,i),(32,32),(band>>5,Int32(q))),lane)
                 merged = muladd.(weight,theirs,values .* scale)
                 if final
-                    @inbounds store!(window(dst,(q0+Int32(128)*i+band,Int32(32q)),(32,32)),Fragment{BFloat16}(merged),lane)
+                    @inbounds store!(window(dst,(q0+128i32*i+band,Int32(32q)),(32,32)),Fragment{BFloat16}(merged),lane)
                 else
                     @inbounds store_async!(o,merged)
                 end
@@ -192,7 +193,7 @@ end
         final && break
         wait_stores()
         wait(merge)                                     # the buffer is free for the next part
-        k += Int32(1)
+        k += 1i32
     end
     nothing
 end
@@ -209,20 +210,20 @@ end
 @inline function finish_pair!(smem,merge,dst,words,parity,rows,q0,band,lane,tid)
     ready, received = smem.copied[0], smem.copied[1]
     staged, landing = smem.kv[1], smem.q[0]
-    me = cluster_rank(); other = Int32(1)-me
+    me = cluster_rank(); other = 1i32-me
     bytes = 65536+512                                   # a tile's part and its rows' log-sum-exps
     r = band+lane                                       # this thread's row of a tile
-    stat(i) = r+Int32(128)*(i+Int32(2)*parity)
-    tid == Int32(256) && arrive!(received,bytes)
+    stat(i) = r+128i32*(i+2i32*parity)
+    tid == 256i32 && arrive!(received,bytes)
     l = @inbounds smem.sums[stat(other)]
     for q in 0:3
-        values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*other+Int32(32q)),(32,32))))
+        values = wait_load(@inbounds load_async(rows,window(words,(band,256i32+128i32*other+Int32(32q)),(32,32))))
         @inbounds store!(tile(_staged(staged,0),(32,32),(band>>5,Int32(q))),values .* (1f0/l),lane)
     end
     @inbounds _logsums(staged)[r] = @inbounds(smem.maxima[stat(other)])+log2_approx(l)
     fence_async_shared()                                # the staged part, to the bulk copy
     wait(merge)
-    if tid == Int32(256)
+    if tid == 256i32
         arrive!(ready;cta=other,scope=:cluster)          # this CTA's landing is free
         wait(ready,0;scope=:cluster)                    # the other's is
         bulk_copy!(landing,staged,bytes,received;cta=other)
@@ -236,9 +237,9 @@ end
     inverse = 1f0/(wm+wo)
     scale, weight = wm*inverse/l, wo*inverse
     for q in 0:3
-        values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*me+Int32(32q)),(32,32))))
+        values = wait_load(@inbounds load_async(rows,window(words,(band,256i32+128i32*me+Int32(32q)),(32,32))))
         theirs = @inbounds load_fragment(rows,tile(_staged(landing,0),(32,32),(band>>5,Int32(q))),lane)
-        @inbounds store!(window(dst,(q0+Int32(128)*me+band,Int32(32q)),(32,32)),Fragment{BFloat16}(muladd.(weight,theirs,values .* scale)),lane)
+        @inbounds store!(window(dst,(q0+128i32*me+band,Int32(32q)),(32,32)),Fragment{BFloat16}(muladd.(weight,theirs,values .* scale)),lane)
     end
     nothing
 end
@@ -290,26 +291,26 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
     # Named barriers: handoff[4i+b] pairs softmax warp (tile i, band b) with
     # correction warp b; merge synchronizes the correction warps.
     nbar = named_barriers((;handoff=named(8;threads=64),merge=named(;threads=128)))
-    tid = Int32(threadIdx().x)-Int32(1)
-    warp = warp_uniform(tid ÷ Int32(32))
-    lane = tid%Int32(32)
-    if tid == Int32(0)
+    tid = Int32(threadIdx().x)-1i32
+    warp = warp_uniform(tid ÷ 32i32)
+    lane = tid%32i32
+    if tid == 0i32
         initialize!(smem)
         fence_barrier_init()
     end
-    warp == Int32(12) && tmem_allocate!(qk,pointer(smem.tmem),512)
+    warp == 12i32 && tmem_allocate!(qk,pointer(smem.tmem),512)
     fence_before_thread_sync()
     CTAs == 1 && !Clustered ? sync_threads() : cluster_sync()
     fence_after_thread_sync()
     tmem = smem.tmem[]
-    rank = CTAs == 1 ? Int32(0) : cluster_rank()
+    rank = CTAs == 1 ? 0i32 : cluster_rank()
     # Commits arrive in both CTAs of a pair; loads complete on the even CTA's
     # barriers; P and O are released to the even CTA's MMA warp.
     @inline commit(b) = CTAs == 1 ? commit_mma(b) : commit_mma(qk,b,UInt16(0b11))
     @inline completion() = CTAs == 1 ? nothing : 0
     @inline function release_to_mma(local_barrier,pair_barrier)
         sync_warp()
-        lane == Int32(0) && (CTAs == 1 ? arrive!(local_barrier) : arrive!(pair_barrier;cta=0))
+        lane == 0i32 && (CTAs == 1 ? arrive!(local_barrier) : arrive!(pair_barrier;cta=0))
     end
     # The whole allocation, as FP32 columns and as BF16 halves of them; S, P
     # and O of each tile are windows of it, so that one register holds TMEM.
@@ -331,9 +332,9 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
     tiles = nq*heads
     # (Read where each role starts, after its register reallocation: a value
     # live across it would be spilled.)
-    @inline first_tile() = (Int32(blockIdx().x)-Int32(1)) ÷ Int32(CTAs)
+    @inline first_tile() = (Int32(blockIdx().x)-1i32) ÷ Int32(CTAs)
     stride = gridDim().x ÷ Int32(CTAs)
-    @inline blocks_of(lk) = (lk+Int32(127)) >> 7           # key blocks, the last maybe partial
+    @inline blocks_of(lk) = (lk+127i32) >> 7           # key blocks, the last maybe partial
     # Item `t`: its head, first query row and key blocks. Causal items walk
     # each head's query blocks longest first, and stop at their diagonal:
     # the last block is the second tile's alone.
@@ -341,8 +342,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
     # sections whose K and V fit in L2 (about 50 MB), and within a section
     # every head's longest block before any shorter one. (Head by head, a
     # long item would still be handed out near the end.)
-    fit = max(Int32(1),unchecked_div(Int32(50_000_000),Int32(512)*seq_kv))*group
-    section = min(Int32(1) << (Int32(31)-leading_zeros(fit) % Int32),heads)
+    fit = max(1i32,unchecked_div(Int32(50_000_000),512i32*seq_kv))*group
+    section = min(1i32 << (31i32-leading_zeros(fit) % Int32),heads)
     # Its geometry: head, first query row (of its sequence), and the
     # sequence's first query row, queries, first key row and keys.
     @inline function item(t)
@@ -352,22 +353,22 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
             within = t-s*per
             width = min(section,heads-s*section)
             head = s*section+unchecked_rem(within,width)
-            block = nq-Int32(1)-unchecked_div(within,width)
+            block = nq-1i32-unchecked_div(within,width)
         else
             head, block = unchecked_div(t,nq), unchecked_rem(t,nq)
         end
         if Varlen
-            sequence = @inbounds table[Int32(2)+Int32(2)*block]
-            entry = Int32(2)+Int32(2)*nq+Int32(4)*sequence
-            q0 = (@inbounds table[Int32(3)+Int32(2)*block])*Int32(256CTAs)+rank*Int32(256)
-            @inbounds (; head, q0, qs=table[entry], lq=table[entry+Int32(1)], ks=table[entry+Int32(2)], lk=table[entry+Int32(3)])
+            sequence = @inbounds table[2i32+2i32*block]
+            entry = 2i32+2i32*nq+4i32*sequence
+            q0 = (@inbounds table[3i32+2i32*block])*Int32(256CTAs)+rank*256i32
+            @inbounds (; head, q0, qs=table[entry], lq=table[entry+1i32], ks=table[entry+2i32], lk=table[entry+3i32])
         else
-            (; head, q0=block*Int32(256CTAs)+rank*Int32(256), qs=Int32(0), lq=seq, ks=Int32(0), lk=seq_kv)
+            (; head, q0=block*Int32(256CTAs)+rank*256i32, qs=0i32, lq=seq, ks=0i32, lk=seq_kv)
         end
     end
     # Causal row r sees keys up to r+lk-lq: the diagonal meets the keys'
     # end (more keys than queries: a prompt after cached keys).
-    @inline count(g) = Causal ? min(((g.q0+g.lk-g.lq+Int32(255)) >> 7)+Int32(1),blocks_of(g.lk)) : blocks_of(g.lk)
+    @inline count(g) = Causal ? min(((g.q0+g.lk-g.lq+255i32) >> 7)+1i32,blocks_of(g.lk)) : blocks_of(g.lk)
     # Unit `u` of the work: item `u` whole or, from `whole` on, one of
     # `parts` parts of an item of the last round, a range of its key blocks
     # whose results go to scratch slot `u-whole`. Its item's geometry, and
@@ -376,34 +377,34 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
     @inline function unit(u)
         if u < whole
             g = item(u)
-            (; g...,b0=Int32(0),nb=count(g),slot=Int32(-1))
+            (; g...,b0=0i32,nb=count(g),slot=-1i32)
         else
             w = u-whole
             a = unchecked_div(w,parts)
             g = item(whole+a)
             keys = blocks_of(g.lk)
             b0 = unchecked_div((w-a*parts)*keys,parts)
-            (; g...,b0,nb=unchecked_div((w-a*parts+Int32(1))*keys,parts)-b0,slot=w)
+            (; g...,b0,nb=unchecked_div((w-a*parts+1i32)*keys,parts)-b0,slot=w)
         end
     end
     # Tile i's blocks of a unit: a causal item's first tile ends a block
     # before the second, at its own diagonal, unless the keys end first (the
     # second tile's rows then lie past the sequence).
-    @inline early(g) = Causal && ((g.q0+g.lk-g.lq+Int32(255)) >> 7)+Int32(1) <= blocks_of(g.lk)
-    @inline tile_blocks(g,i) = g.nb-(i == 0 && early(g) ? Int32(1) : Int32(0))
+    @inline early(g) = Causal && ((g.q0+g.lk-g.lq+255i32) >> 7)+1i32 <= blocks_of(g.lk)
+    @inline tile_blocks(g,i) = g.nb-(i == 0 && early(g) ? 1i32 : 0i32)
     # The units: every `stride`th from `first_tile()`, or (`Dynamic`, whole
     # items only) handed out by the load thread from a global counter,
     # longest first, through two item slots; -1 ends the work.
     items = Ring(smem.itemready)                            # the item slots: the load thread fills, all read
     @inline next_item(t,n) = Dynamic ? (wait(items[n]); @inbounds(smem.ids[items[n].slot])) : t
-    @inline more(t) = Int32(0) <= t < units
+    @inline more(t) = 0i32 <= t < units
     c2 = scale*1.442695f0                                   # scores to base-2 exponents (log2 e)
     # The TMEM lanes a warp may access, and a lane's row of them: derived in
     # each role, after its register reallocation (a value live across it
     # would be spilled).
-    @inline lanes() = (warp%Int32(4))*Int32(32)
+    @inline lanes() = (warp%4i32)*32i32
     # The named barrier pairing softmax warp (tile i, band b) with correction warp b.
-    @inline handoff(i) = @inbounds nbar.handoff[Int32(4)*i+warp%Int32(4)]
+    @inline handoff(i) = @inbounds nbar.handoff[4i32*i+warp%4i32]
     # A tile's row sums of an item, in one of two buffers by item parity.
     @inline summed(i) = Ring(selectdim(smem.summed,1,i))
     rows = distribute((32,32),32;vector=32,axis=2)          # TMEM transfers: lane t holds row t, 32 columns
@@ -418,12 +419,12 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
     # (The recorder is derived where it records, and hoisted out of the
     # loops there: a value live across the register reallocation would be
     # spilled.)
-    @inline mark(slot,event) = (lane == Int32(0) && record!(recorder(timeline,warp),slot,event); nothing)
-    if warp < Int32(8)
+    @inline mark(slot,event) = (lane == 0i32 && record!(recorder(timeline,warp),slot,event); nothing)
+    if warp < 8i32
         acquire_registers(184)
         band = lanes(); row = band+lane
-        i = warp ÷ Int32(4)
-        k = Int32(0); n = Int32(0)                          # blocks and items so far
+        i = warp ÷ 4i32
+        k = 0i32; n = 0i32                          # blocks and items so far
         t = first_tile()
         while true
             t = next_item(t,n)
@@ -432,36 +433,36 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
             g = unit(t)
             q0, b0, nb = g.q0, g.b0, tile_blocks(g,i)
             shift = g.lk-g.lq                               # causal row r sees keys up to r+shift
-            ragged = g.lk & Int32(127) != Int32(0)
-            last = blocks_of(g.lk)-Int32(1)
-            for j in Int32(0):nb-Int32(1)
+            ragged = g.lk & 127i32 != 0i32
+            last = blocks_of(g.lk)-1i32
+            for j in 0i32:nb-1i32
                 mark(6k,1)
                 wait(Ring(smem.sfull[i])[k])
-                mark(6k+Int32(1),2)
+                mark(6k+1i32,2)
                 fence_after_thread_sync()
                 # The row in four loads of 32 keys, then their waits.
-                s = wait_load(@inbounds load_async(rows,chunks(window(scores(i),(band,Int32(0)),(32,128)),(32,32))))
+                s = wait_load(@inbounds load_async(rows,chunks(window(scores(i),(band,0i32),(32,128)),(32,32))))
                 # The maximum reduces each chunk as it lands; the diagonal
                 # blocks, where keys past a row's diagonal do not count, mask
                 # and reduce again. (Masking first would make every block wait
                 # for all four loads at the branch.)
                 top = max(_rowmax(s[1]),_rowmax(s[2]),_rowmax(s[3]),_rowmax(s[4]))*c2
                 # (and the last block's keys past the sequence, without causality)
-                if Causal ? Int32(128)*j+Int32(127) > q0+Int32(128)*i+shift : ragged && b0+j == last
-                    r = Causal ? q0+Int32(128)*i+row+shift : g.lk-Int32(1)
-                    key = Int32(128)*(b0+j)
-                    s = (_mask(s[1],key,r),_mask(s[2],key+Int32(32),r),_mask(s[3],key+Int32(64),r),_mask(s[4],key+Int32(96),r))
+                if Causal ? 128i32*j+127i32 > q0+128i32*i+shift : ragged && b0+j == last
+                    r = Causal ? q0+128i32*i+row+shift : g.lk-1i32
+                    key = 128i32*(b0+j)
+                    s = (_mask(s[1],key,r),_mask(s[2],key+32i32,r),_mask(s[3],key+64i32,r),_mask(s[4],key+96i32,r))
                     top = max(_rowmax(s[1]),_rowmax(s[2]),_rowmax(s[3]),_rowmax(s[4]))*c2
                 end
-                mark(6k+Int32(2),3)
+                mark(6k+2i32,3)
                 factor = 1f0
-                if j == Int32(0) || top-m > 8f0             # the maximum moves: rescale O and the sum
-                    j > Int32(0) && (factor = exp2_approx(m-top))
+                if j == 0i32 || top-m > 8f0             # the maximum moves: rescale O and the sum
+                    j > 0i32 && (factor = exp2_approx(m-top))
                     m = top
                 end
                 p = _first(s,c2,m,cfg)
-                if j > Int32(0)
-                    @inbounds smem.factors[row+Int32(128)*i] = factor
+                if j > 0i32
+                    @inbounds smem.factors[row+128i32*i] = factor
                     arrive!(handoff(i))
                     l *= factor
                 end
@@ -469,12 +470,12 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                 # sum. Nothing orders pure arithmetic after a store or an
                 # arrival, so the work that must wait takes an input through
                 # the arrival's token: the compilers cannot hoist it above.
-                @inbounds store_async!(chunks(window(probabilities(i),(band,Int32(0)),(32,32Split)),(32,32)),p)
+                @inbounds store_async!(chunks(window(probabilities(i),(band,0i32),(32,32Split)),(32,32)),p)
                 wait_stores()
                 fence_before_thread_sync()
                 published = arrive!(smem.pready[i])
                 CTAs == 1 || release_to_mma(smem.pready[i],smem.paired[i])
-                mark(6k+Int32(3),4)
+                mark(6k+3i32,4)
                 basis = after(published,m)
                 rest = _rest(s,c2,basis,cfg)
                 @inbounds store_async!(chunks(window(probabilities(i),(band,32Split),(32,128-32Split)),(32,32)),rest)
@@ -482,42 +483,42 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                 fence_before_thread_sync()
                 published = arrive!(smem.plast[i])
                 CTAs == 1 || release_to_mma(smem.plast[i],smem.pairlast[i])
-                mark(6k+Int32(4),5)
+                mark(6k+4i32,5)
                 zero = after(published,0f0)
                 probs = (p...,rest...)
                 l += (chainsum(probs[1],zero)+chainsum(probs[2],zero))+(chainsum(probs[3],zero)+chainsum(probs[4],zero))
-                mark(6k+Int32(5),6)
-                k += Int32(1)
+                mark(6k+5i32,6)
+                k += 1i32
             end
-            @inbounds smem.sums[row+Int32(128)*(i+Int32(2)*(n&Int32(1)))] = l
-            @inbounds smem.maxima[row+Int32(128)*(i+Int32(2)*(n&Int32(1)))] = m
+            @inbounds smem.sums[row+128i32*(i+2i32*(n&1i32))] = l
+            @inbounds smem.maxima[row+128i32*(i+2i32*(n&1i32))] = m
             arrive!(summed(i)[n].full)
-            n += Int32(1)
+            n += 1i32
             Dynamic || (t += stride)
         end
-    elseif warp < Int32(12)
+    elseif warp < 12i32
         release_registers(80)
         band = lanes(); row = band+lane
-        k0 = Int32(0); k1 = Int32(0); n = Int32(0)          # each tile's blocks, and items so far
+        k0 = 0i32; k1 = 0i32; n = 0i32          # each tile's blocks, and items so far
         t = first_tile()
         while true
             t = next_item(t,n)
             more(t) || break
             g = unit(t)
             head, q0, nb, w = g.head, g.q0, g.nb, g.slot
-            for j in Int32(0):nb-Int32(1)
-                for i in Int32(0):Int32(1)
+            for j in 0i32:nb-1i32
+                for i in 0i32:1i32
                     j < tile_blocks(g,i) || continue
-                    step = Int32(3)*(k0+k1)
-                    if j > Int32(0)
+                    step = 3i32*(k0+k1)
+                    if j > 0i32
                         # The softmax warp hands over the factor once S, and
                         # so O up to the previous block, is complete. (It
                         # cannot hand over twice in a row: its next S needs
                         # this P V, which waits for the correction.)
                         mark(step,10+i)
                         wait(handoff(i))
-                        mark(step+Int32(1),12+i)
-                        factor = @inbounds smem.factors[row+Int32(128)*i]
+                        mark(step+1i32,12+i)
+                        factor = @inbounds smem.factors[row+128i32*i]
                         if vote_any_sync(0xffffffff,factor < 1f0)
                             fence_after_thread_sync()
                             for q in 0:3
@@ -531,9 +532,9 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                     end
                     # At an item's first block O is free once the previous
                     # item's epilogue has read it, which released it then.
-                    (j > Int32(0) || n == Int32(0)) && release_to_mma(smem.pready[i],smem.paired[i])
-                    mark(step+Int32(2),14+i)
-                    i == Int32(0) ? (k0 += Int32(1)) : (k1 += Int32(1))
+                    (j > 0i32 || n == 0i32) && release_to_mma(smem.pready[i],smem.paired[i])
+                    mark(step+2i32,14+i)
+                    i == 0i32 ? (k0 += 1i32) : (k1 += 1i32)
                 end
             end
             batch = unchecked_div(head,per_batch)
@@ -541,58 +542,58 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
             # Rows past the sequence (of a last, partial item) are not stored.
             extent = (g.lq+Int32(256CTAs-1)) ÷ Int32(256CTAs)*Int32(256CTAs)
             dst = @inbounds bound(GlobalTile(o.ptr+2at,Layout((extent,static(128)),(o.row,static(1))),16),(g.lq,nothing))
-            if w < Int32(0)
-                for i in Int32(0):Int32(1)
+            if w < 0i32
+                for i in 0i32:1i32
                     wait(summed(i)[n])
-                    inverse = 1f0/@inbounds(smem.sums[row+Int32(128)*(i+Int32(2)*(n&Int32(1)))])
+                    inverse = 1f0/@inbounds(smem.sums[row+128i32*(i+2i32*(n&1i32))])
                     wait(Ring(smem.ofull[i])[n])
                     fence_after_thread_sync()
                     for q in 0:3
                         values = wait_load(@inbounds load_async(rows,window(output(i),(band,Int32(32q)),(32,32))))
-                        @inbounds store!(window(dst,(q0+Int32(128)*i+band,Int32(32q)),(32,32)),Fragment{BFloat16}(values .* inverse),lane)
+                        @inbounds store!(window(dst,(q0+128i32*i+band,Int32(32q)),(32,32)),Fragment{BFloat16}(values .* inverse),lane)
                     end
                     fence_before_thread_sync()
                     release_to_mma(smem.pready[i],smem.paired[i])     # the next item's first P V of this tile may begin
                 end
             else
-                for i in Int32(0):Int32(1)
+                for i in 0i32:1i32
                     wait(summed(i)[n])
                     wait(Ring(smem.ofull[i])[n])
                 end
                 fence_after_thread_sync()
                 if Clustered
-                    finish_pair!(smem,nbar.merge,dst,words,n&Int32(1),rows,q0,band,lane,tid)
+                    finish_pair!(smem,nbar.merge,dst,words,n&1i32,rows,q0,band,lane,tid)
                 else
                     a = unchecked_div(w,parts)
-                    finish_part!(smem,nbar.merge,scratch,counter,dst,words,n&Int32(1),rows,a,parts,w-a*parts,units-whole,q0,rank,band,lane,tid,CTAs)
+                    finish_part!(smem,nbar.merge,scratch,counter,dst,words,n&1i32,rows,a,parts,w-a*parts,units-whole,q0,rank,band,lane,tid,CTAs)
                 end
                 fence_before_thread_sync()
-                for i in Int32(0):Int32(1)
+                for i in 0i32:1i32
                     release_to_mma(smem.pready[i],smem.paired[i])
                 end
             end
-            n += Int32(1)
+            n += 1i32
             Dynamic || (t += stride)
         end
     else
         release_registers(64)
-        if warp == Int32(12) && rank == Int32(0)            # warp 12: the MMA warp (of the pair)
+        if warp == 12i32 && rank == 0i32            # warp 12: the MMA warp (of the pair)
             # The whole warp runs the role, so that its counters and
             # descriptors are warp-uniform; one lane issues.
-            c = Int32(0); k0 = Int32(0); k1 = Int32(0); n = Int32(0)   # stages, each tile's blocks, items
+            c = 0i32; k0 = 0i32; k1 = 0i32; n = 0i32   # stages, each tile's blocks, items
             @inline ready(x) = (wait(kv[x]); fence_after_thread_sync())
             @inline stage_of(x) = smem.kv[kv[x].slot]
             @inline release(x) = commit(kv[x].empty)
             @inline function pv_step(i,vb,k,accumulate)
-                mark(Int32(8)*k+Int32(4i),20+i)
+                mark(8i32*k+Int32(4i),20+i)
                 wait(Ring(CTAs == 1 ? smem.pready[i] : smem.paired[i])[k])
-                mark(Int32(8)*k+Int32(4i+1),22+i)
+                mark(8i32*k+Int32(4i+1),22+i)
                 fence_after_thread_sync()
-                @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(0)),(128,32Split)),vb,32Split,accumulate)
+                @inbounds mma(pv,output(i),window(probabilities(i),(0i32,0i32),(128,32Split)),vb,32Split,accumulate)
                 wait(Ring(CTAs == 1 ? smem.plast[i] : smem.pairlast[i])[k])
                 fence_after_thread_sync()
-                @inbounds mma(pv,output(i),window(probabilities(i),(Int32(0),Int32(32Split)),(128,128-32Split)),operand(vb,(Int32(32Split),Int32(0))),128-32Split,true)
-                mark(Int32(8)*k+Int32(4i+2),24+i)
+                @inbounds mma(pv,output(i),window(probabilities(i),(0i32,Int32(32Split)),(128,128-32Split)),operand(vb,(Int32(32Split),0i32)),128-32Split,true)
+                mark(8i32*k+Int32(4i+2),24+i)
             end
             t = first_tile()
             while true
@@ -610,66 +611,66 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                     commit(smem.sfull[i])
                 end
                 release(c)
-                c += Int32(1)
-                for j in Int32(1):blocks_t-Int32(1)
+                c += 1i32
+                for j in 1i32:blocks_t-1i32
                     # Each block is awaited where it is first read: V before
                     # the first P V, K before the first Q Kᵀ, behind it. A
                     # causal item's first tile finishes a block early.
                     ready(c)
                     vb = @inbounds operand(pv,OperandB(),shared_tile(tv,stage_of(c)))
-                    kb = @inbounds operand(qk,OperandB(),shared_tile(tk,stage_of(c+Int32(1))))
+                    kb = @inbounds operand(qk,OperandB(),shared_tile(tk,stage_of(c+1i32)))
                     PTX.Utils.@unroll for i in 0:1
-                        pv_step(i,vb,i == 0 ? k0 : k1,j > Int32(1))
-                        if i == 0 && shortened && j == blocks_t-Int32(1)
+                        pv_step(i,vb,i == 0 ? k0 : k1,j > 1i32)
+                        if i == 0 && shortened && j == blocks_t-1i32
                             commit(smem.ofull[0])
-                            ready(c+Int32(1))               # the second tile's Q Kᵀ still reads K
+                            ready(c+1i32)               # the second tile's Q Kᵀ still reads K
                         else
-                            i == 0 && ready(c+Int32(1))
+                            i == 0 && ready(c+1i32)
                             @inbounds mma(qk,scores(i),qa[i+1],kb,128,false)
                             commit(smem.sfull[i])
-                            mark(Int32(8)*(i == 0 ? k0 : k1)+Int32(4i+3),26+i)
+                            mark(8i32*(i == 0 ? k0 : k1)+Int32(4i+3),26+i)
                         end
-                        i == 0 ? (k0 += Int32(1)) : (k1 += Int32(1))
+                        i == 0 ? (k0 += 1i32) : (k1 += 1i32)
                     end
-                    release(c); release(c+Int32(1))
-                    c += Int32(2)
+                    release(c); release(c+1i32)
+                    c += 2i32
                 end
                 commit(smem.qempty[0]); commit(smem.qempty[1])
                 ready(c)
                 vb = @inbounds operand(pv,OperandB(),shared_tile(tv,stage_of(c)))
                 PTX.Utils.@unroll for i in 0:1
                     if !(i == 0 && shortened)               # done already
-                        pv_step(i,vb,i == 0 ? k0 : k1,blocks_t > Int32(1))
+                        pv_step(i,vb,i == 0 ? k0 : k1,blocks_t > 1i32)
                         commit(smem.ofull[i])
-                        i == 0 ? (k0 += Int32(1)) : (k1 += Int32(1))
+                        i == 0 ? (k0 += 1i32) : (k1 += 1i32)
                     end
                 end
                 release(c)
-                c += Int32(1); n += Int32(1)
+                c += 1i32; n += 1i32
                 Dynamic || (t += stride)
             end
-        elseif tid == Int32(416)                            # warp 13: the load thread
-            c = Int32(0); n = Int32(0)
+        elseif tid == 416i32                            # warp 13: the load thread
+            c = 0i32; n = 0i32
             # Stage `x` of the ring: returns the next.
             @inline function load(x,binding,origin)
-                mark(Int32(2)*x,30)
+                mark(2i32*x,30)
                 acquire(kv[x])
-                mark(Int32(2)*x+Int32(1),31)
-                rank == Int32(0) && arrive!(kv[x].full,CTAs*kvbytes)
+                mark(2i32*x+1i32,31)
+                rank == 0i32 && arrive!(kv[x].full,CTAs*kvbytes)
                 @inbounds tma_load!(shared_tile(binding,smem.kv[kv[x].slot]),binding,origin,kv[x].full;cta=completion())
-                x+Int32(1)
+                x+1i32
             end
             t = first_tile()
             while true
                 if Dynamic
-                    @inbounds smem.ids[items[n].slot] = more(t) ? t : Int32(-1)
+                    @inbounds smem.ids[items[n].slot] = more(t) ? t : -1i32
                     arrive!(items[n].full)
                 end
                 if !more(t)
                     # The last CTA out returns the item counter to zero for
                     # the next launch: every CTA took its last item before
                     # it counted itself out (acquire-release orders them).
-                    if Dynamic && _count_out!(pointer(counter,2)) == gridDim().x % Int32-Int32(1)
+                    if Dynamic && _count_out!(pointer(counter,2)) == gridDim().x % Int32-1i32
                         _reset!(pointer(counter,1)); _reset!(pointer(counter,2))
                     end
                     break
@@ -681,26 +682,26 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                 batch = unchecked_div(head,per_batch)       # the batch, its query head and their K and V head
                 h = head-batch*per_batch
                 hk = unchecked_div(h,group)
-                for i in Int32(0):Int32(1)
+                for i in 0i32:1i32
                     acquire(Ring(smem.qfull[i],smem.qempty[i])[n])
-                    rank == Int32(0) && arrive!(smem.qfull[i],CTAs*qbytes)
-                    @inbounds tma_load!(shared_tile(tq,smem.q[i]),tq,_at(tq,g.qs+q0+Int32(128)*i,Int32(0),h,batch),smem.qfull[i];cta=completion())
-                    i == Int32(0) && (c = load(c,tk,_at(tk,Int32(0),first+Int32(128)*b0+half,hk,batch)))
+                    rank == 0i32 && arrive!(smem.qfull[i],CTAs*qbytes)
+                    @inbounds tma_load!(shared_tile(tq,smem.q[i]),tq,_at(tq,g.qs+q0+128i32*i,0i32,h,batch),smem.qfull[i];cta=completion())
+                    i == 0i32 && (c = load(c,tk,_at(tk,0i32,first+128i32*b0+half,hk,batch)))
                 end
-                for j in b0+Int32(1):b0+blocks_t-Int32(1)
-                    c = load(c,tv,_at(tv,first+Int32(128)*(j-Int32(1)),half,hk,batch))
-                    c = load(c,tk,_at(tk,Int32(0),first+Int32(128)*j+half,hk,batch))
+                for j in b0+1i32:b0+blocks_t-1i32
+                    c = load(c,tv,_at(tv,first+128i32*(j-1i32),half,hk,batch))
+                    c = load(c,tk,_at(tk,0i32,first+128i32*j+half,hk,batch))
                 end
-                c = load(c,tv,_at(tv,first+Int32(128)*(b0+blocks_t-Int32(1)),half,hk,batch))
-                n += Int32(1)
-                t = Dynamic ? gridDim().x % Int32+CUDACore.atomic_add!(pointer(counter),Int32(1)) : t+stride
+                c = load(c,tv,_at(tv,first+128i32*(b0+blocks_t-1i32),half,hk,batch))
+                n += 1i32
+                t = Dynamic ? gridDim().x % Int32+CUDACore.atomic_add!(pointer(counter),1i32) : t+stride
             end
         end
     end
     fence_before_thread_sync()
     CTAs == 1 && !Clustered ? sync_threads() : cluster_sync()   # no TMEM access (nor a merge's read) remains in either CTA
     fence_after_thread_sync()
-    warp == Int32(12) && tmem_deallocate!(qk,tmem,512)
+    warp == 12i32 && tmem_deallocate!(qk,tmem,512)
     nothing
 end
 

@@ -1,4 +1,5 @@
 using Tylo, PTX, CUDACore, BFloat16s
+using CUDACore: i32
 using Tylo.Layouts: Layout, static
 include(joinpath(@__DIR__,"..","launch.jl"))
 
@@ -35,56 +36,56 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,cfg::Config)
     layout = attention_shared(cfg,tq,tk,tv)
     smem = bind(layout,pointer(@inbounds CuDynamicSharedArray(UInt8,shared_bytes(layout))))
     stages = Ring(smem.full,smem.empty)
-    tid = Int32(threadIdx().x)-Int32(1)
-    warpgroup = warp_uniform(tid ÷ Int32(128))
-    if tid == Int32(0)
+    tid = Int32(threadIdx().x)-1i32
+    warpgroup = warp_uniform(tid ÷ 128i32)
+    if tid == 0i32
         initialize!(smem)
         fence_barrier_init()
     end
     sync_threads()
-    q0 = (Int32(blockIdx().x)-Int32(1))*Int32(128)
-    head = Int32(blockIdx().y)-Int32(1)
-    blocks = seq_kv ÷ Int32(128)
-    if warpgroup == Int32(0)
+    q0 = (Int32(blockIdx().x)-1i32)*128i32
+    head = Int32(blockIdx().y)-1i32
+    blocks = seq_kv ÷ 128i32
+    if warpgroup == 0i32
         release_registers(40)
-        if tid == Int32(0)
+        if tid == 0i32
             arrive!(smem.qfull[0],qbytes)
-            @inbounds tma_load!(shared_tile(tq,smem.q[0]),tq,(q0,Int32(0),head),smem.qfull[0])
-            for j in Int32(0):blocks-Int32(1)
+            @inbounds tma_load!(shared_tile(tq,smem.q[0]),tq,(q0,0i32,head),smem.qfull[0])
+            for j in 0i32:blocks-1i32
                 s = stages[j]
                 acquire(s)
                 at = smem.kv[s.slot]
                 arrive!(s.full,kbytes+vbytes)
-                @inbounds tma_load!(shared_tile(tk,at),tk,(Int32(0),Int32(128)*j,head),s.full)
-                @inbounds tma_load!(shared_tile(tv,at+kbytes),tv,(Int32(128)*j,Int32(0),head),s.full)
+                @inbounds tma_load!(shared_tile(tk,at),tk,(0i32,128i32*j,head),s.full)
+                @inbounds tma_load!(shared_tile(tv,at+kbytes),tv,(128i32*j,0i32,head),s.full)
             end
         end
     else
         acquire_registers(232)
-        rows = (warpgroup-Int32(1))*Int32(64)
-        thread = tid%Int32(128)
+        rows = (warpgroup-1i32)*64i32
+        thread = tid%128i32
         wait(smem.qfull[0],0)
         q = shared_tile(tq,smem.q[0])
-        @inbounds qa = (operand(qk,OperandA(),q,(rows,Int32(0))),operand(qk,OperandA(),q,(rows,Int32(64))))
+        @inbounds qa = (operand(qk,OperandA(),q,(rows,0i32)),operand(qk,OperandA(),q,(rows,64i32)))
         state = SoftmaxState(finish_mma(zero_accumulator(qk));dims=2)
         # S for block j: two groups, one per half of d.
         @inline function scores_async(j)
             k = shared_tile(tk,smem.kv[stages[j].slot])
             # (A name of the enclosing body assigned here would be boxed.)
-            @inbounds half = mma_async(qk,qa[1],operand(qk,OperandB(),k,(Int32(0),Int32(0))))   # fresh: no zeroing
-            @inbounds mma_async(qk,qa[2],operand(qk,OperandB(),k,(Int32(64),Int32(0))),half)
+            @inbounds half = mma_async(qk,qa[1],operand(qk,OperandB(),k,(0i32,0i32)))   # fresh: no zeroing
+            @inbounds mma_async(qk,qa[2],operand(qk,OperandB(),k,(64i32,0i32)),half)
         end
         # O plus P V for block j: two groups, one per half of the block, P
         # (the softmax weights) from registers and V transposed.
         @inline function output_async(out,weights,j)
             probabilities = Fragment{BFloat16}(weights)
             v = shared_tile(tv,smem.kv[stages[j].slot]+kbytes)
-            @inbounds out = mma_async(pv,window(probabilities,(0,0),(64,64)),operand(pv,OperandB(),v,(Int32(0),Int32(0))),out)
-            @inbounds mma_async(pv,window(probabilities,(0,64),(64,64)),operand(pv,OperandB(),v,(Int32(64),Int32(0))),out)
+            @inbounds out = mma_async(pv,window(probabilities,(0,0),(64,64)),operand(pv,OperandB(),v,(0i32,0i32)),out)
+            @inbounds mma_async(pv,window(probabilities,(0,64),(64,64)),operand(pv,OperandB(),v,(64i32,0i32)),out)
         end
-        if !cfg.overlap || blocks == Int32(1)
+        if !cfg.overlap || blocks == 1i32
             out = zero_accumulator(pv)
-            for j in Int32(0):blocks-Int32(1)
+            for j in 0i32:blocks-1i32
                 wait(stages[j])
                 update = softmax_update(state,finish_mma(wait_mma(scores_async(j)));scale)
                 state = update.state
@@ -96,39 +97,39 @@ function attention_kernel!(o,tq,tk,tv,seq_kv::Int32,scale::Float32,cfg::Config)
             # Turns: consumer w (1 or 2) waits on its turn and passes the
             # other's; the second primes the first turn and skips its last pass.
             turns = named_barriers((;turn=named(2;threads=256))).turn
-            @inline turn() = cfg.pingpong && wait(@inbounds(turns[warpgroup-Int32(1)]);aligned=false)
-            @inline pass(final) = cfg.pingpong && !(final && warpgroup == Int32(2)) &&
-                arrive!(@inbounds(turns[Int32(2)-warpgroup]);aligned=false)
-            cfg.pingpong && warpgroup == Int32(2) && arrive!(turns[0];aligned=false)
+            @inline turn() = cfg.pingpong && wait(@inbounds(turns[warpgroup-1i32]);aligned=false)
+            @inline pass(final) = cfg.pingpong && !(final && warpgroup == 2i32) &&
+                arrive!(@inbounds(turns[2i32-warpgroup]);aligned=false)
+            cfg.pingpong && warpgroup == 2i32 && arrive!(turns[0];aligned=false)
             wait(stages[0])
             turn()
-            first_scores = scores_async(Int32(0))
+            first_scores = scores_async(0i32)
             pass(false)
             update = softmax_update(state,finish_mma(wait_mma(first_scores));scale)
             state, p = update.state, update.weights
             out = zero_accumulator(pv)
-            for j in Int32(1):blocks-Int32(1)
+            for j in 1i32:blocks-1i32
                 wait(stages[j])
                 turn()
                 scores = scores_async(j)
-                pending = output_async(out,p,j-Int32(1))
+                pending = output_async(out,p,j-1i32)
                 pass(false)
                 update = softmax_update(state,finish_mma(wait_mma(scores;newer=2));scale)
                 state = update.state
                 out = wait_mma(pending) .* update.rescale
                 p = update.weights
-                arrive!(stages[j-Int32(1)].empty)
+                arrive!(stages[j-1i32].empty)
             end
             turn()
-            last_output = output_async(out,p,blocks-Int32(1))
+            last_output = output_async(out,p,blocks-1i32)
             pass(true)
             out = wait_mma(last_output)
-            arrive!(stages[blocks-Int32(1)].empty)
+            arrive!(stages[blocks-1i32].empty)
         end
         result = Fragment{BFloat16}(softmax_normalize(finish_mma(out),state))
         seq = size(o,2) % Int32
-        dst = @inbounds GlobalTile(pointer(o,Int32(1)+head*seq*Int32(128)),Layout((seq,static(128)),(static(128),static(1))),16)
-        @inbounds store!(window(dst,(q0+rows,Int32(0)),(64,128)),result,thread)
+        dst = @inbounds GlobalTile(pointer(o,1i32+head*seq*128i32),Layout((seq,static(128)),(static(128),static(1))),16)
+        @inbounds store!(window(dst,(q0+rows,0i32),(64,128)),result,thread)
     end
     nothing
 end
@@ -164,79 +165,79 @@ function persistent_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::In
     smem = bind(layout,pointer(@inbounds CuDynamicSharedArray(UInt8,shared_bytes(layout))))
     queries = Ring(smem.qfull,smem.qempty)
     stages = Ring(smem.full,smem.empty)
-    tid = Int32(threadIdx().x)-Int32(1)
-    warpgroup = warp_uniform(tid ÷ Int32(128))
-    if tid == Int32(0)
+    tid = Int32(threadIdx().x)-1i32
+    warpgroup = warp_uniform(tid ÷ 128i32)
+    if tid == 0i32
         initialize!(smem)
         fence_barrier_init()
     end
     sync_threads()
     seq = size(o,2) % Int32
-    nq = seq ÷ Int32(128)
+    nq = seq ÷ 128i32
     tiles = nq*heads
-    blocks = seq_kv ÷ Int32(128)
+    blocks = seq_kv ÷ 128i32
     # Head and query block of tile t: heads outer, so concurrent CTAs share K
     # and V in L2, or (`heads_inner`) query blocks outer, for causal tiles
     # longest first across all heads. Causal tiles run longest first.
     @inline function tile_of(t)
         head, block = cfg.heads_inner ? (unchecked_rem(t,heads), unchecked_div(t,heads)) : (unchecked_div(t,nq), unchecked_rem(t,nq))
-        head, cfg.causal ? nq-Int32(1)-block : block
+        head, cfg.causal ? nq-1i32-block : block
     end
     # The tile after `t`: the next in the static order, or (`dynamic`) from
     # the counter.
-    @inline next_tile(t) = cfg.dynamic ? gridDim().x+CUDACore.atomic_add!(pointer(counter),Int32(1)) : t+gridDim().x
-    if warpgroup == Int32(0)
+    @inline next_tile(t) = cfg.dynamic ? gridDim().x+CUDACore.atomic_add!(pointer(counter),1i32) : t+gridDim().x
+    if warpgroup == 0i32
         release_registers(40)
-        if tid == Int32(0)
-            i = Int32(0); c = Int32(0)                      # tiles and K/V blocks so far
-            t = Int32(blockIdx().x)-Int32(1)
+        if tid == 0i32
+            i = 0i32; c = 0i32                      # tiles and K/V blocks so far
+            t = Int32(blockIdx().x)-1i32
             while true
                 b = queries[i]
                 acquire(b)
-                smem.tile[b.slot] = t < tiles ? t : Int32(-1)
+                smem.tile[b.slot] = t < tiles ? t : -1i32
                 if t >= tiles
                     arrive!(b.full)                         # no tile: the consumers stop
                     break
                 end
                 head, qblock = tile_of(t)
-                q0 = qblock*Int32(128)
+                q0 = qblock*128i32
                 arrive!(b.full,qbytes)
-                @inbounds tma_load!(shared_tile(tq,smem.q[b.slot]),tq,(q0,Int32(0),head),b.full)
-                for j in Int32(0):(cfg.causal ? qblock : blocks-Int32(1))
+                @inbounds tma_load!(shared_tile(tq,smem.q[b.slot]),tq,(q0,0i32,head),b.full)
+                for j in 0i32:(cfg.causal ? qblock : blocks-1i32)
                     s = stages[c]
                     acquire(s)
                     at = smem.kv[s.slot]
                     arrive!(s.full,kbytes+vbytes)
-                    @inbounds tma_load!(shared_tile(tk,at),tk,(Int32(0),Int32(128)*j,head),s.full)
-                    @inbounds tma_load!(shared_tile(tv,at+kbytes),tv,(Int32(128)*j,Int32(0),head),s.full)
-                    c += Int32(1)
+                    @inbounds tma_load!(shared_tile(tk,at),tk,(0i32,128i32*j,head),s.full)
+                    @inbounds tma_load!(shared_tile(tv,at+kbytes),tv,(128i32*j,0i32,head),s.full)
+                    c += 1i32
                 end
-                i += Int32(1)
+                i += 1i32
                 t = next_tile(t)
             end
         end
     else
         acquire_registers(232)
-        rows = (warpgroup-Int32(1))*Int32(64)
-        thread = tid%Int32(128)
-        i = Int32(0); c = Int32(0)
+        rows = (warpgroup-1i32)*64i32
+        thread = tid%128i32
+        i = 0i32; c = 0i32
         while true
             b = queries[i]
             wait(b)
             t = smem.tile[b.slot]
-            t < Int32(0) && break
+            t < 0i32 && break
             q = shared_tile(tq,smem.q[b.slot])
-            @inbounds qa = (operand(qk,OperandA(),q,(rows,Int32(0))),operand(qk,OperandA(),q,(rows,Int32(64))))
+            @inbounds qa = (operand(qk,OperandA(),q,(rows,0i32)),operand(qk,OperandA(),q,(rows,64i32)))
             state = SoftmaxState(finish_mma(zero_accumulator(qk));dims=2)
             out = zero_accumulator(pv)
             head, qblock = tile_of(t)
-            last = cfg.causal ? qblock : blocks-Int32(1)
-            for j in Int32(0):last
+            last = cfg.causal ? qblock : blocks-1i32
+            for j in 0i32:last
                 s = stages[c]
                 wait(s)
                 k = shared_tile(tk,smem.kv[s.slot]); v = shared_tile(tv,smem.kv[s.slot]+kbytes)
-                @inbounds sa = mma_async(qk,qa[1],operand(qk,OperandB(),k,(Int32(0),Int32(0))))
-                @inbounds sa = mma_async(qk,qa[2],operand(qk,OperandB(),k,(Int32(64),Int32(0))),sa)
+                @inbounds sa = mma_async(qk,qa[1],operand(qk,OperandB(),k,(0i32,0i32)))
+                @inbounds sa = mma_async(qk,qa[2],operand(qk,OperandB(),k,(64i32,0i32)),sa)
                 scores = wait_mma(sa)
                 if cfg.causal && j == last
                     # The diagonal block: key c of the block attends to query r
@@ -248,17 +249,17 @@ function persistent_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::In
                 state = update.state
                 out = out .* update.rescale                   # the output so far, to the new maxima
                 p = Fragment{BFloat16}(update.weights)
-                @inbounds out = mma_async(pv,window(p,(0,0),(64,64)),operand(pv,OperandB(),v,(Int32(0),Int32(0))),out)
-                @inbounds out = wait_mma(mma_async(pv,window(p,(0,64),(64,64)),operand(pv,OperandB(),v,(Int32(64),Int32(0))),out))
+                @inbounds out = mma_async(pv,window(p,(0,0),(64,64)),operand(pv,OperandB(),v,(0i32,0i32)),out)
+                @inbounds out = wait_mma(mma_async(pv,window(p,(0,64),(64,64)),operand(pv,OperandB(),v,(64i32,0i32)),out))
                 arrive!(s.empty)
-                c += Int32(1)
+                c += 1i32
             end
             arrive!(b.empty)
-            q0 = qblock*Int32(128)
+            q0 = qblock*128i32
             result = Fragment{BFloat16}(softmax_normalize(finish_mma(out),state))
-            dst = @inbounds GlobalTile(pointer(o,Int32(1)+head*seq*Int32(128)),Layout((seq,static(128)),(static(128),static(1))),16)
-            @inbounds store!(window(dst,(q0+rows,Int32(0)),(64,128)),result,thread)
-            i += Int32(1)
+            dst = @inbounds GlobalTile(pointer(o,1i32+head*seq*128i32),Layout((seq,static(128)),(static(128),static(1))),16)
+            @inbounds store!(window(dst,(q0+rows,0i32),(64,128)),result,thread)
+            i += 1i32
         end
     end
     nothing
@@ -316,7 +317,7 @@ function hopper_attention(q::CuArray,k::CuArray,v::CuArray;kwargs...)
     l = hopper_attention_launch(q,k,v;kwargs...)
     kernel = compile(l)
     function launch()
-        l.kernel === persistent_attention_kernel! && fill!(l.args[5],Int32(0))
+        l.kernel === persistent_attention_kernel! && fill!(l.args[5],0i32)
         l(kernel)
     end
     kernel, launch, l.result

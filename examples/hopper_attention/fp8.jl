@@ -24,55 +24,55 @@ function fp8_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Floa
     smem = bind(layout,pointer(@inbounds CuDynamicSharedArray(UInt8,shared_bytes(layout))))
     queries = Ring(smem.qfull,smem.qempty)
     stages = Ring(smem.full,smem.empty)
-    tid = Int32(threadIdx().x)-Int32(1)
-    warpgroup = warp_uniform(tid ÷ Int32(128))
-    if tid == Int32(0)
+    tid = Int32(threadIdx().x)-1i32
+    warpgroup = warp_uniform(tid ÷ 128i32)
+    if tid == 0i32
         initialize!(smem)
         fence_barrier_init()
     end
     sync_threads()
     seq = size(o,2) % Int32
-    nq = seq ÷ Int32(128)
+    nq = seq ÷ 128i32
     tiles = nq*heads
-    blocks = seq_kv ÷ Int32(128)
-    if warpgroup == Int32(0)
+    blocks = seq_kv ÷ 128i32
+    if warpgroup == 0i32
         release_registers(40)
-        if tid == Int32(0)
-            i = Int32(0); c = Int32(0)
-            t = Int32(blockIdx().x)-Int32(1)
+        if tid == 0i32
+            i = 0i32; c = 0i32
+            t = Int32(blockIdx().x)-1i32
             while t < tiles
                 b = queries[i]
                 acquire(b)
                 head = unchecked_div(t,nq)
-                q0 = unchecked_rem(t,nq)*Int32(128)
+                q0 = unchecked_rem(t,nq)*128i32
                 arrive!(b.full,qbytes)
-                @inbounds tma_load!(shared_tile(tq,smem.q[b.slot]),tq,(q0,Int32(0),head),b.full)
-                for j in Int32(0):blocks-Int32(1)
+                @inbounds tma_load!(shared_tile(tq,smem.q[b.slot]),tq,(q0,0i32,head),b.full)
+                for j in 0i32:blocks-1i32
                     s = stages[c]
                     acquire(s)
                     at = smem.kv[s.slot]
                     arrive!(s.full,kbytes+vbytes)
-                    @inbounds tma_load!(shared_tile(tk,at),tk,(Int32(0),Int32(128)*j,head),s.full)
-                    @inbounds tma_load!(shared_tile(tv,at+kbytes),tv,(Int32(128)*j,Int32(0),head),s.full)
-                    c += Int32(1)
+                    @inbounds tma_load!(shared_tile(tk,at),tk,(0i32,128i32*j,head),s.full)
+                    @inbounds tma_load!(shared_tile(tv,at+kbytes),tv,(128i32*j,0i32,head),s.full)
+                    c += 1i32
                 end
-                i += Int32(1)
+                i += 1i32
                 t += gridDim().x
             end
         end
     else
         acquire_registers(232)
-        rows = (warpgroup-Int32(1))*Int32(64)
-        thread = tid%Int32(128)
-        i = Int32(0); c = Int32(0)
-        t = Int32(blockIdx().x)-Int32(1)
+        rows = (warpgroup-1i32)*64i32
+        thread = tid%128i32
+        i = 0i32; c = 0i32
+        t = Int32(blockIdx().x)-1i32
         while t < tiles
             b = queries[i]
             wait(b)
-            @inbounds qa = operand(qk,OperandA(),shared_tile(tq,smem.q[b.slot]),(rows,Int32(0)))
+            @inbounds qa = operand(qk,OperandA(),shared_tile(tq,smem.q[b.slot]),(rows,0i32))
             state = SoftmaxState(zero_accumulator(qk);dims=2)
             out = zero_accumulator(pv)
-            for j in Int32(0):blocks-Int32(1)
+            for j in 0i32:blocks-1i32
                 s = stages[c]
                 wait(s)
                 at = smem.kv[s.slot]
@@ -82,15 +82,15 @@ function fp8_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Floa
                 p = pack_operand_a(pv,update.weights,thread)
                 @inbounds out = wait_mma(mma_async(pv,p,operand(pv,OperandB(),shared_tile(tv,at+kbytes)),out .* update.rescale))
                 arrive!(s.empty)
-                c += Int32(1)
+                c += 1i32
             end
             arrive!(b.empty)
             head = unchecked_div(t,nq)
-            q0 = unchecked_rem(t,nq)*Int32(128)
+            q0 = unchecked_rem(t,nq)*128i32
             result = Fragment{BFloat16}(softmax_normalize(out,state))
-            dst = @inbounds GlobalTile(pointer(o,Int32(1)+head*seq*Int32(128)),Layout((seq,static(128)),(static(128),static(1))),16)
-            @inbounds store!(window(dst,(q0+rows,Int32(0)),(64,128)),result,thread)
-            i += Int32(1)
+            dst = @inbounds GlobalTile(pointer(o,1i32+head*seq*128i32),Layout((seq,static(128)),(static(128),static(1))),16)
+            @inbounds store!(window(dst,(q0+rows,0i32),(64,128)),result,thread)
+            i += 1i32
             t += gridDim().x
         end
     end

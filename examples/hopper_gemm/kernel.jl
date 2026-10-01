@@ -1,4 +1,5 @@
 using Tylo, PTX, CUDACore, BFloat16s
+using CUDACore: i32
 using Tylo.Layouts: Layout, static
 include(joinpath(@__DIR__,"..","launch.jl"))
 
@@ -29,89 +30,89 @@ function hopper_gemm_kernel!(c,a,b,bh,atom::WGMMAAtom{T,N,KS,1},k::Int32,cfg::Co
     layout = hopper_gemm_shared(cfg,a,b)
     smem = bind(layout,pointer(@inbounds CuDynamicSharedArray(UInt8,shared_bytes(layout))))
     stages = Ring(smem.full,smem.empty)
-    tid = Int32(threadIdx().x)-Int32(1)
-    warpgroup = warp_uniform(tid ÷ Int32(128))
-    if tid == Int32(0)
+    tid = Int32(threadIdx().x)-1i32
+    warpgroup = warp_uniform(tid ÷ 128i32)
+    if tid == 0i32
         initialize!(smem)
         fence_barrier_init()
     end
     Cluster == 1 ? sync_threads() : cluster_sync()
-    rank = Cluster == 1 ? Int32(0) : cluster_rank()
+    rank = Cluster == 1 ? 0i32 : cluster_rank()
     m, n = size(c,2) % Int32, size(c,1) % Int32
     # Shapes of any size: the last tiles and stage may be partial, their
     # loads zero-filled past the edges and their stores clipped there.
-    tiles_m, tiles_n = cld(m,Int32(128)*Cluster), cld(n,Int32(N))  # in row tiles per cluster
+    tiles_m, tiles_n = cld(m,128i32*Cluster), cld(n,Int32(N))  # in row tiles per cluster
     tiles = tiles_m*tiles_n
     count = cld(k,Int32(KS))
-    first_tile = (Int32(blockIdx().x)-Int32(1)) ÷ Cluster
+    first_tile = (Int32(blockIdx().x)-1i32) ÷ Cluster
     stride = gridDim().x ÷ Cluster
     # A CTA (or cluster) walks tiles blockIdx, blockIdx+gridDim, ... (one
     # when the grid covers them all). Loads and MMAs count stages across
     # tiles, so the producer fills the next tile's stages while the consumers
     # store.
-    if warpgroup == Int32(0)
+    if warpgroup == 0i32
         release_registers(40)
-        if tid == Int32(0)
-            i = Int32(0)                                    # stages filled
+        if tid == 0i32
+            i = 0i32                                    # stages filled
             t = first_tile
             while t < tiles
                 pm, tn = tile_order(t,tiles_m,tiles_n,cfg.group)
                 tm = Cluster*pm+rank
-                for kk in Int32(0):count-Int32(1)
+                for kk in 0i32:count-1i32
                     s = stages[i]
                     acquire(s)
                     at = smem.stage[s.slot]
                     arrive!(s.full,bytes)
-                    @inbounds tma_load!(shared_tile(a,at),a,(tm*Int32(128),Int32(KS)*kk),s.full)
+                    @inbounds tma_load!(shared_tile(a,at),a,(tm*128i32,Int32(KS)*kk),s.full)
                     if Cluster == 1
                         @inbounds tma_load!(shared_tile(b,at+transfer_bytes(a)),b,(Int32(KS)*kk,tn*Int32(N)),s.full)
                     else
                         half = at+transfer_bytes(a)+rank*Int32(transfer_bytes(bh))
                         @inbounds tma_load!(shared_tile(bh,half),bh,(Int32(KS)*kk,tn*Int32(N)+rank*(Int32(N)÷Cluster)),s.full,UInt16(1 << Cluster - 1))
                     end
-                    i += Int32(1)
+                    i += 1i32
                 end
                 t += stride
             end
         end
     else
         acquire_registers(232)
-        rows = (warpgroup-Int32(1))*Int32(64)
-        thread = tid%Int32(128)
+        rows = (warpgroup-1i32)*64i32
+        thread = tid%128i32
         @inline function operands(s)
             at = smem.stage[s.slot]
-            @inbounds (operand(atom,OperandA(),shared_tile(a,at),(rows,Int32(0))),operand(atom,OperandB(),shared_tile(b,at+transfer_bytes(a))))
+            @inbounds (operand(atom,OperandA(),shared_tile(a,at),(rows,0i32)),operand(atom,OperandB(),shared_tile(b,at+transfer_bytes(a))))
         end
         @inline function release(s)
             if Cluster == 1
                 arrive!(s.empty)
-            elseif thread == Int32(0)
-                for r in Int32(0):Cluster-Int32(1)
+            elseif thread == 0i32
+                for r in 0i32:Cluster-1i32
                     arrive!(s.empty;cta=r)
                 end
             end
         end
         # Tiles at the edges store through bounds; the others need none.
-        out = @inbounds GlobalTile(pointer(c),Layout((tiles_m*Int32(128)*Cluster,tiles_n*Int32(N)),(n,static(1))),4)
+        out = @inbounds GlobalTile(pointer(c),Layout((tiles_m*128i32*Cluster,tiles_n*Int32(N)),(n,static(1))),4)
         edge = @inbounds bound(out,(m,n))
-        i = Int32(0)                                        # stages consumed
+        i = 0i32                                        # stages consumed
         t = first_tile
         while t < tiles
             pm, tn = tile_order(t,tiles_m,tiles_n,cfg.group)
             tm = Cluster*pm+rank
             wait(stages[i])
             acc = mma_async(atom,operands(stages[i])...)        # a fresh tile: no zeroing
-            for kk in Int32(1):count-Int32(1)
+            for kk in 1i32:count-1i32
                 s = stages[i+kk]
                 wait(s)
                 acc = wait_mma(mma_async(atom,operands(s)...,acc),1)
-                release(stages[i+kk-Int32(1)])                  # the previous stage's group is complete
+                release(stages[i+kk-1i32])                  # the previous stage's group is complete
             end
             result = finish_mma(wait_mma(acc))
-            release(stages[i+count-Int32(1)])
+            release(stages[i+count-1i32])
             i += count
-            values, origin = Fragment{BFloat16}(result), (tm*Int32(128)+rows,tn*Int32(N))
-            if (tm+Int32(1))*Int32(128) <= m && (tn+Int32(1))*Int32(N) <= n
+            values, origin = Fragment{BFloat16}(result), (tm*128i32+rows,tn*Int32(N))
+            if (tm+1i32)*128i32 <= m && (tn+1i32)*Int32(N) <= n
                 @inbounds store!(window(out,origin,(64,N)),values,thread)
             else
                 @inbounds store!(window(edge,origin,(64,N)),values,thread)
