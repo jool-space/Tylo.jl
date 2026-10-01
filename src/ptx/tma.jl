@@ -98,6 +98,16 @@ Base.@propagate_inbounds function _check_tma(t::SharedTile{T,L},b::TMABinding{TM
     nothing
 end
 @inline commit_tma_stores() = ptx"cp.async.bulk.commit_group"()
+# Bulk copies of plain bytes.
+@inline bulk_copy!(dst::Core.LLVMPtr{<:Any,1},src::Core.LLVMPtr{<:Any,3},bytes::Integer) =
+    (ptx"cp.async.bulk.global.shared::cta.bulk_group"(dst,src,bytes % UInt32); nothing)
+@inline bulk_copy!(dst::Core.LLVMPtr{<:Any,3},src::Core.LLVMPtr{<:Any,1},bytes::Integer,b::Barrier) =
+    (ptx"cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"(dst,src,bytes % UInt32,b.ptr); nothing)
+@inline function bulk_copy!(dst::Core.LLVMPtr{<:Any,3},src::Core.LLVMPtr{<:Any,3},bytes::Integer,b::Barrier;cta::Integer)
+    ptx"cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"(
+        reinterpret(Core.LLVMPtr{UInt8,3},_remote(dst,cta)),src,bytes % UInt32,_remote(b.ptr,cta))
+    nothing
+end
 Base.@constprop :aggressive @inline wait_tma_reads(n::Integer) = ptx"cp.async.bulk.wait_group.read"(Val(Int(n)))
 Base.@constprop :aggressive @inline wait_tma_stores(n::Integer) = ptx"cp.async.bulk.wait_group"(Val(Int(n)))
 # Origins of any integer type, as the Int32 coordinates TMA takes.

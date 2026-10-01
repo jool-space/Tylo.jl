@@ -160,14 +160,15 @@ one-dimensional group: the slots of a [`Ring`](@ref) of their own.
     Barriers(b[0,i].ptr,(b.shape[1],1),(b.strides[1],0))
 
 """
-    Scalars{T}
+    Scalars(pointer, count)
 
-A group of values of type `T` in shared memory: `x[i]`, zero-based, reads
-and `x[i] = v` writes the `i`-th, at `T`'s alignment; `x[]` is the first.
-`pointer(x)` is the address of the first.
+`count` values of type `T` at a typed pointer (shared memory, as a
+[`SharedLayout`](@ref)'s scalars are, or global): `x[i]`, zero-based,
+reads and `x[i] = v` writes the `i`-th, at `T`'s alignment; `x[]` is the
+first. `pointer(x)` is the address of the first.
 """
-struct Scalars{T}
-    ptr::Core.LLVMPtr{T,3}
+struct Scalars{T,AS}
+    ptr::Core.LLVMPtr{T,AS}
     count::Int
 end
 @inline Base.pointer(x::Scalars) = x.ptr
@@ -222,7 +223,7 @@ Base.propertynames(smem::BoundLayout) = keys(getfield(smem,:layout).groups)
     end
 end
 @inline _view(g::BarrierGroup,p) = Barriers(reinterpret(Core.LLVMPtr{UInt64,3},p),g.shape,(1,g.shape[1]))
-@inline _view(g::ScalarGroup{T},p) where T = Scalars{T}(reinterpret(Core.LLVMPtr{T,3},p),g.count)
+@inline _view(g::ScalarGroup{T},p) where T = Scalars(reinterpret(Core.LLVMPtr{T,3},p),g.count)
 @inline _view(g::BufferGroup,p) = Buffers(p,g.bytes,g.count)
 
 """

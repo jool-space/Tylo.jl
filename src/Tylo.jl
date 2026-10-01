@@ -11,9 +11,9 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
        Atom, OperandA, OperandB, Accumulator, ScaleA, ScaleB, operand_layout,
        MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, atom_accumulators, mma, pack_operand_a, chunks,
        CopyAtom, copy_async!, commit_copies, wait_copies,
-       Barrier, initialize!, arrive!, after, expect_bytes!, invalidate!, fence_barrier_init, fence_async_shared, cluster_rank, cluster_sync,
-       SharedLayout, barriers, scalars, buffers, shared_bytes, Ring, acquire, Config, NamedBarrier, named_barriers, named,
-       TMATile, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes, tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores,
+       Barrier, initialize!, arrive!, after, expect_bytes!, invalidate!, fence_barrier_init, fence_async_shared, fence_async_global, cluster_rank, cluster_sync,
+       SharedLayout, barriers, scalars, buffers, shared_bytes, Scalars, Ring, acquire, Config, NamedBarrier, named_barriers, named,
+       TMATile, prepare_tma, shared_layout, shared_tile, transfer_bytes, swizzle_bytes, tma_load!, tma_store!, commit_tma_stores, wait_tma_reads, wait_tma_stores, bulk_copy!,
        WGMMAAtom, operand, mma_async, wait_mma, finish_mma, release_registers, acquire_registers, warp_uniform, elect_one,
        Tcgen05Atom, accumulator, commit_mma,
        reinterpret_tile, load_async, wait_load, store_async!, wait_stores,
@@ -28,7 +28,7 @@ public Registers,Addresses,instruction_atoms,copy_atoms,validate_copy,
        fence_after_thread_sync,fence_before_thread_sync,softmax_logsumexp,convert_element,threads,ctas,
        MachineCode,Finding,registers,spill_bytes,local_bytes,kernel_calls,wgmma_groups,
        memory_instructions,sass_instructions,entry_ptx,trace,Tuning,Trial,best,boxed_variables,wait_timeout,
-       BoundLayout,Barriers,Scalars,Buffers,Stage,stages
+       BoundLayout,Barriers,Buffers,Stage,stages,NamedBarriers,Arrival
 
 include("tuples.jl")
 include("integers.jl")

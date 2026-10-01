@@ -153,6 +153,22 @@ Close the issuing thread's bulk group of TMA stores.
 function commit_tma_stores end
 
 """
+    bulk_copy!(dst::global pointer, src::shared pointer, bytes)
+    bulk_copy!(dst::shared pointer, src::global pointer, bytes, barrier)
+    bulk_copy!(dst::shared pointer, src::shared pointer, bytes, barrier; cta)
+
+Copy `bytes` (a multiple of 16, both addresses 16-byte aligned) with the
+asynchronous bulk copy engine, as TMA copies tiles: from shared memory to
+global memory, in the thread's bulk group ([`commit_tma_stores`](@ref),
+[`wait_tma_stores`](@ref)); from global memory, or from this CTA's shared
+memory to the same address in the cluster's CTA of rank `cta`, completing
+on `barrier` (the peer's, at `barrier`'s address), which must expect the
+bytes ([`arrive!`](@ref)`(barrier, bytes)`). One thread issues; publish
+shared-memory writes with [`fence_async_shared`](@ref) first.
+"""
+function bulk_copy! end
+
+"""
     wait_tma_reads(n)
 
 Wait until at most `n` (a constant) of the issuing thread's committed bulk

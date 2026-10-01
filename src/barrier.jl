@@ -40,15 +40,17 @@ function initialize! end
 """
     arrive!(barrier) -> Arrival
     arrive!(barrier, bytes) -> Arrival
-    arrive!(barrier; cta)
+    arrive!(barrier; cta, scope=:cta)
 
 Arrive on the barrier's current phase. With `bytes`, first announce that
 many bytes of asynchronous transactions (a TMA load's
 [`transfer_bytes`](@ref)) that must also land before the phase completes.
 With `cta`, arrive on the barrier at the same address in the cluster's CTA
 of that rank ([`cluster_rank`](@ref)): a consumer releasing a stage that a
-peer's multicast loads write. A local arrival returns its [`Arrival`](@ref),
-which [`after`](@ref) orders later work behind.
+peer's multicast loads write; with `scope = :cluster` as well, the
+arrival releases this thread's prior memory operations to the whole
+cluster. A local arrival returns its [`Arrival`](@ref), which
+[`after`](@ref) orders later work behind.
 """
 function arrive! end
 
@@ -89,10 +91,12 @@ without arriving.
 function expect_bytes! end
 
 """
-    wait(barrier, parity)
+    wait(barrier, parity; scope=:cta)
 
 Block until the barrier's phase of the given parity (0 or 1) completes. A
 kernel waiting on successive phases alternates the parity: 0, 1, 0, ...
+With `scope = :cluster`, the wait acquires what threads of other CTAs of
+the cluster released by arriving on it.
 With a [`wait_timeout`](@ref), a wait that outlasts it reports the barrier
 and traps.
 """
@@ -139,6 +143,16 @@ that ordinary stores wrote (followed by a thread barrier when other
 threads wrote it).
 """
 function fence_async_shared end
+
+"""
+    fence_async_global()
+
+Order this thread's preceding global-memory accesses with asynchronous-proxy
+(bulk copy, TMA) accesses to global memory: between a bulk copy's writes
+and the flag that publishes them, or a flag observed and the bulk copy that
+reads what it published.
+"""
+function fence_async_global end
 
 """
     cluster_rank()

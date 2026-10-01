@@ -70,24 +70,23 @@ end
 @inline _first(s,c,m,cfg) = ntuple(@inline(q -> _chunk(s,q,c,m,cfg)),Val(Int(cfg.split)))
 @inline _rest(s,c,m,cfg) = ntuple(@inline(q -> _chunk(s,cfg.split+q,c,m,cfg)),Val(4-Int(cfg.split)))
 
-# A part's normalized results in its scratch slot, and staged in shared
-# memory, each CTA's rows (of a pair) together, 128 KB, a tile's 64 KB each,
-# for bulk copies: for each 32 columns `q` and 4 columns `g` of them, the
-# tile's 128 rows (`r`), 4 values each, so that a warp's lanes (rows) write
+# A tile's part of an item, as staged in shared memory (and kept in
+# scratch) for bulk copies, tile i at `buffer`+64i KB: for each 4 columns,
+# the tile's 128 rows, 4 values each, so that a warp's lanes (rows) write
 # and read 512 contiguous bytes.
-@inline _part_offset(i,q,g,r) = Int32(16)*(((Int32(32)*i+Int32(8)*q)+g)*Int32(128)+r)
-@inline function _stage_part!(buffer,i,q,r,values::NTuple{32,Float32})
-    ntuple(Val(8)) do g
-        ptx"st.shared.v4.b32"(buffer+_part_offset(i,Int32(q),Int32(g-1),r),ntuple(e -> reinterpret(UInt32,values[4(g-1)+e]),Val(4)))
-    end
-    nothing
-end
-# `values` times `scale`, plus `weight` times a part's 32 values of row `r`
-# and columns 32q.. in shared memory.
-@inline function _merge_chunk(values::NTuple{32,Float32},scale::Float32,weight::Float32,part,i,q,r)
-    chunk = ntuple(g -> ptx"ld.shared.v4.f32"(part+_part_offset(i,q,Int32(g-1),r)),Val(8))
-    ntuple(e -> muladd(weight,chunk[(e-1)÷4+1][(e-1)%4+1],scale*values[e]),Val(32))
-end
+@inline _staged(buffer,i) = @inbounds SharedTile(reinterpret(Core.LLVMPtr{Float32,3},buffer)+Int32(65536)*i,
+                                                 Layout((static(128),(static(4),static(32))),(static(4),(static(1),static(512)))),16)
+# The rows' base-2 log-sum-exps staged after a tile's part.
+@inline _logsums(part) = Scalars(reinterpret(Core.LLVMPtr{Float32,3},part+Int32(65536)),128)
+# Counts and flags in global memory, shared between CTAs, in the orderings
+# of PTX's memory model that the merge relies on.
+@inline _count!(p) = ptx"atom.add.relaxed.gpu.global.s32"(p,Int32(1))   # the count before
+@inline _publish!(p) = (ptx"fence.acq_rel.gpu"(); ptx"red.release.gpu.global.add.s32"(p,Int32(1)))
+@inline _observe(p) = ptx"ld.acquire.gpu.global.s32"(p)
+@inline _reset!(p) = ptx"st.relaxed.gpu.global.s32"(p,Int32(0))
+@inline _count_out!(p) = ptx"atom.add.acq_rel.gpu.global.s32"(p,Int32(1))   # the count before, ordered both ways
+# A value another CTA wrote, from L2 (the SM's L1 is not coherent).
+@inline _load_l2(p) = ptx"ld.global.cg.f32"(p)
 # A merged row's largest log-sum-exp (online, over the parts), the inverse
 # sum of weights, and the factor of this CTA's own part `own`, unnormalized
 # with its sum and maximum at `stat`.
@@ -97,7 +96,7 @@ end
     top = mine; total = 1f0
     for p in Int32(0):parts-Int32(1)
         p == own && continue
-        x = ptx"ld.global.cg.f32"(logsum(p)+Int32(4)*r)
+        x = _load_l2(pointer(logsum(p))+Int32(4)*r)
         if x > top
             total = muladd(total,exp2_approx(top-x),1f0); top = x
         else
@@ -125,12 +124,12 @@ end
     first = a*parts
     slot(p) = pointer(scratch,Int32(1)+(first+p)*(Int32(32768)*CTAs))+rank*Int32(131072)
     half = Int32(65536)                                 # a tile's bytes
-    logsum(p) = pointer(scratch,Int32(1)+slots*(Int32(32768)*CTAs)+(first+p)*(Int32(256)*CTAs)+rank*Int32(256))
+    logsum(p) = Scalars(pointer(scratch,Int32(1)+slots*(Int32(32768)*CTAs)+(first+p)*(Int32(256)*CTAs)+rank*Int32(256)),256)
     stat(i) = band+lane+Int32(128)*(i+Int32(2)*parity)
     part(i) = Int32(128)*i+band+lane                    # this thread's row of the CTA's part
     wait(merge)
     if tid == Int32(256)
-        last = ptx"atom.add.relaxed.gpu.global.s32"(count,Int32(1)) == parts-Int32(1)
+        last = _count!(count) == parts-Int32(1)
         smem.merging[] = Int32(last)
     end
     wait(merge)
@@ -139,27 +138,25 @@ end
             l = @inbounds smem.sums[stat(i)]
             for q in 0:3
                 values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*i+Int32(32q)),(32,32))))
-                _stage_part!(buffer,i,q,band+lane,(values .* (1f0/l)).data)
+                @inbounds store!(tile(_staged(buffer,i),(32,32),(band>>5,Int32(q))),values .* (1f0/l),lane)
             end
-            unsafe_store!(logsum(own),@inbounds(smem.maxima[stat(i)])+log2_approx(l),part(i)+Int32(1),Val(4))
+            @inbounds logsum(own)[part(i)] = @inbounds(smem.maxima[stat(i)])+log2_approx(l)
         end
         fence_async_shared()
         wait(merge)
         if tid == Int32(256)
-            ptx"cp.async.bulk.global.shared::cta.bulk_group"(slot(own),buffer,UInt32(131072))
-            ptx"cp.async.bulk.commit_group"()
-            ptx"cp.async.bulk.wait_group"(Val(0))
-            ptx"fence.proxy.async.global"()
-            ptx"fence.acq_rel.gpu"()
-            ptx"red.release.gpu.global.add.s32"(count+Int32(4),Int32(1))
+            bulk_copy!(slot(own),buffer,131072)
+            commit_tma_stores()
+            wait_tma_stores(0)
+            fence_async_global()
+            _publish!(count+Int32(4))                   # written
         end
         return nothing
     end
     if tid == Int32(256)
-        while ptx"ld.acquire.gpu.global.s32"(count+Int32(4)) != parts-Int32(1) end
-        ptx"st.relaxed.gpu.global.s32"(count,Int32(0))
-        ptx"st.relaxed.gpu.global.s32"(count+Int32(4),Int32(0))
-        ptx"fence.proxy.async.global"()
+        while _observe(count+Int32(4)) != parts-Int32(1) end
+        _reset!(count); _reset!(count+Int32(4))
+        fence_async_global()
     end
     wait(merge)
     tops = (_weights(smem,stat(Int32(0)),logsum,part(Int32(0)),parts,own),
@@ -170,11 +167,11 @@ end
         if tid == Int32(256)
             for i in Int32(0):Int32(1)
                 arrive!(smem.copied[i],half)
-                ptx"cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"(buffer+i*half,slot(p)+i*half,UInt32(65536),smem.copied[i].ptr)
+                bulk_copy!(buffer+i*half,slot(p)+i*half,half,smem.copied[i])
             end
         end
-        weights = (exp2_approx(ptx"ld.global.cg.f32"(logsum(p)+Int32(4)*part(Int32(0)))-tops[1][1])*tops[1][2],
-                   exp2_approx(ptx"ld.global.cg.f32"(logsum(p)+Int32(4)*part(Int32(1)))-tops[2][1])*tops[2][2])
+        weights = (exp2_approx(_load_l2(pointer(logsum(p))+Int32(4)*part(Int32(0)))-tops[1][1])*tops[1][2],
+                   exp2_approx(_load_l2(pointer(logsum(p))+Int32(4)*part(Int32(1)))-tops[2][1])*tops[2][2])
         final = k == parts-Int32(2)
         for i in Int32(0):Int32(1)
             wait(Ring(smem.copied[i])[k])
@@ -183,11 +180,12 @@ end
             for q in 0:3
                 o = @inbounds window(words,(band,Int32(256)+Int32(128)*i+Int32(32q)),(32,32))
                 values = wait_load(@inbounds load_async(rows,o))
-                merged = _merge_chunk(values.data,scale,weight,buffer,i,Int32(q),band+lane)
+                theirs = @inbounds load_fragment(rows,tile(_staged(buffer,i),(32,32),(band>>5,Int32(q))),lane)
+                merged = muladd.(weight,theirs,values .* scale)
                 if final
-                    @inbounds store!(window(dst,(q0+Int32(128)*i+band,Int32(32q)),(32,32)),Fragment{BFloat16}(Fragment(merged,rows)),lane)
+                    @inbounds store!(window(dst,(q0+Int32(128)*i+band,Int32(32q)),(32,32)),Fragment{BFloat16}(merged),lane)
                 else
-                    @inbounds store_async!(o,Fragment(merged,rows))
+                    @inbounds store_async!(o,merged)
                 end
             end
         end
@@ -212,27 +210,25 @@ end
     ready, received = smem.copied[0], smem.copied[1]
     staged, landing = smem.kv[1], smem.q[0]
     me = cluster_rank(); other = Int32(1)-me
-    bytes = UInt32(65536+512)                           # a tile's part and its rows' log-sum-exps
+    bytes = 65536+512                                   # a tile's part and its rows' log-sum-exps
     r = band+lane                                       # this thread's row of a tile
     stat(i) = r+Int32(128)*(i+Int32(2)*parity)
     tid == Int32(256) && arrive!(received,bytes)
     l = @inbounds smem.sums[stat(other)]
     for q in 0:3
         values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*other+Int32(32q)),(32,32))))
-        _stage_part!(staged,Int32(0),q,r,(values .* (1f0/l)).data)
+        @inbounds store!(tile(_staged(staged,0),(32,32),(band>>5,Int32(q))),values .* (1f0/l),lane)
     end
-    logsums(part) = reinterpret(Core.LLVMPtr{Float32,PTX.AS.Shared},part+Int32(65536))
-    unsafe_store!(logsums(staged),@inbounds(smem.maxima[stat(other)])+log2_approx(l),r+Int32(1),Val(4))
+    @inbounds _logsums(staged)[r] = @inbounds(smem.maxima[stat(other)])+log2_approx(l)
     fence_async_shared()                                # the staged part, to the bulk copy
     wait(merge)
     if tid == Int32(256)
-        remote(x) = reinterpret(Core.LLVMPtr{UInt64,3},UInt64(ptx"mapa.shared::cluster.u32"(PTX.smem_addr_u32(x),other % UInt32)))
-        ptx"mbarrier.arrive.release.cluster.shared::cluster.b64"(remote(ready.ptr))
-        while !ptx"mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64"(ready.ptr,UInt32(0)) end
-        ptx"cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"(reinterpret(Core.LLVMPtr{UInt8,3},remote(landing)),staged,bytes,remote(received.ptr))
+        arrive!(ready;cta=other,scope=:cluster)          # this CTA's landing is free
+        wait(ready,0;scope=:cluster)                    # the other's is
+        bulk_copy!(landing,staged,bytes,received;cta=other)
     end
     wait(received,0)
-    theirs = unsafe_load(logsums(landing),r+Int32(1),Val(4))
+    theirs = @inbounds _logsums(landing)[r]
     l = @inbounds smem.sums[stat(me)]
     mine = @inbounds(smem.maxima[stat(me)])+log2_approx(l)
     top = max(mine,theirs)
@@ -241,8 +237,8 @@ end
     scale, weight = wm*inverse/l, wo*inverse
     for q in 0:3
         values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*me+Int32(32q)),(32,32))))
-        merged = _merge_chunk(values.data,scale,weight,landing,Int32(0),Int32(q),r)
-        @inbounds store!(window(dst,(q0+Int32(128)*me+band,Int32(32q)),(32,32)),Fragment{BFloat16}(Fragment(merged,rows)),lane)
+        theirs = @inbounds load_fragment(rows,tile(_staged(landing,0),(32,32),(band>>5,Int32(q))),lane)
+        @inbounds store!(window(dst,(q0+Int32(128)*me+band,Int32(32q)),(32,32)),Fragment{BFloat16}(muladd.(weight,theirs,values .* scale)),lane)
     end
     nothing
 end
@@ -673,9 +669,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                     # The last CTA out returns the item counter to zero for
                     # the next launch: every CTA took its last item before
                     # it counted itself out (acquire-release orders them).
-                    if Dynamic && ptx"atom.add.acq_rel.gpu.global.s32"(pointer(counter,2),Int32(1)) == gridDim().x % Int32-Int32(1)
-                        ptx"st.relaxed.gpu.global.s32"(pointer(counter,1),Int32(0))
-                        ptx"st.relaxed.gpu.global.s32"(pointer(counter,2),Int32(0))
+                    if Dynamic && _count_out!(pointer(counter,2)) == gridDim().x % Int32-Int32(1)
+                        _reset!(pointer(counter,1)); _reset!(pointer(counter,2))
                     end
                     break
                 end
