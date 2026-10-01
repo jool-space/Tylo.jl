@@ -64,7 +64,7 @@ datacenter FlashAttention pieces.
 ## Development
 
 The test project is a workspace member, so one instantiate covers the
-package, its tests and its docs (Julia 1.10+):
+package, its tests and its docs (Julia 1.12+):
 
 ```sh
 julia --project=. -e 'using Pkg; Pkg.instantiate(; workspace=true)'

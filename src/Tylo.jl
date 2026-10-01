@@ -20,14 +20,12 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
        machine_code, @machine_code, audit, tune, Timeline, recorder, record!, events, spans, unchecked_div, unchecked_rem
 
 # Inspection, validation and less common operations are public, used qualified.
-@static if VERSION >= v"1.11.0-DEV.469"
-    eval(Expr(:public,:Registers,:Addresses,:instruction_atoms,:copy_atoms,:validate_copy,
-        :TMABinding,:swizzled_structure,:validate_wgmma,
-        :Tcgen05Operand,:tmem_allocate!,:tmem_deallocate!,:tmem_relinquish_permit,
-        :fence_after_thread_sync,:fence_before_thread_sync,:softmax_logsumexp,:convert_element,:threads,:ctas,
-        :MachineCode,:Finding,:registers,:spill_bytes,:local_bytes,:kernel_calls,:wgmma_groups,
-        :memory_instructions,:sass_instructions,:entry_ptx,:trace,:Tuning,:Trial,:best,:boxed_variables))
-end
+public Registers,Addresses,instruction_atoms,copy_atoms,validate_copy,
+       TMABinding,swizzled_structure,validate_wgmma,
+       Tcgen05Operand,tmem_allocate!,tmem_deallocate!,tmem_relinquish_permit,
+       fence_after_thread_sync,fence_before_thread_sync,softmax_logsumexp,convert_element,threads,ctas,
+       MachineCode,Finding,registers,spill_bytes,local_bytes,kernel_calls,wgmma_groups,
+       memory_instructions,sass_instructions,entry_ptx,trace,Tuning,Trial,best,boxed_variables
 
 include("tuples.jl")
 include("integers.jl")
