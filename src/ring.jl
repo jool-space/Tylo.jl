@@ -23,13 +23,19 @@ mma(...); commit_mma(atom, s.empty)         # free it once the MMAs complete
 ```
 
 Waits are explicit and releases use the barriers' own verbs: the ring only
-computes which barrier and which phase.
+computes which barrier and which phase. A single barrier (or a pair) is a
+ring of one stage, `Ring(barrier)`: its `c`-th use waits for phase `c % 2`.
 """
 struct Ring{E<:Union{Barriers,Nothing}}
     full::Barriers
     empty::E
 end
 Ring(full::Barriers) = Ring(full,nothing)
+# One barrier (or one pair) as a ring of one stage: the phase of use `c`
+# alternates with `c`.
+@inline _one(b::Barrier) = Barriers(b.ptr,(1,1),(1,1))
+@inline Ring(full::Barrier) = Ring(_one(full),nothing)
+@inline Ring(full::Barrier,empty::Barrier) = Ring(_one(full),_one(empty))
 "The number of stages of `ring`."
 @inline stages(r::Ring) = length(r.full)
 
