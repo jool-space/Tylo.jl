@@ -53,8 +53,12 @@ The API is experimental.
   `ldmatrix`/`stmatrix`, vectors, zero-filling bounded tiles.
 - Fragment broadcasting, reductions across lanes, coordinates for masking,
   conversions to BF16/FP16/FP8.
-- Warp MMA (16-bit, TF32, FP8, INT8, block-scaled MXFP8), TMA, Hopper WGMMA,
-  Blackwell tcgen05 and tensor memory.
+- Warp MMA (16-bit, TF32, FP8, INT8, block-scaled MXFP8), TMA and bulk
+  copies, Hopper WGMMA, Blackwell tcgen05 and tensor memory.
+- Pipelines without bookkeeping: a kernel's shared memory declared once
+  (barriers, scalars, aligned buffers), rings of stages that compute every
+  barrier's phase, numbered named barriers, arrival tokens, and one
+  configuration argument for a kernel's constants.
 
 See the [documentation](docs/src/index.md) and the [status page](docs/src/status.md)
 for what has run on which hardware. The [examples](examples/) include a

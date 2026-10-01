@@ -12,6 +12,8 @@ makedocs(;
         canonical="https://docs.jool.space/Tylo.jl",
         edit_link="main",
         assets=String[],
+        size_threshold=400_000,
+        size_threshold_warn=250_000,
     ),
     pages=[
         "Tylo" => "index.md",
@@ -19,6 +21,7 @@ makedocs(;
         "Memory tiles" => "tiles.md",
         "Fragments" => "fragments.md",
         "Hardware operations" => "operations.md",
+        "Pipelines" => "pipelines.md",
         "A complete kernel" => "kernel.md",
         "Machine code, tuning and timelines" => "machine.md",
         "Design" => "design.md",

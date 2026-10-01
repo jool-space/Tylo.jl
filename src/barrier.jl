@@ -191,21 +191,26 @@ struct NamedBarrier
     threads::Int32
 end
 
+struct NamedGroup
+    count::Int
+    threads::Int
+end
 """
     named(count=1; threads)
 
 A group of `count` named barriers of `threads` threads each, in
 [`named_barriers`](@ref).
 """
-struct NamedGroup
-    count::Int
-    threads::Int
-end
 Base.@constprop :aggressive @inline function named(count::Integer=1;threads::Integer)
     threads % 32 == 0 && threads > 0 || throw(ArgumentError("a named barrier synchronizes whole warps"))
     NamedGroup(Int(count),Int(threads))
 end
 
+
+struct NamedBarriers{G<:NamedTuple}
+    groups::G
+    first::Int
+end
 """
     named_barriers(groups::NamedTuple; first=1) -> NamedBarriers
 
@@ -220,10 +225,6 @@ nb = named_barriers((; handoff = named(8; threads=64), merge = named(; threads=1
 arrive!(nb.handoff[i]); wait(nb.handoff[i]); wait(nb.merge)
 ```
 """
-struct NamedBarriers{G<:NamedTuple}
-    groups::G
-    first::Int
-end
 Base.@constprop :aggressive @inline function named_barriers(groups::NamedTuple;first::Integer=1)
     first >= 1 && first+sum(g -> g.count,values(groups);init=0) <= 16 ||
         throw(ArgumentError("named barriers are numbered 1 to 15"))

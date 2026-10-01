@@ -29,7 +29,10 @@ that already exist apply to it.
 - A register operand is `load_fragment(atom, role, tile, thread)`; a
   shared-memory operand is `operand(atom, role, tile, origin)`.
 - Shapes, axes, counts and alignments are plain constants at every call
-  site; `Val` appears only inside the implementation.
+  site, and a kernel's own constants are one [`Config`](@ref); `Val`
+  appears only inside the implementation.
+- A kernel's shared memory is one [`SharedLayout`](@ref), and every phase
+  of a barrier comes from a [`Ring`](@ref).
 
 ## Derivations are ordinary functions
 
@@ -54,9 +57,13 @@ error in every build, at no cost.
 
 Tylo never inserts a barrier, fence, wait or allocation. Every asynchronous
 operation returns or requires an explicit completion (see
-[Completion](operations.md#Completion)). This is what lets the same
-primitives serve a standalone kernel and a persistent megakernel's task
-bodies, whose schedules are nothing alike.
+[Completion](operations.md#Completion)). Shared layouts, rings and named
+barriers ([Pipelines](pipelines.md)) only compute addresses, barriers and
+phases. Initializing a layout's barriers still needs the kernel's fence and
+thread barrier, and a ring stage still needs the kernel's `wait` or
+`acquire`. This is what lets the same primitives serve a standalone kernel
+and a persistent megakernel's task bodies, whose schedules are nothing
+alike.
 
 ## The machine code is the specification
 

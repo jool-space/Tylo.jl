@@ -4,6 +4,10 @@
 # launch's byte count) and the kernel (the addresses), and every offset folds
 # to a constant in the machine code.
 
+struct BarrierGroup
+    shape::Tuple{Int,Int}
+    arrivals::Int
+end
 """
     barriers(n; arrivals)
     barriers((m, n); arrivals)
@@ -11,23 +15,24 @@
 A group of `n` (or `m × n`, indexed `[i, j]`, `i` fastest) mbarriers in a
 [`SharedLayout`](@ref), each initialized for `arrivals` arrivals per phase.
 """
-struct BarrierGroup
-    shape::Tuple{Int,Int}
-    arrivals::Int
-end
 Base.@constprop :aggressive @inline barriers(n::Integer;arrivals::Integer) = BarrierGroup((Int(n),1),Int(arrivals))
 Base.@constprop :aggressive @inline barriers((m,n)::Tuple{Integer,Integer};arrivals::Integer) = BarrierGroup((Int(m),Int(n)),Int(arrivals))
 
+struct ScalarGroup{T}
+    count::Int
+end
 """
     scalars(T, n=1)
 
 `n` values of type `T` in a [`SharedLayout`](@ref), at `T`'s alignment.
 """
-struct ScalarGroup{T}
-    count::Int
-end
 Base.@constprop :aggressive @inline scalars(::Type{T},n::Integer=1) where T = ScalarGroup{T}(Int(n))
 
+struct BufferGroup
+    bytes::Int
+    count::Int
+    align::Int
+end
 """
     buffers(bytes, n; align=1024)
 
@@ -35,11 +40,6 @@ Base.@constprop :aggressive @inline scalars(::Type{T},n::Integer=1) where T = Sc
 first at an address that is a multiple of `align` (a swizzled operand's
 1024 bytes, say; `bytes` a multiple of it keeps every buffer so aligned).
 """
-struct BufferGroup
-    bytes::Int
-    count::Int
-    align::Int
-end
 Base.@constprop :aggressive @inline function buffers(bytes::Integer,n::Integer=1;align::Integer=1024)
     ispow2(align) && align >= 16 || throw(ArgumentError("buffers align to a power of two of at least 16 bytes"))
     BufferGroup(Int(bytes),Int(n),Int(align))

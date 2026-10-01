@@ -70,17 +70,17 @@ between lanes, as attention does between its two products.
 
 A [`Barrier`](@ref) is an mbarrier in shared memory. TMA loads, tcgen05
 MMAs and `cp.async` copies complete on barriers, and threads wait on their
-phases:
+phases. A kernel declares its barriers in a [`SharedLayout`](@ref) and
+waits through [`Ring`](@ref)s, which supply the phase (see
+[Pipelines](pipelines.md)):
 
 ```julia
-full(s) = Barrier(pointer(smem), s)        # one barrier per stage
-if thread == 0
-    foreach(s -> initialize!(full(s), 1), 0:stages-1)
-    fence_barrier_init()                   # visible to TMA
-end
+smem = bind(SharedLayout((; full = barriers(stages; arrivals=1), stage = buffers(bytes, stages))), pointer(memory))
+thread == 0 && (initialize!(smem); fence_barrier_init())   # visible to TMA
 sync_threads()
-thread == 0 && (arrive!(full(s), transfer_bytes(binding)); tma_load!(tile, binding, origin, full(s)))
-wait(full(s), phase)                       # parity 0, 1, 0, ... per reuse of the stage
+s = Ring(smem.full)[c]
+thread == 0 && (arrive!(s.full, transfer_bytes(binding)); tma_load!(shared_tile(binding, smem.stage[s.slot]), binding, origin, s.full))
+wait(s)                                    # the phase of the stage's round
 ```
 
 `arrive!(barrier)` counts one arrival, `arrive!(barrier, bytes)` also
@@ -88,7 +88,12 @@ announces bytes of asynchronous transactions, `expect_bytes!` announces
 them without arriving, and `commit_copies(barrier)` makes a thread's
 `cp.async` copies one arrival as they land. `fence_async_shared()` orders
 ordinary shared-memory writes before asynchronous reads (a TMA store, an
-MMA).
+MMA), and `fence_async_global()` global-memory accesses around bulk copies.
+`arrive!(barrier; cta)` arrives on a peer CTA's barrier (`scope=:cluster`
+releases to the cluster, which `wait(barrier, parity; scope=:cluster)`
+acquires). [`bulk_copy!`](@ref) moves plain bytes as TMA moves tiles:
+shared to global in the bulk group, global or shared to (a peer's) shared
+memory completing on a barrier.
 
 ## TMA
 
@@ -131,10 +136,10 @@ stages' shared memory while the tensor cores work on the latest one:
 
 ```julia
 c = mma_async(atom, a(0), b(0))
-for i in 1:stages-1
-    wait(full(i), phase(i))
+for i in 1:count-1
+    wait(ring[i])
     c = wait_mma(mma_async(atom, a(i), b(i), c), 1)
-    arrive!(empty(i-1))
+    arrive!(ring[i-1].empty)
 end
 f = wait_mma(c)
 ```
@@ -199,6 +204,10 @@ store_async!(window(tmem, (32warp, 0), (32, 64)), values .* alpha)
 wait_stores()
 ```
 
+[`chunks`](@ref) splits a band into windows, and the transfers take the
+tuple: `wait_load(load_async(rows, chunks(band, (32, 32))))` issues one
+load per 32 columns and then waits for each.
+
 ## Completion
 
 Each asynchronous mechanism completes through its own verb, because each
@@ -208,7 +217,8 @@ waits on a different scope:
 |:--|:--|:--|
 | `copy_async!` | `commit_copies()`, `wait_copies(n)` | the thread's cp.async groups |
 | `tma_load!` | `wait(barrier, parity)` | the barrier's arrivals and transaction bytes |
-| `tma_store!` | `commit_tma_stores()`, `wait_tma_reads(n)`, `wait_tma_stores(n)` | the thread's bulk groups |
+| `tma_store!`, `bulk_copy!` to global | `commit_tma_stores()`, `wait_tma_reads(n)`, `wait_tma_stores(n)` | the thread's bulk groups |
+| `bulk_copy!` to shared | `wait(barrier, parity)` | the barrier's transaction bytes |
 | `mma_async` | `wait_mma(pending[, n])` | the warpgroup's WGMMA groups |
 | tcgen05 `mma` | `commit_mma(atom, barrier[, ctas])`, then `wait` | the issuing lane's MMAs |
 | `copy_async!` | `commit_copies(barrier)`, then `wait` | the thread's cp.async copies, as one arrival |
