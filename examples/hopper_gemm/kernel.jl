@@ -1,5 +1,6 @@
 using Tylo, PTX, CUDACore, BFloat16s
 using Tylo.Layouts: Layout, static
+include(joinpath(@__DIR__,"..","launch.jl"))
 
 # A warp-specialized Hopper GEMM, C = Aᵀ B: A is K×M and B is K×N, both
 # contiguous along K, in BF16, FP16 or FP8; C is M×N, stored row-major (an
@@ -128,19 +129,19 @@ end
 end
 
 """
-    hopper_gemm(a, b; n=256, stages=4, group=8, persistent=true, cluster=1) -> (kernel, launch, c)
+    hopper_gemm_launch(a, b; n=256, stages=4, group=8, persistent=true, cluster=1, c=nothing, sms) -> Launch
 
 Prepare C = Aᵀ B for `a` (K×M) and `b` (K×N) on the device, BF16, FP16 or FP8: the tile
 width `n`, the number of shared stages, the number of row tiles grouped
-for L2 reuse, and whether one CTA per SM walks the tiles (`persistent`) or
-one CTA per tile runs, and whether clusters of two CTAs share B tiles by
-multicast (`cluster = 2`) are the configuration. M, N and K may take any
-sizes TMA can address (K a multiple of 16 bytes, N of 8): the last tiles
-overhang, zero-filled and clipped. Returns the compiled kernel, a
-launcher, and C as an N×M matrix (row-major M×N).
+for L2 reuse, and whether one CTA per SM (`sms`, the device's by default)
+walks the tiles (`persistent`) or one CTA per tile runs, and whether
+clusters of two CTAs share B tiles by multicast (`cluster = 2`) are the
+configuration. M, N and K may take any sizes TMA can address (K a multiple
+of 16 bytes, N of 8): the last tiles overhang, zero-filled and clipped. C is
+an N×M matrix (row-major M×N), the launch's result.
 """
-function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,persistent::Bool=true,
-                     cluster::Integer=1,c=nothing) where T
+function hopper_gemm_launch(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,persistent::Bool=true,
+                            cluster::Integer=1,c=nothing,sms::Integer=multiprocessors()) where T
     k, m = size(a); kb, nt = size(b)
     ks = 128 ÷ sizeof(T)                                  # one swizzle row of K per stage
     cluster in (1,2) || throw(ArgumentError("clusters of one or two CTAs"))
@@ -154,12 +155,18 @@ function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Intege
     shmem = 16stages+1024+stages*(transfer_bytes(ta)+transfer_bytes(tb))
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     c = c === nothing ? CuArray{BFloat16}(undef,nt,m) : c
-    kernel = @cuda launch=false minthreads=384 maxregs=168 hopper_gemm_kernel!(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster))
-    CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     tiles = cld(m,128cluster)*cld(nt,n)                    # of a cluster
-    sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
     blocks = cluster*(persistent ? min(tiles,sms÷cluster) : tiles)
-    launch() = GC.@preserve ta tb tbh kernel(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster);
-                                             threads=384,blocks,shmem,clustersize=cluster)
-    kernel, launch, c
+    Launch(hopper_gemm_kernel!,(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster));
+           threads=384,blocks,shmem,clustersize=cluster,minthreads=384,maxregs=168)
+end
+"""
+    hopper_gemm(a, b; kwargs...) -> (kernel, launch, c)
+
+[`hopper_gemm_launch`](@ref), compiled: the kernel, a launcher, and C.
+"""
+function hopper_gemm(a::CuMatrix,b::CuMatrix;kwargs...)
+    l = hopper_gemm_launch(a,b;kwargs...)
+    kernel = compile(l)
+    kernel, () -> l(kernel), l.result
 end

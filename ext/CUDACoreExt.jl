@@ -27,6 +27,9 @@ end
     Tylo._from_words(T,words,Tylo.Layouts.layout(f))
 end
 @device_override @inline Tylo._smem_address(p::Core.LLVMPtr{T,3}) where T = PTX.smem_addr_u32(p)
+@device_override @noinline Tylo._report_hang(b::Tylo.Barrier,parity) =
+    CUDACore.@cuprintln("Tylo: barrier wait timed out: shared address ",Tylo._smem_address(b.ptr),", parity ",parity,
+                        ", block ",blockIdx().x,", thread ",threadIdx().x)
 @device_override @inline Tylo._shuffle_idx(x::UInt32,lane::Int32) =
     ptx"shfl.sync.idx.b32"(x,lane % UInt32,UInt32(0x1f),0xffffffff % UInt32)
 @device_override @inline Tylo._ex2(x::Float32) = ccall("llvm.nvvm.ex2.approx.ftz.f",llvmcall,Float32,(Float32,),x)

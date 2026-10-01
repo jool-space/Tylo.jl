@@ -4,21 +4,16 @@
 include("../../examples/hopper_attention/fp8.jl")   # and kernel.jl
 
 @testset "Hopper attention assembly" begin
-    let T = BFloat16, binding(plan) = Tylo.TMABinding{typeof(plan),PTX.TMADescriptorPtr,3}
-        for causal in (false,true)
-            tt = Tuple{CuDeviceArray{T,3,1},binding(TMATile(T,(128,128),2)),binding(TMATile(T,(128,128),1)),
-                       binding(TMATile(T,(128,128),2)),CuDeviceVector{Int32,1},Int32,Int32,Float32,Val{2},Val{causal},Val{causal},Val{false}}
-            code = compile_kernel(persistent_attention_kernel!,tt;arch=CUDACore.SMVersion(9,0,:arch),threads=384)
-            save_code("hopper-attention-persistent$(causal ? "-causal" : "")",code)
-            @test isempty(audit(code))
-        end
-    end
     T = BFloat16
-    binding(plan) = Tylo.TMABinding{typeof(plan),PTX.TMADescriptorPtr,3}
+    arch = CUDACore.SMVersion(9,0,:arch)
+    x = CUDACore.zeros(T,128,256,2)
+    for causal in (false,true)
+        code = machine_code(hopper_attention_launch(x,x,x;stages=2,persistent=true,causal,sms=132);arch)
+        save_code("hopper-attention-persistent$(causal ? "-causal" : "")",code)
+        @test isempty(audit(code))
+    end
     for (stages,overlap,pingpong) in ((2,false,false),(2,true,false),(2,true,true),(3,true,true))
-        tt = Tuple{CuDeviceArray{T,3,1},binding(TMATile(T,(128,128),2)),binding(TMATile(T,(128,128),1)),
-                   binding(TMATile(T,(128,128),2)),Int32,Float32,Val{stages},Val{overlap},Val{pingpong}}
-        code = compile_kernel(attention_kernel!,tt;arch=CUDACore.SMVersion(9,0,:arch),threads=384)
+        code = machine_code(hopper_attention_launch(x,x,x;stages,overlap,pingpong,persistent=false,sms=132);arch)
         save_code("hopper-attention-s$stages-$(overlap ? "overlap" : "serial")$(pingpong ? "-pingpong" : "")",code)
         # The overlapped schedules hold two score tiles at once, a few
         # registers more than they get: 12 bytes spill.

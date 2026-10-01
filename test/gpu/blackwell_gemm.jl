@@ -7,11 +7,8 @@ include("../../examples/blackwell_gemm/kernel.jl")
 @testset "Warp-specialized Blackwell GEMM assembly" begin
     T = BFloat16
     for (ctas,n,stages) in ((1,256,4),(2,256,6),(2,128,6))
-        ta = Tylo.TMABinding{typeof(TMATile(T,(128,64),2)),PTX.TMADescriptorPtr,2}
-        tb = Tylo.TMABinding{typeof(TMATile(T,(64,n÷ctas),1)),PTX.TMADescriptorPtr,2}
-        atom = Tcgen05Atom((128ctas,n,16),T)
-        tt = Tuple{CuDeviceMatrix{T,1},ta,tb,typeof(atom),Int32,Val{stages},Val{8}}
-        code = compile_kernel(blackwell_gemm_kernel!,tt;arch=CUDACore.SMVersion(10,0,:arch),threads=256)
+        l = blackwell_gemm_launch(CUDACore.zeros(T,256,256),CUDACore.zeros(T,256,n);n,stages,ctas,sms=148)
+        code = machine_code(l;arch=CUDACore.SMVersion(10,0,:arch))
         save_code("blackwell-gemm-ctas$ctas-n$n-s$stages",code)
         @test isempty(audit(code))
         # The MMA warp issues in line: no MMA sits in a loop over the lanes

@@ -1,7 +1,7 @@
 using Tylo, PTX, CUDACore, BFloat16s
 using Tylo.Layouts: Layout, static
 using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_before_thread_sync, ctas
-include(joinpath(@__DIR__,"..","hopper_gemm","kernel.jl"))     # tile_order
+include(joinpath(@__DIR__,"..","hopper_gemm","kernel.jl"))     # tile_order, Launch
 
 # A warp-specialized, persistent Blackwell GEMM, C = Aᵀ B, with the operand
 # conventions of the Hopper GEMM: A is K×M and B is K×N, both contiguous
@@ -151,18 +151,18 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,::Val{Stages
 end
 
 """
-    blackwell_gemm(a, b; n=256, stages=4, group=8, ctas=1) -> (kernel, launch, c)
+    blackwell_gemm_launch(a, b; n=256, stages=4, group=8, ctas=1, c=nothing, sms) -> Launch
 
 Prepare C = Aᵀ B for `a` (K×M) and `b` (K×N) on the device, BF16, FP16 or
-FP8, with one persistent CTA per SM: the tile width `n` (the MMA's N, up to
-256), the number of shared stages, the number of row tiles grouped for L2
-reuse, and whether CTA pairs compute 256-row tiles together (`ctas = 2`)
-are the configuration. M, N and K may take any sizes TMA can address (K a
-multiple of 16 bytes, N of 8): the last tiles overhang, zero-filled and
-clipped. Returns the compiled kernel, a launcher, and C as an N×M matrix
-(row-major M×N).
+FP8, with one persistent CTA per SM (`sms`, the device's by default): the
+tile width `n` (the MMA's N, up to 256), the number of shared stages, the
+number of row tiles grouped for L2 reuse, and whether CTA pairs compute
+256-row tiles together (`ctas = 2`) are the configuration. M, N and K may
+take any sizes TMA can address (K a multiple of 16 bytes, N of 8): the last
+tiles overhang, zero-filled and clipped. C is an N×M matrix (row-major M×N),
+the launch's result.
 """
-function blackwell_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,ctas::Integer=1,c=nothing) where T
+function blackwell_gemm_launch(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,ctas::Integer=1,c=nothing,sms::Integer=multiprocessors()) where T
     k, m = size(a); kb, nt = size(b)
     ks = 128 ÷ sizeof(T)                                    # one swizzle row of K per stage
     ctas in (1,2) || throw(ArgumentError("one CTA or a CTA pair"))
@@ -175,11 +175,17 @@ function blackwell_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Int
     shmem = 16stages+48+1024+stages*(transfer_bytes(ta)+transfer_bytes(tb))
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     c = c === nothing ? CuArray{BFloat16}(undef,nt,m) : c
-    kernel = @cuda launch=false blackwell_gemm_kernel!(c,ta,tb,atom,Int32(k),Val(stages),Val(group))
-    CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
     tiles = cld(m,128ctas)*cld(nt,n)
-    sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-    blocks = ctas*min(tiles,sms÷ctas)
-    launch() = GC.@preserve ta tb kernel(c,ta,tb,atom,Int32(k),Val(stages),Val(group);threads=256,blocks,shmem,clustersize=ctas)
-    kernel, launch, c
+    Launch(blackwell_gemm_kernel!,(c,ta,tb,atom,Int32(k),Val(stages),Val(group));
+           threads=256,blocks=ctas*min(tiles,sms÷ctas),shmem,clustersize=ctas,minthreads=256)
+end
+"""
+    blackwell_gemm(a, b; kwargs...) -> (kernel, launch, c)
+
+[`blackwell_gemm_launch`](@ref), compiled: the kernel, a launcher, and C.
+"""
+function blackwell_gemm(a::CuMatrix,b::CuMatrix;kwargs...)
+    l = blackwell_gemm_launch(a,b;kwargs...)
+    kernel = compile(l)
+    kernel, () -> l(kernel), l.result
 end

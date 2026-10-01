@@ -6,10 +6,8 @@ include("../../examples/hopper_gemm/kernel.jl")
 @testset "Warp-specialized Hopper GEMM assembly" begin
     T = BFloat16
     for (n,stages) in ((128,6),(256,4))
-        ta = Tylo.TMABinding{typeof(TMATile(T,(128,64),2)),PTX.TMADescriptorPtr,2}
-        tb = Tylo.TMABinding{typeof(TMATile(T,(64,n),1)),PTX.TMADescriptorPtr,2}
-        tt = Tuple{CuDeviceMatrix{T,1},ta,tb,tb,typeof(WGMMAAtom(T,n,64)),Int32,Val{stages},Val{8},Val{1}}
-        code = compile_kernel(hopper_gemm_kernel!,tt;arch=CUDACore.SMVersion(9,0,:arch),threads=384)
+        l = hopper_gemm_launch(CUDACore.zeros(T,256,256),CUDACore.zeros(T,256,n);n,stages,sms=132)
+        code = machine_code(l;arch=CUDACore.SMVersion(9,0,:arch))
         save_code("hopper-gemm-n$n-s$stages",code)
         @test isempty(audit(code))
         body = entry_body(code.ptx)
@@ -21,11 +19,8 @@ include("../../examples/hopper_gemm/kernel.jl")
     end
     # Clusters of two: B shared by multicast, stages released in both CTAs.
     let n = 256, stages = 4
-        ta = Tylo.TMABinding{typeof(TMATile(T,(128,64),2)),PTX.TMADescriptorPtr,2}
-        tb = Tylo.TMABinding{typeof(TMATile(T,(64,n),1)),PTX.TMADescriptorPtr,2}
-        tbh = Tylo.TMABinding{typeof(TMATile(T,(64,n÷2),1)),PTX.TMADescriptorPtr,2}
-        tt = Tuple{CuDeviceMatrix{T,1},ta,tb,tbh,typeof(WGMMAAtom(T,n,64)),Int32,Val{stages},Val{8},Val{2}}
-        code = compile_kernel(hopper_gemm_kernel!,tt;arch=CUDACore.SMVersion(9,0,:arch),threads=384)
+        l = hopper_gemm_launch(CUDACore.zeros(T,256,256),CUDACore.zeros(T,256,n);n,stages,cluster=2,sms=132)
+        code = machine_code(l;arch=CUDACore.SMVersion(9,0,:arch))
         save_code("hopper-gemm-n$n-s$stages-cluster2",code)
         @test isempty(audit(code))
         body = entry_body(code.ptx)

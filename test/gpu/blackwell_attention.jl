@@ -5,17 +5,13 @@
 # sm_100a, correct on B200/B300.
 include("../../examples/blackwell_attention/kernel.jl")
 
-# O's rows as the kernel takes them: address, query length, strides.
-const Rows = NamedTuple{(:ptr,:seq,:row,:head,:batch),Tuple{Core.LLVMPtr{BFloat16,1},Int32,Int32,Int64,Int64}}
-
 @testset "Blackwell attention assembly" begin
     arch = CUDACore.SMVersion(10,0,:arch)
+    # Launches as a B200 (148 SMs) would run them, prepared on any device.
+    x(dims...) = CUDACore.zeros(BFloat16,128,dims...)
+    attention(q,k=q,v=k;kwargs...) = blackwell_attention_launch(q,k,v;sms=148,kwargs...)
     for ctas in (1,2)
-        tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
-        tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),1)),PTX.TMADescriptorPtr,3}
-        tv = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),2)),PTX.TMADescriptorPtr,3}
-        tt = Tuple{Rows,tq,tk,tv,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4ctas},Val{ctas},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{false},Nothing}
-        code = Tylo.machine_code(blackwell_attention_kernel!,tt;arch,threads=512,maxregs=128)
+        code = machine_code(attention(x(512,4);ctas,tail=false);arch)
         save_code("blackwell-attention-ctas$ctas",code)
         # No spills anywhere: the softmax warps hold a row at 184 registers,
         # the correction warps a row's merge at 80, the MMA warp its operands
@@ -41,8 +37,10 @@ const Rows = NamedTuple{(:ptr,:seq,:row,:head,:batch),Tuple{Core.LLVMPtr{BFloat1
     end
     # A split tail's two parts in a cluster (one CTA per item): each merges
     # one tile, the other's part of it copied into its shared memory in bulk.
-    let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}, tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{true},Nothing};arch,threads=512,maxregs=128)
+    # (60 items on 148 SMs split in two, 120 CTAs in pairs.)
+    let l = attention(x(512,30))
+        @test l.options.clustersize == 2
+        code = machine_code(l;arch)
         @test isempty(audit(code))
         body = entry_body(code.ptx)
         @test count("cp.async.bulk.shared::cluster.shared::cta",body) == 1 && occursin("mbarrier.arrive.release.cluster.shared::cluster",body)
@@ -51,34 +49,28 @@ const Rows = NamedTuple{(:ptr,:seq,:row,:head,:batch),Tuple{Core.LLVMPtr{BFloat1
     end
     # Heads and batches along two axes of any strides: four-axis copies,
     # the same clean code.
-    let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,4}, tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,4}
-        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{false},Nothing};arch,threads=512,maxregs=128)
+    let code = machine_code(attention(x(256,2,2);tail=false);arch)
         @test isempty(audit(code))
         body = entry_body(code.ptx)
         @test occursin("cp.async.bulk.tensor.4d",body) && !occursin("cp.async.bulk.tensor.3d",body)
     end
     # Sequences of their own lengths packed along the rows: their geometry
     # read from a table per item, the same clean code.
-    let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}, tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-        for causal in (false,true)
-            code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{causal},Val{causal},Val{(3,4,8,9,13,14)},Nothing,Val{false},CuDeviceVector{Int32,1}};arch,threads=512,maxregs=128)
-            @test isempty(audit(code))
-        end
+    for causal in (false,true)
+        code = machine_code(attention(x(512,2);lengths=[256,256],causal,tail=false);arch)
+        @test isempty(audit(code))
     end
     # Causal: the last two blocks masked, the rest unchanged; items handed
     # out dynamically.
-    let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3},
-        tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{true},Val{true},Val{()},Nothing,Val{false},Nothing};arch,threads=512,maxregs=128)
+    let code = machine_code(attention(x(512,2);causal=true,emulate=());arch)
         save_code("blackwell-attention-causal",code)
         @test isempty(audit(code))
         @test count("USETMAXREG",Tylo.kernel_sass(code)) == 3
     end
     # Given only its thread count, ptxas drops the register reallocation and
     # says so in a warning: the audit reports it.
-    tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
-    tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{()},Nothing,Val{false},Nothing};arch,threads=512)
+    l = attention(x(512,2);emulate=(),tail=false)
+    unstated = Tylo.machine_code(l.kernel,argument_types(l);arch,threads=512)
     @test :ptxas in getfield.(audit(unstated),:kind)
 end
 

@@ -1,6 +1,7 @@
 using Tylo, PTX, CUDACore, BFloat16s
 using Tylo.Layouts: Layout, static
 using Tylo: tmem_allocate!, tmem_deallocate!, fence_after_thread_sync, fence_before_thread_sync
+include(joinpath(@__DIR__,"..","launch.jl"))
 
 # FlashAttention's forward pass on datacenter Blackwell, O = softmax(Q Kᵀ ·
 # scale) V, in the style of FlashAttention-4. Q, K, V and O are
@@ -771,7 +772,7 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
 end
 
 """
-    blackwell_attention(q, k, v; stages, ctas=1, causal=false, tail=true, emulate, lengths, kv_lengths, o) -> (kernel, launch, o)
+    blackwell_attention_launch(q, k, v; stages, ctas=1, causal=false, tail=true, emulate, lengths, kv_lengths, o, sms) -> Launch
 
 O = softmax(Q Kᵀ / √d) V for BF16 `q` (d×seq×heads, or d×seq×heads×batch),
 `k` and `v` (d×seq_kv×heads_kv[×batch]), d = 128, sequences of any length:
@@ -802,9 +803,11 @@ rather than MUFU, by default 6 of them (24 of 128 keys, about
 FlashAttention-4's share): MUFU would otherwise be as busy as the tensor
 pipe. With a `timeline`
 (`Timeline(CUDACore.zeros(UInt64,capacity,14,blocks))`), each warp role
-records its steps (see the kernel for the events).
+records its steps (see the kernel for the events). `sms` is the number of
+multiprocessors the persistent CTAs fill, the device's by default. O is the
+launch's result.
 """
-function blackwell_attention(q::AbstractArray{T,N},k::AbstractArray{T,N},v::AbstractArray{T,N};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,causal::Bool=false,dynamic::Bool=causal,emulate::Tuple=(3,4,8,9,13,14),tail::Bool=!causal,lengths=nothing,kv_lengths=lengths,o=nothing,timeline=nothing) where {T,N}
+function blackwell_attention_launch(q::AbstractArray{T,N},k::AbstractArray{T,N},v::AbstractArray{T,N};ctas::Integer=1,stages::Integer=4ctas,split::Integer=3,causal::Bool=false,dynamic::Bool=causal,emulate::Tuple=(3,4,8,9,13,14),tail::Bool=!causal,lengths=nothing,kv_lengths=lengths,o=nothing,timeline=nothing,sms::Integer=multiprocessors()) where {T,N}
     N in (3,4) || throw(ArgumentError("q, k and v are d×seq×heads or d×seq×heads×batch"))
     d, sq, heads = size(q); skv, heads_kv = size(k,2), size(k,3)
     batch = N == 4 ? size(q,4) : 1
@@ -832,7 +835,6 @@ function blackwell_attention(q::AbstractArray{T,N},k::AbstractArray{T,N},v::Abst
     size(o) == size(q) || throw(DimensionMismatch("o has q's shape"))
     out = _rows(o)
     scale = Float32(1/sqrt(d))
-    sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
     # A head's items, and for sequences of their own lengths the table of
     # them (see the kernel): least work first, the order causal items are
     # handed out from the end of.
@@ -855,10 +857,19 @@ function blackwell_attention(q::AbstractArray{T,N},k::AbstractArray{T,N},v::Abst
     split_scratch = parts > 1 && !clustered
     counter = CuArray(zeros(Int32,2+(split_scratch ? 2*(tiles-whole)*ctas : 0)))
     scratch = CuArray{Float32}(undef,split_scratch ? (tiles-whole)*parts*256ctas*129 : 1)
-    kernel = @cuda launch=false minthreads=512 maxregs=128 blackwell_attention_kernel!(out,tq,tk,tv,counter,scratch,Int32(maximum(lk)),map(Int32,(bh,heads,heads÷heads_kv)),scale,Int32(whole),Int32(parts),Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline,Val(clustered),table)
-    CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
-    launch() = GC.@preserve o tq tk tv counter scratch table kernel(out,tq,tk,tv,counter,scratch,Int32(maximum(lk)),map(Int32,(bh,heads,heads÷heads_kv)),scale,Int32(whole),Int32(parts),Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline,Val(clustered),table;threads=512,blocks=ctas*grid,shmem,clustersize=clustered ? 2 : ctas)
-    kernel, launch, o
+    Launch(blackwell_attention_kernel!,(out,tq,tk,tv,counter,scratch,Int32(maximum(lk)),map(Int32,(bh,heads,heads÷heads_kv)),scale,Int32(whole),Int32(parts),
+                                        Val(stages),Val(ctas),Val(split),Val(causal),Val(dynamic),Val(emulate),timeline,Val(clustered),table);
+           threads=512,blocks=ctas*grid,shmem,clustersize=clustered ? 2 : ctas,minthreads=512,maxregs=128,result=o)
+end
+"""
+    blackwell_attention(q, k, v; kwargs...) -> (kernel, launch, o)
+
+[`blackwell_attention_launch`](@ref), compiled: the kernel, a launcher, and O.
+"""
+function blackwell_attention(q::AbstractArray,k::AbstractArray,v::AbstractArray;kwargs...)
+    l = blackwell_attention_launch(q,k,v;kwargs...)
+    kernel = compile(l)
+    kernel, () -> l(kernel), l.result
 end
 # O as the kernel writes it: the address of its first element, the query
 # length, and the strides in elements of a row, a head and a batch.

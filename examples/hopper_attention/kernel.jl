@@ -1,5 +1,6 @@
 using Tylo, PTX, CUDACore, BFloat16s
 using Tylo.Layouts: Layout, static
+include(joinpath(@__DIR__,"..","launch.jl"))
 
 # FlashAttention's forward pass on Hopper, O = softmax(Q Kᵀ · scale) V, in the
 # style of FlashAttention-3. Q, K, V and O are d×seq×(batch·heads) BF16
@@ -271,7 +272,7 @@ function persistent_attention_kernel!(o,tq,tk,tv,counter,seq_kv::Int32,heads::In
 end
 
 """
-    hopper_attention(q, k, v; stages=2, persistent=true, causal=false, overlap=false, pingpong=overlap) -> (kernel, launch, o)
+    hopper_attention_launch(q, k, v; stages=2, persistent=true, causal=false, overlap=false, pingpong=overlap, sms) -> Launch
 
 Prepare O = softmax(Q Kᵀ / √d) V for BF16 `q`, `k`, `v` of size
 d×seq×(batch·heads), d = 128, sequence lengths multiples of 128. With
@@ -284,8 +285,9 @@ NVL the persistent form is fastest for short sequences (2048) and the
 overlapped ping-pong schedule for long ones (4096 and up), each within a
 few percent of the other; run.jl tunes between them.
 """
-function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages::Integer=2,persistent::Bool=true,causal::Bool=false,
-                          dynamic::Bool=causal,heads_inner::Bool=false,overlap::Bool=false,pingpong::Bool=overlap,o=nothing) where T
+function hopper_attention_launch(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages::Integer=2,persistent::Bool=true,causal::Bool=false,
+                                 dynamic::Bool=causal,heads_inner::Bool=false,overlap::Bool=false,pingpong::Bool=overlap,o=nothing,
+                                 sms::Integer=multiprocessors()) where T
     d, sq, bh = size(q); skv = size(k,2)
     d == 128 && size(k) == size(v) == (d,skv,bh) && sq % 128 == 0 && skv % 128 == 0 ||
         throw(ArgumentError("d must be 128 and sequence lengths multiples of 128"))
@@ -303,17 +305,24 @@ function hopper_attention(q::CuArray{T,3},k::CuArray{T,3},v::CuArray{T,3};stages
         shmem += 24+transfer_bytes(tq)
         shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
         counter = CuArray(Int32[0])
-        kernel = @cuda launch=false minthreads=384 maxregs=168 persistent_attention_kernel!(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(causal),Val(dynamic),Val(heads_inner))
-        CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
-        blocks = min((sq÷128)*bh,CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
-        function launch_persistent()
-            dynamic && fill!(counter,Int32(0))
-            GC.@preserve tq tk tv kernel(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(causal),Val(dynamic),Val(heads_inner);threads=384,blocks,shmem)
-        end
-        return kernel, launch_persistent, o
+        return Launch(persistent_attention_kernel!,(o,tq,tk,tv,counter,Int32(skv),Int32(bh),scale,Val(stages),Val(causal),Val(dynamic),Val(heads_inner));
+                      threads=384,blocks=min((sq÷128)*bh,sms),shmem,minthreads=384,maxregs=168)
     end
-    kernel = @cuda launch=false minthreads=384 maxregs=168 attention_kernel!(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong))
-    CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
-    launch() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong);threads=384,blocks=(sq÷128,bh),shmem)
-    kernel, launch, o
+    Launch(attention_kernel!,(o,tq,tk,tv,Int32(skv),scale,Val(stages),Val(overlap),Val(pingpong));
+           threads=384,blocks=(sq÷128,bh),shmem,minthreads=384,maxregs=168)
+end
+"""
+    hopper_attention(q, k, v; kwargs...) -> (kernel, launch, o)
+
+[`hopper_attention_launch`](@ref), compiled: the kernel, a launcher (which
+returns a dynamic schedule's item counter to zero first), and O.
+"""
+function hopper_attention(q::CuArray,k::CuArray,v::CuArray;kwargs...)
+    l = hopper_attention_launch(q,k,v;kwargs...)
+    kernel = compile(l)
+    function launch()
+        l.kernel === persistent_attention_kernel! && fill!(l.args[5],Int32(0))
+        l(kernel)
+    end
+    kernel, launch, l.result
 end

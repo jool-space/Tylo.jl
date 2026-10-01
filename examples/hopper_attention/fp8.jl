@@ -102,12 +102,13 @@ function fp8_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Floa
 end
 
 """
-    fp8_attention(q, k, vt; stages=4) -> (kernel, launch, o)
+    fp8_attention_launch(q, k, vt; stages=4, o=nothing, sms) -> Launch
 
 O = softmax(Q Kᵀ / √d) V for E4M3 `q`, `k` (d×seq×(batch·heads)) and `vt`
-(seq×d×(batch·heads), V with the sequence contiguous), d = 128; O in BF16.
+(seq×d×(batch·heads), V with the sequence contiguous), d = 128; O in BF16,
+the launch's result.
 """
-function fp8_attention(q::CuArray{T,3},k::CuArray{T,3},vt::CuArray{T,3};stages::Integer=4,o=nothing) where T
+function fp8_attention_launch(q::CuArray{T,3},k::CuArray{T,3},vt::CuArray{T,3};stages::Integer=4,o=nothing,sms::Integer=multiprocessors()) where T
     d, sq, bh = size(q); skv = size(k,2)
     d == 128 && size(k) == (d,skv,bh) && size(vt) == (skv,d,bh) && sq % 128 == 0 && skv % 128 == 0 ||
         throw(ArgumentError("d must be 128, V transposed, and sequence lengths multiples of 128"))
@@ -118,9 +119,16 @@ function fp8_attention(q::CuArray{T,3},k::CuArray{T,3},vt::CuArray{T,3};stages::
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     o = o === nothing ? CuArray{BFloat16}(undef,d,sq,bh) : o
     scale = Float32(1/sqrt(d))
-    kernel = @cuda launch=false minthreads=384 maxregs=168 fp8_attention_kernel!(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages))
-    CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
-    blocks = min((sq÷128)*bh,CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
-    launch() = GC.@preserve tq tk tv kernel(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages);threads=384,blocks,shmem)
-    kernel, launch, o
+    Launch(fp8_attention_kernel!,(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages));
+           threads=384,blocks=min((sq÷128)*bh,sms),shmem,minthreads=384,maxregs=168)
+end
+"""
+    fp8_attention(q, k, vt; kwargs...) -> (kernel, launch, o)
+
+[`fp8_attention_launch`](@ref), compiled: the kernel, a launcher, and O.
+"""
+function fp8_attention(q::CuArray,k::CuArray,vt::CuArray;kwargs...)
+    l = fp8_attention_launch(q,k,vt;kwargs...)
+    kernel = compile(l)
+    kernel, () -> l(kernel), l.result
 end

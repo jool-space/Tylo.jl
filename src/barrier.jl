@@ -64,8 +64,26 @@ function expect_bytes! end
 
 Block until the barrier's phase of the given parity (0 or 1) completes. A
 kernel waiting on successive phases alternates the parity: 0, 1, 0, ...
+With a [`wait_timeout`](@ref), a wait that outlasts it reports the barrier
+and traps.
 """
 Base.wait(::Barrier,::Integer)
+
+"""
+    wait_timeout() -> Union{Nothing,Integer}
+
+The nanoseconds a barrier [`wait`](@ref) may spin before it prints the
+barrier's shared address, the parity it waited for and the thread, and
+traps: a hang becomes a launch error. `nothing` (the default) waits without
+limit and costs nothing. Redefine it to find a hang, then recompile:
+
+```julia
+Tylo.wait_timeout() = 1_000_000_000    # one second
+```
+"""
+wait_timeout() = nothing
+# Reports a wait that timed out (printing needs CUDACore, which overrides it).
+_report_hang(::Barrier,parity) = nothing
 
 """
     invalidate!(barrier)

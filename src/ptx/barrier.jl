@@ -12,9 +12,19 @@
 end
 @inline arrive!(b::Barrier,bytes::Integer) = (ptx"mbarrier.arrive.expect_tx.shared.b64"(b.ptr,bytes % UInt32); nothing)
 @inline expect_bytes!(b::Barrier,bytes::Integer) = (ptx"mbarrier.expect_tx.shared.b64"(b.ptr,bytes % UInt32); nothing)
-@inline function Base.wait(b::Barrier,parity::Integer)
-    p = (parity % UInt32) & UInt32(1)
+@inline Base.wait(b::Barrier,parity::Integer) = _wait(b,(parity % UInt32) & UInt32(1),wait_timeout())
+@inline function _wait(b::Barrier,p::UInt32,::Nothing)
     while !ptx"mbarrier.try_wait.parity.shared.b64"(b.ptr,p) end
+    nothing
+end
+@inline function _wait(b::Barrier,p::UInt32,limit::Integer)
+    start = ptx"mov.u64"(PTX.@sreg_str("%globaltimer"))
+    while !ptx"mbarrier.try_wait.parity.shared.b64"(b.ptr,p)
+        if ptx"mov.u64"(PTX.@sreg_str("%globaltimer"))-start > limit % UInt64
+            _report_hang(b,p)
+            ptx"trap"()
+        end
+    end
     nothing
 end
 @inline invalidate!(b::Barrier) = (ptx"mbarrier.inval.shared.b64"(b.ptr); nothing)

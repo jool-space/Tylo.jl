@@ -58,6 +58,22 @@ end
     @test isempty(audit(code))
 end
 
+# A wait timeout, when set, makes every wait time itself and trap; unset,
+# the waits cost nothing.
+@testset "Barrier wait timeout" begin
+    tt = Tuple{CuDeviceVector{UInt32,1},Int32}
+    arch = CUDACore.SMVersion(12,1,:arch)
+    @test !occursin("%globaltimer",entry_body(compile_kernel(barrier_phases!,tt;arch).ptx))
+    try
+        @eval Tylo wait_timeout() = 1_000_000
+        body = entry_body(compile_kernel(barrier_phases!,tt;arch).ptx)
+        @test occursin("%globaltimer",body) && occursin("trap;",body)
+    finally
+        @eval Tylo wait_timeout() = nothing
+    end
+    @test !occursin("%globaltimer",entry_body(compile_kernel(barrier_phases!,tt;arch).ptx))
+end
+
 if runtime_supported(@__FILE__)
     @testset "Barrier phases and copies" begin
         out = CUDACore.zeros(UInt32,128*5)
