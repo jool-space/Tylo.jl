@@ -14,7 +14,7 @@ const Rows = NamedTuple{(:ptr,:seq,:row,:head,:batch),Tuple{Core.LLVMPtr{BFloat1
         tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
         tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),1)),PTX.TMADescriptorPtr,3}
         tv = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128÷ctas),2)),PTX.TMADescriptorPtr,3}
-        tt = Tuple{Rows,tq,tk,tv,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4ctas},Val{ctas},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{false}}
+        tt = Tuple{Rows,tq,tk,tv,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4ctas},Val{ctas},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{false},Nothing}
         code = Tylo.machine_code(blackwell_attention_kernel!,tt;arch,threads=512,maxregs=128)
         save_code("blackwell-attention-ctas$ctas",code)
         # No spills anywhere: the softmax warps hold a row at 184 registers,
@@ -40,27 +40,36 @@ const Rows = NamedTuple{(:ptr,:seq,:row,:head,:batch),Tuple{Core.LLVMPtr{BFloat1
         end
     end
     # A split tail's two parts in a cluster (one CTA per item): each merges
-    # one tile, reading the other's part from its shared memory.
+    # one tile, the other's part of it copied into its shared memory in bulk.
     let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}, tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{true}};arch,threads=512,maxregs=128)
+        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{true},Nothing};arch,threads=512,maxregs=128)
         @test isempty(audit(code))
         body = entry_body(code.ptx)
-        @test occursin("ld.shared::cluster.v4.f32",body) && occursin("mbarrier.arrive.release.cluster.shared::cluster",body)
+        @test count("cp.async.bulk.shared::cluster.shared::cta",body) == 1 && occursin("mbarrier.arrive.release.cluster.shared::cluster",body)
+        @test !occursin("ld.shared::cluster",body)
         @test !occursin("atom.add",body)                # no counts: the cluster barrier orders the merge
     end
     # Heads and batches along two axes of any strides: four-axis copies,
     # the same clean code.
     let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,4}, tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,4}
-        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{false}};arch,threads=512,maxregs=128)
+        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{(3,4,8,9,13,14)},Nothing,Val{false},Nothing};arch,threads=512,maxregs=128)
         @test isempty(audit(code))
         body = entry_body(code.ptx)
         @test occursin("cp.async.bulk.tensor.4d",body) && !occursin("cp.async.bulk.tensor.3d",body)
+    end
+    # Sequences of their own lengths packed along the rows: their geometry
+    # read from a table per item, the same clean code.
+    let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}, tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
+        for causal in (false,true)
+            code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{causal},Val{causal},Val{(3,4,8,9,13,14)},Nothing,Val{false},CuDeviceVector{Int32,1}};arch,threads=512,maxregs=128)
+            @test isempty(audit(code))
+        end
     end
     # Causal: the last two blocks masked, the rest unchanged; items handed
     # out dynamically.
     let tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3},
         tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{true},Val{true},Val{()},Nothing,Val{false}};arch,threads=512,maxregs=128)
+        code = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{true},Val{true},Val{()},Nothing,Val{false},Nothing};arch,threads=512,maxregs=128)
         save_code("blackwell-attention-causal",code)
         @test isempty(audit(code))
         @test count("USETMAXREG",Tylo.kernel_sass(code)) == 3
@@ -69,7 +78,7 @@ const Rows = NamedTuple{(:ptr,:seq,:row,:head,:batch),Tuple{Core.LLVMPtr{BFloat1
     # says so in a warning: the audit reports it.
     tq = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),2)),PTX.TMADescriptorPtr,3}
     tk = Tylo.TMABinding{typeof(TMATile(BFloat16,(128,128),1)),PTX.TMADescriptorPtr,3}
-    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{()},Nothing,Val{false}};arch,threads=512)
+    unstated = Tylo.machine_code(blackwell_attention_kernel!,Tuple{Rows,tq,tk,tq,CuDeviceVector{Int32,1},CuDeviceVector{Float32,1},Int32,NTuple{3,Int32},Float32,Int32,Int32,Val{4},Val{1},Val{3},Val{false},Val{false},Val{()},Nothing,Val{false},Nothing};arch,threads=512)
     @test :ptxas in getfield.(audit(unstated),:kind)
 end
 
@@ -79,7 +88,7 @@ if runtime_supported(@__FILE__)
         o = similar(q,Float64)
         for h in axes(q,3)
             s = transpose(Float64.(q[:,:,h]))*Float64.(k[:,:,h]) ./ sqrt(size(q,1))
-            causal && (s[[c > r for r in axes(s,1), c in axes(s,2)]] .= -Inf)
+            causal && (s[[c > r+size(k,2)-size(q,2) for r in axes(s,1), c in axes(s,2)]] .= -Inf)   # the diagonal meets the keys' end
             p = exp.(s .- maximum(s;dims=2)); p ./= sum(p;dims=2)
             o[:,:,h] = transpose(p*transpose(Float64.(v[:,:,h])))
         end
@@ -111,6 +120,7 @@ if runtime_supported(@__FILE__)
         end
     end
     @test_throws ArgumentError blackwell_attention(CUDACore.zeros(BFloat16,128,512,1),CUDACore.zeros(BFloat16,128,512,1),CUDACore.zeros(BFloat16,128,512,1);causal=true,ctas=2)
+    @test_throws ArgumentError blackwell_attention(CUDACore.zeros(BFloat16,128,512,1),CUDACore.zeros(BFloat16,128,256,1),CUDACore.zeros(BFloat16,128,256,1);causal=true)
     # Other shares of the exponentials on the FMA pipe: none, and more.
     let q = BFloat16.(randn(rng,Float32,128,1024,2)), k = BFloat16.(randn(rng,Float32,128,1024,2)), v = BFloat16.(randn(rng,Float32,128,1024,2))
         for emulate in ((),(1,3,4,6,8,9,11,13,14,15))
@@ -140,7 +150,7 @@ if runtime_supported(@__FILE__)
     # Heads and batches of any strides: PyTorch's (batch, seq, heads, d)
     # tensors, bound in place and written back in their layout, with query
     # heads sharing K and V heads.
-    for (ctas,causal,sq,skv,h,hkv,nb) in ((1,false,512,1024,4,2,2),(2,false,1024,512,4,1,2),(1,true,1024,1024,6,2,1))
+    for (ctas,causal,sq,skv,h,hkv,nb) in ((1,false,512,1024,4,2,2),(2,false,1024,512,4,1,2),(1,true,1024,1024,6,2,1),(1,false,333,517,4,2,2),(1,true,333,333,2,1,2))
         host(s,heads) = BFloat16.(randn(rng,Float32,128,heads,s,nb))   # d×heads×seq×batch
         qh, kh, vh = host(sq,h), host(skv,hkv), host(skv,hkv)
         bound(x) = PermutedDimsArray(CuArray(x),(1,3,2,4))
@@ -165,6 +175,40 @@ if runtime_supported(@__FILE__)
         @test all(==(BFloat16(7)),result[:,:,1:2:8])
     end
     @test_throws ArgumentError blackwell_attention(CUDACore.zeros(BFloat16,128,512,3),CUDACore.zeros(BFloat16,128,512,2),CUDACore.zeros(BFloat16,128,512,2))
+    # Lengths of any size: a last, partial item and key block, zero-filled,
+    # masked and not stored; split along the keys (items fewer than SMs), in
+    # CTA pairs, causal, and single rows; then two parts in clusters.
+    for (sq,skv,bh,kw) in ((300,200,3,(;)),(1000,1100,10,(;)),(1000,1100,10,(;ctas=2)),(1,1,2,(;)),(129,1,1,(;)),(77,300,2,(;tail=false)),
+                           (300,300,3,(;causal=true)),(1000,1000,2,(;causal=true,dynamic=false)),(1,1,1,(;causal=true)),(129,129,2,(;causal=true)),
+                           (300,1000,2,(;causal=true)),(256,512,3,(;causal=true,dynamic=false)),(1,700,2,(;causal=true)),(129,200,2,(;causal=true)),
+                           (256,1400,sms+(4sms)÷10,(;)))
+        q = BFloat16.(randn(rng,Float32,128,sq,bh))
+        k = BFloat16.(randn(rng,Float32,128,skv,bh)); v = BFloat16.(randn(rng,Float32,128,skv,bh))
+        _, launch, o = blackwell_attention(CuArray(q),CuArray(k),CuArray(v);kw...)
+        want = reference(q,k,v;causal=get(kw,:causal,false))
+        for _ in 1:2
+            fill!(o,BFloat16(NaN)); launch(); synchronize()
+            @test maximum(abs.(Float64.(Array(o)) .- want)) < 0.03
+        end
+    end
+    # Sequences of their own lengths packed along the rows: each attends
+    # within itself, with more keys than queries, causal (the diagonal at
+    # each's keys' end), with shared K and V heads, from PyTorch's packed
+    # (rows, heads, d) layout.
+    packed(x,lengths) = [x[:,sum(lengths[1:s-1])+1:sum(lengths[1:s]),:] for s in eachindex(lengths)]
+    for (lq,lk,h,hkv,kw) in (([100,300,1,1000],[50,700,3,1000],4,4,(;)),([100,300,1,1000],[100,500,1,1200],2,1,(;causal=true)),
+                             ([257,512,129],[257,512,129],4,2,(;causal=true,dynamic=false)),([3000,40],[3000,40],2,2,(;)),([600],[900],2,2,(;ctas=2)))
+        q = BFloat16.(randn(rng,Float32,128,h,sum(lq))); k, v = (BFloat16.(randn(rng,Float32,128,hkv,sum(lk))) for _ in 1:2)
+        rows(x) = PermutedDimsArray(CuArray(x),(1,3,2))                    # d×rows×heads
+        _, launch, o = blackwell_attention(rows(q),rows(k),rows(v);lengths=lq,kv_lengths=lk,kw...)
+        shared(x) = x[:,:,(0:h-1) .÷ (h÷hkv) .+ 1]
+        want = reduce(hcat,[reference(a,shared(b),shared(c);causal=get(kw,:causal,false)) for (a,b,c) in zip(packed(permutedims(q,(1,3,2)),lq),packed(permutedims(k,(1,3,2)),lk),packed(permutedims(v,(1,3,2)),lk))])
+        for _ in 1:2
+            fill!(parent(o),BFloat16(NaN)); launch(); synchronize()
+            @test maximum(abs.(Float64.(permutedims(Array(parent(o)),(1,3,2))) .- want)) < 0.03
+        end
+    end
+    @test_throws ArgumentError blackwell_attention(CUDACore.zeros(BFloat16,128,512,1),CUDACore.zeros(BFloat16,128,512,1),CUDACore.zeros(BFloat16,128,512,1);lengths=[100,400])
     # P published after one or two of its chunks instead of three.
     for ctas in (1,2), split in (1,2)
         q,k,v = (BFloat16.(randn(rng,Float32,128,1024,2)) for _ in 1:3)
