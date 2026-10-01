@@ -1,10 +1,10 @@
 """
-    release_registers(Val(n))
-    acquire_registers(Val(n))
+    release_registers(n)
+    acquire_registers(n)
 
 Warpgroup collectives (sm_90a, all 128 threads converged): lower, or
 raise, the calling warpgroup's per-thread register limit to `n`, a
-multiple of 8 from 24 to 256. Released registers return to the CTA's
+constant multiple of 8 from 24 to 256. Released registers return to the CTA's
 pool, from which `acquire_registers` takes them, waiting until enough are
 free. A warp-specialized kernel's producer warpgroup, which only issues
 copies, releases most of its registers so that the consumers can hold
@@ -12,10 +12,10 @@ larger accumulators:
 
 ```julia
 if warpgroup == 0
-    release_registers(Val(40))     # the producer: TMA loads only
+    release_registers(40)          # the producer: TMA loads only
     ...
 else
-    acquire_registers(Val(232))    # the consumers: 64×256 FP32 accumulators
+    acquire_registers(232)         # the consumers: 64×256 FP32 accumulators
     ...
 end
 ```

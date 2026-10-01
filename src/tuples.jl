@@ -28,3 +28,7 @@ This helper does not guarantee register residency.
 macro rtuple(f, range)
     :(_rtuple($(esc(f)), Val($(esc(range)))))
 end
+
+# The elements of a tuple of tuples, in order.
+@inline _cat(::Tuple{}) = ()
+@inline _cat(t::Tuple) = (first(t)...,_cat(Base.tail(t))...)

@@ -38,8 +38,8 @@ visible with [`fence_barrier_init`](@ref) and a thread barrier before use.
 function initialize! end
 
 """
-    arrive!(barrier)
-    arrive!(barrier, bytes)
+    arrive!(barrier) -> Arrival
+    arrive!(barrier, bytes) -> Arrival
     arrive!(barrier; cta)
 
 Arrive on the barrier's current phase. With `bytes`, first announce that
@@ -47,9 +47,38 @@ many bytes of asynchronous transactions (a TMA load's
 [`transfer_bytes`](@ref)) that must also land before the phase completes.
 With `cta`, arrive on the barrier at the same address in the cluster's CTA
 of that rank ([`cluster_rank`](@ref)): a consumer releasing a stage that a
-peer's multicast loads write.
+peer's multicast loads write. A local arrival returns its [`Arrival`](@ref),
+which [`after`](@ref) orders later work behind.
 """
 function arrive! end
+
+"""
+    Arrival
+
+A local arrival on a [`Barrier`](@ref): the barrier's state as the arrival
+left it. Its use is [`after`](@ref).
+"""
+struct Arrival
+    state::UInt64
+end
+
+"""
+    after(arrival::Arrival, x)
+
+`x` (a number), as a value that the compilers take to depend on `arrival`:
+work computed from it cannot move above the arrival. Nothing else orders
+arithmetic after an arrival, which is a store as far as the compilers know:
+a role that publishes part of its results and then computes the rest would
+otherwise find the rest computed first. Apply it to the one value the later
+work starts from (a running maximum, a zero to sum onto); it costs a
+comparison and a selection.
+
+```julia
+done = arrive!(published)                 # the first chunks are visible
+rest = exp2.(scores .- after(done, m))    # computed only after the arrival
+```
+"""
+@inline after(a::Arrival,x::Number) = ifelse(a.state == typemax(UInt64),x+one(x),x)
 
 """
     expect_bytes!(barrier, bytes)
@@ -129,3 +158,90 @@ before), and before a CTA exits, no peer still writes into its shared
 memory or arrives on its barriers.
 """
 function cluster_sync end
+
+"""
+    NamedBarrier
+
+One of the CTA's 16 hardware barriers (`bar.sync`/`bar.arrive`), for
+`threads` threads (a multiple of 32): [`wait`](@ref)`(b)` arrives and waits
+until `threads` threads have arrived, [`arrive!`](@ref)`(b)` arrives without
+waiting. Barrier 0 is `sync_threads`'. Declare a kernel's named barriers
+together with [`named_barriers`](@ref), which numbers them.
+
+Two arrivals in a row from one side can complete a barrier on their own: a
+barrier paces one handoff per phase, as an [`Barrier`](@ref)'s phases do
+not need to.
+"""
+struct NamedBarrier
+    id::Int32
+    threads::Int32
+end
+
+"""
+    named(count=1; threads)
+
+A group of `count` named barriers of `threads` threads each, in
+[`named_barriers`](@ref).
+"""
+struct NamedGroup
+    count::Int
+    threads::Int
+end
+Base.@constprop :aggressive @inline function named(count::Integer=1;threads::Integer)
+    threads % 32 == 0 && threads > 0 || throw(ArgumentError("a named barrier synchronizes whole warps"))
+    NamedGroup(Int(count),Int(threads))
+end
+
+"""
+    named_barriers(groups::NamedTuple; first=1) -> NamedBarriers
+
+Number a kernel's named barriers: each group of [`named`](@ref) barriers in
+order, from `first` (1 by default, after `sync_threads`' 0; a megakernel
+that reserves more starts later). `nb.name` is the group's single
+[`NamedBarrier`](@ref), or with a count above one, `nb.name[i]` (zero-based)
+is the `i`-th.
+
+```julia
+nb = named_barriers((; handoff = named(8; threads=64), merge = named(; threads=128)))
+arrive!(nb.handoff[i]); wait(nb.handoff[i]); wait(nb.merge)
+```
+"""
+struct NamedBarriers{G<:NamedTuple}
+    groups::G
+    first::Int
+end
+Base.@constprop :aggressive @inline function named_barriers(groups::NamedTuple;first::Integer=1)
+    first >= 1 && first+sum(g -> g.count,values(groups);init=0) <= 16 ||
+        throw(ArgumentError("named barriers are numbered 1 to 15"))
+    NamedBarriers(groups,Int(first))
+end
+"A group of consecutive named barriers: `g[i]`, zero-based."
+struct NamedBarrierRange
+    first::Int32
+    count::Int32
+    threads::Int32
+end
+@inline function Base.getindex(g::NamedBarrierRange,i::Integer)
+    @boundscheck 0 <= i < g.count || throw(BoundsError())
+    NamedBarrier(g.first+(i % Int32),g.threads)
+end
+@inline Base.length(g::NamedBarrierRange) = Int(g.count)
+@inline function Base.getproperty(nb::NamedBarriers{G},name::Symbol) where G
+    groups = getfield(nb,:groups)
+    i = Base.fieldindex(G,name)
+    id = getfield(nb,:first)+sum(j -> groups[j].count,1:i-1;init=0)
+    g = groups[i]
+    g.count == 1 ? NamedBarrier(Int32(id),Int32(g.threads)) : NamedBarrierRange(Int32(id),Int32(g.count),Int32(g.threads))
+end
+Base.propertynames(nb::NamedBarriers) = keys(getfield(nb,:groups))
+
+"""
+    wait(b::NamedBarrier; aligned=true)
+    arrive!(b::NamedBarrier; aligned=true)
+
+Arrive on the named barrier and wait until its `threads` threads have
+arrived (`bar.sync`), or arrive without waiting (`bar.arrive`). The
+calling warps' lanes take part together; with `aligned = false` they may
+arrive apart (`barrier.sync`, `barrier.arrive`).
+"""
+Base.wait(::NamedBarrier)

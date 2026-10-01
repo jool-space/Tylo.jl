@@ -3,14 +3,14 @@
 # which mapa translates.
 @inline function arrive!(b::Barrier;cta::Union{Nothing,Integer}=nothing)
     if cta === nothing
-        ptx"mbarrier.arrive.shared.b64"(b.ptr)
+        Arrival(ptx"mbarrier.arrive.shared.b64"(b.ptr))
     else
         remote = ptx"mapa.shared::cluster.u32"(_smem_address(b.ptr),cta % UInt32)
         ptx"mbarrier.arrive.shared::cluster.b64"(reinterpret(Core.LLVMPtr{UInt64,3},UInt64(remote)))
+        nothing
     end
-    nothing
 end
-@inline arrive!(b::Barrier,bytes::Integer) = (ptx"mbarrier.arrive.expect_tx.shared.b64"(b.ptr,bytes % UInt32); nothing)
+@inline arrive!(b::Barrier,bytes::Integer) = Arrival(ptx"mbarrier.arrive.expect_tx.shared.b64"(b.ptr,bytes % UInt32))
 @inline expect_bytes!(b::Barrier,bytes::Integer) = (ptx"mbarrier.expect_tx.shared.b64"(b.ptr,bytes % UInt32); nothing)
 @inline Base.wait(b::Barrier,parity::Integer) = _wait(b,(parity % UInt32) & UInt32(1),wait_timeout())
 @inline function _wait(b::Barrier,p::UInt32,::Nothing)
@@ -35,3 +35,11 @@ end
 # The thread's prior cp.async copies arrive on the barrier as they complete:
 # one of its expected arrivals.
 @inline commit_copies(b::Barrier) = (ptx"cp.async.mbarrier.arrive.noinc.shared.b64"(b.ptr); nothing)
+@inline function Base.wait(b::NamedBarrier;aligned::Bool=true)
+    aligned ? ptx"bar.sync"(b.id % UInt32,b.threads % UInt32) : ptx"barrier.sync"(b.id % UInt32,b.threads % UInt32)
+    nothing
+end
+@inline function arrive!(b::NamedBarrier;aligned::Bool=true)
+    aligned ? ptx"bar.arrive"(b.id % UInt32,b.threads % UInt32) : ptx"barrier.arrive"(b.id % UInt32,b.threads % UInt32)
+    nothing
+end

@@ -55,7 +55,7 @@ end
         end
         da,db,dm=CuArray(permutedims(a)),CuArray(b),CuArray(mask)
         output=CuArray{Float32}(undef,m,n)
-        @cuda threads=32wm shmem=SoftmaxExample.shared_bytes(cfg,T) mma_softmax_kernel!(output,da,db,dm,cfg)
+        @cuda threads=32wm shmem=shared_bytes(SoftmaxExample.gemm_shared(cfg,T)) mma_softmax_kernel!(output,da,db,dm,cfg)
         y=Array(output)
         expected=permutedims(softmax_reference(permutedims(Float64.(a)*Float64.(b)),permutedims(mask)))
         @test y ≈ expected rtol=4e-5 atol=5e-7

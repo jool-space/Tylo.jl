@@ -306,6 +306,22 @@ _is_accumulator(::Type{P},::Type{F}) where {P,F} = F <: Fragment &&
 @inline function _atom_accumulator(p::TiledMMA,acc::Fragment,::Val{I}) where I
     Fragment(@rtuple(j -> acc.data[4*(I-1)+j], 1:4),operand_layout(p.atom,Accumulator()))
 end
+"""
+    atom_accumulators(plan::TiledMMA, accumulator) -> Tuple
+    Fragment(plan::TiledMMA, accumulators::Tuple)
+
+A warp's share of the plan's accumulator as one fragment per atom, each in
+the atom's own accumulator ownership, M fastest (`repeat_m × repeat_n` of
+them), and those fragments joined back into the plan's accumulator. A
+kernel that issues the atoms itself (in an order of its own, say, or with
+operands it loads its own way) works on the atoms' fragments.
+"""
+@inline atom_accumulators(p::TiledMMA{A,W,R},acc::Fragment) where {A,W,R} =
+    @rtuple(i -> _atom_accumulator(p,acc,Val(i)),1:prod(R))
+@inline function Fragment(p::TiledMMA{A,W,R},atoms::NTuple{N,Fragment}) where {A,W,R,N}
+    N == prod(R) || throw(DimensionMismatch("one fragment per atom of the plan"))
+    Fragment(_cat(map(a -> a.data,atoms)),operand_layout(p,Accumulator()))
+end
 
 """
     pack_operand_a(atom, left, right)

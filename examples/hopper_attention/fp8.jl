@@ -7,33 +7,27 @@
 # contiguous: a seq×d×(batch·heads) array, Vᵀ of the BF16 kernel's layout.
 include("kernel.jl")
 
-function fp8_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Float32,::Val{Stages}) where Stages
+# Double-buffered Q and a ring of K and V stages, as in the BF16 persistent
+# kernel, but without the tile handoff (the tiles go in a fixed order).
+@inline fp8_shared(cfg,tq,tk,tv) = SharedLayout((;
+    qfull = barriers(2;arrivals=1), qempty = barriers(2;arrivals=256),
+    full = barriers(cfg.stages;arrivals=1), empty = barriers(cfg.stages;arrivals=256),
+    q = buffers(transfer_bytes(tq),2;align=1024),
+    kv = buffers(transfer_bytes(tk)+transfer_bytes(tv),cfg.stages;align=1024)))
+
+function fp8_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Float32,cfg::Config)
     T = Float8_E4M3FN
     qk = WGMMAAtom(T,128,128)                   # S: 64 query rows × 128 keys, all of d
     pv = WGMMAAtom(T,128,128)                   # O: 64 query rows × d, all of a block
     qbytes, kbytes, vbytes = transfer_bytes(tq), transfer_bytes(tk), transfer_bytes(tv)
-    workspace = @inbounds CuDynamicSharedArray(UInt8,32+16Stages+1024+2qbytes+Stages*(kbytes+vbytes))
-    raw = pointer(workspace)
-    @inline qfull(b) = Barrier(raw,b)
-    @inline qempty(b) = Barrier(raw+16,b)
-    @inline full(s) = Barrier(raw+32,s)
-    @inline empty(s) = Barrier(raw+32+8Stages,s)
-    start = raw+32+16Stages
-    base = start+((UInt32(0)-PTX.smem_addr_u32(start)) & UInt32(1023))
-    @inline qstage(b) = base+b*Int32(qbytes)
-    @inline kstage(s) = base+Int32(2qbytes)+s*Int32(kbytes+vbytes)
-    @inline vstage(s) = kstage(s)+kbytes
+    layout = fp8_shared(cfg,tq,tk,tv)
+    smem = bind(layout,pointer(@inbounds CuDynamicSharedArray(UInt8,shared_bytes(layout))))
+    queries = Ring(smem.qfull,smem.qempty)
+    stages = Ring(smem.full,smem.empty)
     tid = Int32(threadIdx().x)-Int32(1)
     warpgroup = warp_uniform(tid ÷ Int32(128))
     if tid == Int32(0)
-        for b in Int32(0):Int32(1)
-            initialize!(qfull(b),1)
-            initialize!(qempty(b),256)
-        end
-        for s in Int32(0):Int32(Stages-1)
-            initialize!(full(s),1)
-            initialize!(empty(s),256)
-        end
+        initialize!(smem)
         fence_barrier_init()
     end
     sync_threads()
@@ -42,23 +36,24 @@ function fp8_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Floa
     tiles = nq*heads
     blocks = seq_kv ÷ Int32(128)
     if warpgroup == Int32(0)
-        release_registers(Val(40))
+        release_registers(40)
         if tid == Int32(0)
             i = Int32(0); c = Int32(0)
             t = Int32(blockIdx().x)-Int32(1)
             while t < tiles
-                qb = i&Int32(1)
-                i >= Int32(2) && wait(qempty(qb),((i>>1)-Int32(1))&Int32(1))
+                b = queries[i]
+                acquire(b)
                 head = unchecked_div(t,nq)
                 q0 = unchecked_rem(t,nq)*Int32(128)
-                arrive!(qfull(qb),qbytes)
-                @inbounds tma_load!(shared_tile(tq,qstage(qb)),tq,(q0,Int32(0),head),qfull(qb))
+                arrive!(b.full,qbytes)
+                @inbounds tma_load!(shared_tile(tq,smem.q[b.slot]),tq,(q0,Int32(0),head),b.full)
                 for j in Int32(0):blocks-Int32(1)
-                    slot = c%Int32(Stages)
-                    c >= Int32(Stages) && wait(empty(slot),((c÷Int32(Stages))-Int32(1))&Int32(1))
-                    arrive!(full(slot),kbytes+vbytes)
-                    @inbounds tma_load!(shared_tile(tk,kstage(slot)),tk,(Int32(0),Int32(128)*j,head),full(slot))
-                    @inbounds tma_load!(shared_tile(tv,vstage(slot)),tv,(Int32(128)*j,Int32(0),head),full(slot))
+                    s = stages[c]
+                    acquire(s)
+                    at = smem.kv[s.slot]
+                    arrive!(s.full,kbytes+vbytes)
+                    @inbounds tma_load!(shared_tile(tk,at),tk,(Int32(0),Int32(128)*j,head),s.full)
+                    @inbounds tma_load!(shared_tile(tv,at+kbytes),tv,(Int32(128)*j,Int32(0),head),s.full)
                     c += Int32(1)
                 end
                 i += Int32(1)
@@ -66,29 +61,30 @@ function fp8_attention_kernel!(o,tq,tk,tv,seq_kv::Int32,heads::Int32,scale::Floa
             end
         end
     else
-        acquire_registers(Val(232))
+        acquire_registers(232)
         rows = (warpgroup-Int32(1))*Int32(64)
         thread = tid%Int32(128)
         i = Int32(0); c = Int32(0)
         t = Int32(blockIdx().x)-Int32(1)
         while t < tiles
-            qb = i&Int32(1)
-            wait(qfull(qb),(i>>1)&Int32(1))
-            @inbounds qa = operand(qk,OperandA(),shared_tile(tq,qstage(qb)),(rows,Int32(0)))
+            b = queries[i]
+            wait(b)
+            @inbounds qa = operand(qk,OperandA(),shared_tile(tq,smem.q[b.slot]),(rows,Int32(0)))
             state = SoftmaxState(zero_accumulator(qk);dims=2)
             out = zero_accumulator(pv)
             for j in Int32(0):blocks-Int32(1)
-                slot = c%Int32(Stages)
-                wait(full(slot),(c÷Int32(Stages))&Int32(1))
-                @inbounds scores = wait_mma(mma_async(qk,qa,operand(qk,OperandB(),shared_tile(tk,kstage(slot)))))
+                s = stages[c]
+                wait(s)
+                at = smem.kv[s.slot]
+                @inbounds scores = wait_mma(mma_async(qk,qa,operand(qk,OperandB(),shared_tile(tk,at))))
                 update = softmax_update(state,scores;scale)
                 state = update.state
                 p = pack_operand_a(pv,update.weights,thread)
-                @inbounds out = wait_mma(mma_async(pv,p,operand(pv,OperandB(),shared_tile(tv,vstage(slot))),out .* update.rescale))
-                arrive!(empty(slot))
+                @inbounds out = wait_mma(mma_async(pv,p,operand(pv,OperandB(),shared_tile(tv,at+kbytes)),out .* update.rescale))
+                arrive!(s.empty)
                 c += Int32(1)
             end
-            arrive!(qempty(qb))
+            arrive!(b.empty)
             head = unchecked_div(t,nq)
             q0 = unchecked_rem(t,nq)*Int32(128)
             result = Fragment{BFloat16}(softmax_normalize(out,state))
@@ -115,11 +111,12 @@ function fp8_attention_launch(q::CuArray{T,3},k::CuArray{T,3},vt::CuArray{T,3};s
     tq = prepare_tma(TMATile(T,(128,128),2),q)                 # 128 query rows × d
     tk = prepare_tma(TMATile(T,(128,128),1),k)                 # d × 128 keys
     tv = prepare_tma(TMATile(T,(128,128),1),vt)                # 128 keys × d, keys contiguous
-    shmem = 32+16stages+1024+2transfer_bytes(tq)+stages*(transfer_bytes(tk)+transfer_bytes(tv))
+    cfg = Config(;stages)
+    shmem = shared_bytes(fp8_shared(cfg,tq,tk,tv))
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     o = o === nothing ? CuArray{BFloat16}(undef,d,sq,bh) : o
     scale = Float32(1/sqrt(d))
-    Launch(fp8_attention_kernel!,(o,tq,tk,tv,Int32(skv),Int32(bh),scale,Val(stages));
+    Launch(fp8_attention_kernel!,(o,tq,tk,tv,Int32(skv),Int32(bh),scale,cfg);
            threads=384,blocks=min((sq÷128)*bh,sms),shmem,minthreads=384,maxregs=168)
 end
 """

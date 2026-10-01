@@ -26,12 +26,12 @@ function measure(m,n;heads=1,causal=false,masked=true,padded=false,samples=41)
     output=CuArray{Float32}(undef,64,m,heads);baseline=similar(output)
     scores=CuArray{Float32}(undef,n,m,heads);prob=CuArray{BFloat16}(undef,n,m,heads)
     CUDACore.synchronize();preparation_ms=(time_ns()-started)/1e6
-    config=StreamingAttention.configuration()
+    config=StreamingAttention.configuration(;causal)
     prepared=StreamingAttention.prepare(dq,dk,StreamingAttention.pad_values(dv);config)
-    args=(output,prepared.q,prepared.k,prepared.v,dm,Int32(m),Int32(n),config,Val(causal))
+    args=(output,prepared.q,prepared.k,prepared.v,dm,Int32(m),Int32(n),config)
     started=time_ns()
     kernel=@cuda launch=false StreamingAttention.attention_kernel!(args...)
-    shmem=StreamingAttention.shared_bytes(config)
+    shmem=shared_bytes(StreamingAttention.layout())
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES]=shmem
     fused=()->kernel(args...;threads=256,blocks=(cld(m,128),heads),shmem)
     # The high-level wrapper constructs device scalar references per call.

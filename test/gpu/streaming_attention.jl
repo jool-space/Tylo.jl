@@ -3,10 +3,10 @@ include("../../examples/streaming_attention/kernel.jl")
 include("../../examples/streaming_attention/reference.jl")
 begin # assembly checks
 @testset "Streaming attention assembly" begin
-    cfg=StreamingAttention.configuration()
     binding(plan)=Tylo.TMABinding{typeof(plan),PTX.TMADescriptorPtr,3}
     for causal in (false,true), maskt in (CuDeviceMatrix{Bool,1},Nothing)
-        tt=Tuple{CuDeviceArray{Float32,3,1},binding(cfg.q),binding(cfg.k),binding(cfg.v),maskt,Int32,Int32,typeof(cfg),Val{causal}}
+        cfg=StreamingAttention.configuration(;causal)
+        tt=Tuple{CuDeviceArray{Float32,3,1},binding(cfg.q),binding(cfg.k),binding(cfg.v),maskt,Int32,Int32,typeof(cfg)}
         code=compile_kernel(StreamingAttention.attention_kernel!,tt;arch=CUDACore.SMVersion(12,1,:arch),threads=256)
         save_code("streaming-attention-causal-$causal-$(maskt===Nothing ? "unmasked" : "masked")",code);body=entry_body(code.ptx)
         @test count("mma.sync.aligned.m16n8k16",body)==32+32+32 # QK and PV of the loop, the last PV block

@@ -19,8 +19,8 @@ function demo(;m=512,n=512,k=512)
             bm,bn,bk = size(cfg.plan)
             out = CuArray(fill(NaN32,m,n))
             function launch()
-                @cuda threads=Tylo.threads(cfg.plan) blocks=(cld(m,bm),cld(n,bn)) shmem=shared_bytes(cfg,BFloat16) tiled_gemm_kernel!(
-                    out,da,db,Int32(m),Int32(n),Int32(k),Int32(k),Int32(k),Int32(m),cfg,1f0,Val(false))
+                @cuda threads=Tylo.threads(cfg.plan) blocks=(cld(m,bm),cld(n,bn)) shmem=shared_bytes(gemm_shared(cfg,BFloat16)) tiled_gemm_kernel!(
+                    out,da,db,Int32(m),Int32(n),Int32(k),Int32(k),Int32(k),Int32(m),cfg,1f0)
             end
             launch()
             actual = Array(out)

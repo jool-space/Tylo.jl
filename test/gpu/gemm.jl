@@ -1,9 +1,9 @@
 # TEST_TARGET: cc>=8.0
 include("../../examples/gemm/kernel.jl")
 
-function gemm_signature(config,T,relu=false)
+function gemm_signature(config,T)
     Tuple{CuDeviceVector{Float32,1},CuDeviceVector{T,1},CuDeviceVector{T,1},
-          Int32,Int32,Int32,Int32,Int32,Int32,typeof(config),Float32,Val{relu}}
+          Int32,Int32,Int32,Int32,Int32,Int32,typeof(config),Float32}
 end
 
 begin # assembly checks
@@ -98,8 +98,9 @@ function check_gemm(T,config,m,n,k;pad=0,relu=false)
     # Full-tile launches promise 16-byte rows.
     @assert lda % 8 == ldb % 8 == 0
     alpha = relu ? -0.75f0 : 1f0
-    @cuda threads=Tylo.threads(config.plan) blocks=(m÷bm,n÷bn) shmem=shared_bytes(config,T) tiled_gemm_kernel!(
-        dd,da,db,Int32(m),Int32(n),Int32(k),Int32(lda),Int32(ldb),Int32(ldc),config,alpha,Val(relu))
+    config = merge(config,(;relu))
+    @cuda threads=Tylo.threads(config.plan) blocks=(m÷bm,n÷bn) shmem=shared_bytes(gemm_shared(config,T)) tiled_gemm_kernel!(
+        dd,da,db,Int32(m),Int32(n),Int32(k),Int32(lda),Int32(ldb),Int32(ldc),config,alpha)
     actual = Array(dd)
     expected = Float64(alpha) .* (Float64.(a)*Float64.(b))
     relu && (expected = max.(expected,0.0))

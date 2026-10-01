@@ -64,7 +64,8 @@ function check_boundary_copy(T,axis,step,ld,origin)
 end
 
 function check_ragged_gemm(T,cfg,m,n,k;pad=0,outputtype=Float32)
-    @assert value(cfg.bounds)
+    @assert cfg.bounds
+    cfg=merge(cfg,(;relu=true))
     bm,bn,bk=size(cfg.plan);lda,ldb,ldc=k+pad,k+2pad,m+5
     rng=MersenneTwister(13m+7n+k)
     a=T.(0.2f0 .* randn(rng,Float32,m,k));b=T.(0.2f0 .* randn(rng,Float32,k,n))
@@ -73,8 +74,8 @@ function check_ragged_gemm(T,cfg,m,n,k;pad=0,outputtype=Float32)
     sentinel=outputtype(-1234)
     hd=fill(sentinel,ldc,n+2);hd[1:m,1:n] .= outputtype(NaN32)
     da,db,dd=CuArray(ha),CuArray(hb),CuArray(hd)
-    @cuda threads=Tylo.threads(cfg.plan) blocks=(cld(m,bm),cld(n,bn)) shmem=shared_bytes(cfg,T) tiled_gemm_kernel!(
-        dd,da,db,Int32(m),Int32(n),Int32(k),Int32(lda),Int32(ldb),Int32(ldc),cfg,-0.75f0,Val(true))
+    @cuda threads=Tylo.threads(cfg.plan) blocks=(cld(m,bm),cld(n,bn)) shmem=shared_bytes(gemm_shared(cfg,T)) tiled_gemm_kernel!(
+        dd,da,db,Int32(m),Int32(n),Int32(k),Int32(lda),Int32(ldb),Int32(ldc),cfg,-0.75f0)
     actual=Array(dd);expected=max.(-0.75 .* (Float64.(a)*Float64.(b)),0.0)
     tolerance=outputtype===Float32 ? 2e-4 : 0.01
     @test all(abs.(Float64.(actual[1:m,1:n]) .- expected) .<= tolerance .+ tolerance .* abs.(expected))
@@ -83,9 +84,9 @@ end
 
 begin # assembly checks
 @testset "Bounded copy and GEMM assembly" begin
-    cfg=gemm_config(BFloat16;bounds=true)
+    cfg=gemm_config(BFloat16;bounds=true,relu=true)
     tt=Tuple{CuDeviceVector{Float32,1},CuDeviceVector{BFloat16,1},CuDeviceVector{BFloat16,1},
-             Int32,Int32,Int32,Int32,Int32,Int32,typeof(cfg),Float32,Val{true}}
+             Int32,Int32,Int32,Int32,Int32,Int32,typeof(cfg),Float32}
     for arch in (CUDACore.SMVersion(8,0),CUDACore.SMVersion(12,1,:arch))
         code=compile_kernel(tiled_gemm_kernel!,tt;arch,threads=128)
         save_code("ragged-gemm-$arch",code);body=entry_body(code.ptx)
