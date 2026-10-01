@@ -51,76 +51,24 @@ include(joinpath(@__DIR__,"..","launch.jl"))
 # commits arrive in both; the softmax and correction warps of both CTAs
 # release P and O to the MMA warp through the even CTA's `paired` and
 # `pairlast` barriers.
-# A thread's row of a fragment in the row-per-lane ownership.
-@inline _rowmax(x) = maximum(x;dims=2).data[1]
-@inline _rowsum(x) = sum(x;dims=2).data[1]
-@inline _exponentials(x,c,m) = Tylo._ex2.(muladd.(x,c,-m))
-# `x`, once `token` exists: a data dependence the compilers cannot see
-# through, nor fold (the two choices differ even when `x` is a constant).
-@inline _after(token::UInt64,x) = ifelse(token == typemax(UInt64),x+one(x),x)
-# A row's sum as one chain from `init`: every addition waits for `init`.
-# Pairs of values add at once (Tylo's FP32 pairs), then the two lanes.
-@generated function _chainsum(init,x::Fragment{Float32,N}) where N
-    chain = :(Tylo.F32x2(init,0f0))
-    for k in 1:N÷2
-        chain = :($chain+Tylo.F32x2(d[$(2k-1)],d[$(2k)]))
-    end
-    :(Base.@inline; d = x.data; (a,b) = Tylo._lanes($chain); a+b)
-end
+# A thread's row maximum in the row-per-lane ownership.
+@inline _rowmax(x) = only(maximum(x;dims=2))
 # A chunk of a row's scores, 32 keys from `first`, with keys past `row` masked.
 # (Each key's offset is compared with one count: `first+e <= row` would let
 # the compiler hoist `row-e` for all 128 keys out of the loop when `row` is
 # invariant.)
 @inline function _mask(x,first::Int32,row::Int32)
     n = row-first
-    Fragment(ntuple(e -> ifelse(Int32(e-1) <= n,x.data[e],-Inf32),Val(32)),Tylo.Layouts.layout(x))
+    Fragment(ntuple(e -> ifelse(Int32(e-1) <= n,x.data[e],-Inf32),Val(32)),x.ownership)
 end
-# P's first `Split` chunks and the rest, from the row's four.
-# exp2 of a pair on the FMA pipe (pyptx's degree-3 polynomial with the
-# integer part rounded off and added into the exponent), as FlashAttention-4
-# computes some of each row's to relieve MUFU.
-@inline _pack2(lo::Float32,hi::Float32) = (UInt64(reinterpret(UInt32,hi)) << 32) | UInt64(reinterpret(UInt32,lo))
-@inline function _ex2_pair(x0::Float32,x1::Float32)
-    big = _pack2(reinterpret(Float32,0x4B400000),reinterpret(Float32,0x4B400000))
-    x = _pack2(ptx"max.ftz.f32"(x0,-127f0),ptx"max.ftz.f32"(x1,-127f0))
-    bi = ptx"add.rm.ftz.f32x2"(x,big)
-    f = ptx"sub.rn.ftz.f32x2"(x,ptx"sub.rn.ftz.f32x2"(bi,big))
-    c3, c2, c1 = reinterpret(Float32,0x3D9DF09D), reinterpret(Float32,0x3E6906A4), reinterpret(Float32,0x3F31F519)
-    q = ptx"fma.rn.ftz.f32x2"(f,_pack2(c3,c3),_pack2(c2,c2))
-    q = ptx"fma.rn.ftz.f32x2"(q,f,_pack2(c1,c1))
-    q = ptx"fma.rn.ftz.f32x2"(q,f,_pack2(1f0,1f0))
-    # (The shift is PTX's, which LLVM cannot merge with the unpacking into a
-    # 64-bit shift and a mask: shift and add become one instruction.)
-    reinterpret(Float32,ptx"shl.b32"(bi % UInt32,Val(23))+(q % UInt32)),
-    reinterpret(Float32,ptx"shl.b32"((bi >> 32) % UInt32,Val(23))+((q >> 32) % UInt32))
-end
-# A chunk's exponentials, the pairs in `Emulated` (0-15) on the FMA pipe.
-@generated function _exponentials(x::Fragment{Float32,32},c::Float32,m::Float32,::Val{Emulated}) where Emulated
-    isempty(Emulated) && return :(Base.@inline; _exponentials(x,c,m))
-    stmts = Any[:(y = muladd.(x,c,-m)), :(v = y.data)]
-    names = Symbol[]
-    for pair in 0:15
-        a, b = Symbol(:e,2pair+1), Symbol(:e,2pair+2)
-        push!(stmts,pair in Emulated ? :(($a,$b) = _ex2_pair(v[$(2pair+1)],v[$(2pair+2)])) :
-                                       :(($a,$b) = (Tylo._ex2(v[$(2pair+1)]),Tylo._ex2(v[$(2pair+2)]))))
-        push!(names,a,b)
-    end
-    :(Base.@inline; $(stmts...); Fragment(($(names...),),Tylo.Layouts.layout(x)))
-end
-# P's first `Split` chunks and the rest: the middle two chunks with
-# `Emulated` pairs on the FMA pipe.
-@inline _chunk(s,q,c,m,e) = _exponentials(s[q],c,m,q in (2,3) ? e : Val(()))
-@inline _first(s,c,m,::Val{1},e) = (_chunk(s,1,c,m,e),)
-@inline _first(s,c,m,::Val{2},e) = (_chunk(s,1,c,m,e),_chunk(s,2,c,m,e))
-@inline _first(s,c,m,::Val{3},e) = (_chunk(s,1,c,m,e),_chunk(s,2,c,m,e),_chunk(s,3,c,m,e))
-@inline _rest(s,c,m,::Val{1},e) = (_chunk(s,2,c,m,e),_chunk(s,3,c,m,e),_chunk(s,4,c,m,e))
-@inline _rest(s,c,m,::Val{2},e) = (_chunk(s,3,c,m,e),_chunk(s,4,c,m,e))
-@inline _rest(s,c,m,::Val{3},e) = (_chunk(s,4,c,m,e),)
-# Chunks of P into TMEM, 32 keys each, the first at key 32`First`.
-@generated function _store_chunks!(t,band,chunks::NTuple{N,Any},::Val{First}) where {N,First}
-    stores = [:(@inbounds store_async!(window(t,(band,Int32($(32(First+q)))),(32,32)),Fragment{BFloat16}(chunks[$(q+1)]))) for q in 0:N-1]
-    :(Base.@inline; $(stores...); nothing)
-end
+# Chunk `q` of a row's four as probabilities, 2^(c x - m): the middle two
+# chunks with the pairs `emulate` on the FMA pipe, as FlashAttention-4
+# computes some of each row's exponentials to relieve MUFU.
+@inline _chunk(s,q,c,m,cfg) = exp2_approx(muladd.(s[q],c,-m),q in (2,3) ? cfg.emulate : ())
+# P's first `cfg.split` chunks, and the rest. (The configuration is passed
+# whole: its constants are its type's, which closures keep.)
+@inline _first(s,c,m,cfg) = ntuple(@inline(q -> _chunk(s,q,c,m,cfg)),Val(Int(cfg.split)))
+@inline _rest(s,c,m,cfg) = ntuple(@inline(q -> _chunk(s,cfg.split+q,c,m,cfg)),Val(4-Int(cfg.split)))
 
 # A part's normalized results in its scratch slot, and staged in shared
 # memory, each CTA's rows (of a pair) together, 128 KB, a tile's 64 KB each,
@@ -145,18 +93,18 @@ end
 # with its sum and maximum at `stat`.
 @inline function _weights(smem,stat,logsum,r,parts,own)
     l = @inbounds smem.sums[stat]
-    mine = @inbounds(smem.maxima[stat])+ptx"lg2.approx.ftz.f32"(l)
+    mine = @inbounds(smem.maxima[stat])+log2_approx(l)
     top = mine; total = 1f0
     for p in Int32(0):parts-Int32(1)
         p == own && continue
         x = ptx"ld.global.cg.f32"(logsum(p)+Int32(4)*r)
         if x > top
-            total = muladd(total,Tylo._ex2(top-x),1f0); top = x
+            total = muladd(total,exp2_approx(top-x),1f0); top = x
         else
-            total += Tylo._ex2(x-top)
+            total += exp2_approx(x-top)
         end
     end
-    (top,1f0/total,Tylo._ex2(mine-top)/(total*l))
+    (top,1f0/total,exp2_approx(mine-top)/(total*l))
 end
 # The end of a part of item `a`, by the correction warps (named barrier
 # `merge`), once O of both tiles is final. The CTA (of each pair) whose part
@@ -191,9 +139,9 @@ end
             l = @inbounds smem.sums[stat(i)]
             for q in 0:3
                 values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*i+Int32(32q)),(32,32))))
-                _stage_part!(buffer,i,q,band+lane,Tylo._values(values .* (1f0/l)))
+                _stage_part!(buffer,i,q,band+lane,(values .* (1f0/l)).data)
             end
-            unsafe_store!(logsum(own),@inbounds(smem.maxima[stat(i)])+ptx"lg2.approx.ftz.f32"(l),part(i)+Int32(1),Val(4))
+            unsafe_store!(logsum(own),@inbounds(smem.maxima[stat(i)])+log2_approx(l),part(i)+Int32(1),Val(4))
         end
         fence_async_shared()
         wait(merge)
@@ -225,8 +173,8 @@ end
                 ptx"cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"(buffer+i*half,slot(p)+i*half,UInt32(65536),smem.copied[i].ptr)
             end
         end
-        weights = (Tylo._ex2(ptx"ld.global.cg.f32"(logsum(p)+Int32(4)*part(Int32(0)))-tops[1][1])*tops[1][2],
-                   Tylo._ex2(ptx"ld.global.cg.f32"(logsum(p)+Int32(4)*part(Int32(1)))-tops[2][1])*tops[2][2])
+        weights = (exp2_approx(ptx"ld.global.cg.f32"(logsum(p)+Int32(4)*part(Int32(0)))-tops[1][1])*tops[1][2],
+                   exp2_approx(ptx"ld.global.cg.f32"(logsum(p)+Int32(4)*part(Int32(1)))-tops[2][1])*tops[2][2])
         final = k == parts-Int32(2)
         for i in Int32(0):Int32(1)
             wait(Ring(smem.copied[i])[k])
@@ -235,7 +183,7 @@ end
             for q in 0:3
                 o = @inbounds window(words,(band,Int32(256)+Int32(128)*i+Int32(32q)),(32,32))
                 values = wait_load(@inbounds load_async(rows,o))
-                merged = _merge_chunk(Tylo._values(values),scale,weight,buffer,i,Int32(q),band+lane)
+                merged = _merge_chunk(values.data,scale,weight,buffer,i,Int32(q),band+lane)
                 if final
                     @inbounds store!(window(dst,(q0+Int32(128)*i+band,Int32(32q)),(32,32)),Fragment{BFloat16}(Fragment(merged,rows)),lane)
                 else
@@ -271,10 +219,10 @@ end
     l = @inbounds smem.sums[stat(other)]
     for q in 0:3
         values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*other+Int32(32q)),(32,32))))
-        _stage_part!(staged,Int32(0),q,r,Tylo._values(values .* (1f0/l)))
+        _stage_part!(staged,Int32(0),q,r,(values .* (1f0/l)).data)
     end
     logsums(part) = reinterpret(Core.LLVMPtr{Float32,PTX.AS.Shared},part+Int32(65536))
-    unsafe_store!(logsums(staged),@inbounds(smem.maxima[stat(other)])+ptx"lg2.approx.ftz.f32"(l),r+Int32(1),Val(4))
+    unsafe_store!(logsums(staged),@inbounds(smem.maxima[stat(other)])+log2_approx(l),r+Int32(1),Val(4))
     fence_async_shared()                                # the staged part, to the bulk copy
     wait(merge)
     if tid == Int32(256)
@@ -286,14 +234,14 @@ end
     wait(received,0)
     theirs = unsafe_load(logsums(landing),r+Int32(1),Val(4))
     l = @inbounds smem.sums[stat(me)]
-    mine = @inbounds(smem.maxima[stat(me)])+ptx"lg2.approx.ftz.f32"(l)
+    mine = @inbounds(smem.maxima[stat(me)])+log2_approx(l)
     top = max(mine,theirs)
-    wm, wo = Tylo._ex2(mine-top), Tylo._ex2(theirs-top)
+    wm, wo = exp2_approx(mine-top), exp2_approx(theirs-top)
     inverse = 1f0/(wm+wo)
     scale, weight = wm*inverse/l, wo*inverse
     for q in 0:3
         values = wait_load(@inbounds load_async(rows,window(words,(band,Int32(256)+Int32(128)*me+Int32(32q)),(32,32))))
-        merged = _merge_chunk(Tylo._values(values),scale,weight,landing,Int32(0),Int32(q),r)
+        merged = _merge_chunk(values.data,scale,weight,landing,Int32(0),Int32(q),r)
         @inbounds store!(window(dst,(q0+Int32(128)*me+band,Int32(32q)),(32,32)),Fragment{BFloat16}(Fragment(merged,rows)),lane)
     end
     nothing
@@ -495,12 +443,8 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                 wait(Ring(smem.sfull[i])[k])
                 mark(6k+Int32(1),2)
                 fence_after_thread_sync()
-                # The row in four loads and one wait.
-                pending = @inbounds (load_async(rows,window(scores(i),(band,Int32(0)),(32,32))),
-                                     load_async(rows,window(scores(i),(band,Int32(32)),(32,32))),
-                                     load_async(rows,window(scores(i),(band,Int32(64)),(32,32))),
-                                     load_async(rows,window(scores(i),(band,Int32(96)),(32,32))))
-                s = (wait_load(pending[1]),wait_load(pending[2]),wait_load(pending[3]),wait_load(pending[4]))
+                # The row in four loads of 32 keys, then their waits.
+                s = wait_load(@inbounds load_async(rows,chunks(window(scores(i),(band,Int32(0)),(32,128)),(32,32))))
                 # The maximum reduces each chunk as it lands; the diagonal
                 # blocks, where keys past a row's diagonal do not count, mask
                 # and reduce again. (Masking first would make every block wait
@@ -516,10 +460,10 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                 mark(6k+Int32(2),3)
                 factor = 1f0
                 if j == Int32(0) || top-m > 8f0             # the maximum moves: rescale O and the sum
-                    j > Int32(0) && (factor = Tylo._ex2(m-top))
+                    j > Int32(0) && (factor = exp2_approx(m-top))
                     m = top
                 end
-                p = _first(s,c2,m,Val(Int(Split)),Val(cfg.emulate))
+                p = _first(s,c2,m,cfg)
                 if j > Int32(0)
                     @inbounds smem.factors[row+Int32(128)*i] = factor
                     arrive!(handoff(i))
@@ -529,23 +473,23 @@ function blackwell_attention_kernel!(o,tq,tk,tv,counter,scratch,seq_kv::Int32,co
                 # sum. Nothing orders pure arithmetic after a store or an
                 # arrival, so the work that must wait takes an input through
                 # the arrival's token: the compilers cannot hoist it above.
-                _store_chunks!(probabilities(i),band,p,Val(0))
+                @inbounds store_async!(chunks(window(probabilities(i),(band,Int32(0)),(32,32Split)),(32,32)),p)
                 wait_stores()
                 fence_before_thread_sync()
                 published = arrive!(smem.pready[i])
                 CTAs == 1 || release_to_mma(smem.pready[i],smem.paired[i])
                 mark(6k+Int32(3),4)
                 basis = after(published,m)
-                rest = _rest(s,c2,basis,Val(Int(Split)),Val(cfg.emulate))
-                _store_chunks!(probabilities(i),band,rest,Val(Split))
+                rest = _rest(s,c2,basis,cfg)
+                @inbounds store_async!(chunks(window(probabilities(i),(band,32Split),(32,128-32Split)),(32,32)),rest)
                 wait_stores()
                 fence_before_thread_sync()
                 published = arrive!(smem.plast[i])
                 CTAs == 1 || release_to_mma(smem.plast[i],smem.pairlast[i])
                 mark(6k+Int32(4),5)
                 zero = after(published,0f0)
-                chunks = (p...,rest...)
-                l += (_chainsum(zero,chunks[1])+_chainsum(zero,chunks[2]))+(_chainsum(zero,chunks[3])+_chainsum(zero,chunks[4]))
+                probs = (p...,rest...)
+                l += (chainsum(probs[1],zero)+chainsum(probs[2],zero))+(chainsum(probs[3],zero)+chainsum(probs[4],zero))
                 mark(6k+Int32(5),6)
                 k += Int32(1)
             end

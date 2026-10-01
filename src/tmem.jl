@@ -145,6 +145,15 @@ tiles, BF16/FP16 packed two per word. The storage remains in use until
 [`wait_stores`](@ref)`()`.
 """
 Base.@propagate_inbounds store_async!(t::TmemTile,f::Fragment) = store_async!(_partition(Layouts.layout(f),t),f)
+# Tuples of tiles (see `chunks`): one transfer each, in order; a store
+# converts each fragment to its tile's element type.
+@generated function load_async(o::Layouts.Ownership,tiles::NTuple{N,TmemTile}) where N
+    :(Base.@_propagate_inbounds_meta; ($([:(load_async(o,tiles[$i])) for i in 1:N]...),))
+end
+@generated function store_async!(tiles::NTuple{N,TmemTile},fragments::NTuple{N,Fragment}) where N
+    stores = [:(store_async!(tiles[$i],Fragment{eltype(tiles[$i])}(fragments[$i]))) for i in 1:N]
+    :(Base.@_propagate_inbounds_meta; $(stores...); nothing)
+end
 
 """
     reinterpret_tile(T, tile::TmemTile; dims)
@@ -183,6 +192,10 @@ struct PendingLoad{T,N,L}
     ownership::L
 end
 PendingLoad(::Type{T}, words::NTuple{N,UInt32}, ownership::L) where {T,N,L} = PendingLoad{T,N,L}(words,ownership)
+"The fragments of a tuple of pending loads, waiting once per load."
+@generated function wait_load(pending::NTuple{N,PendingLoad}) where N
+    :(Base.@inline; ($([:(wait_load(pending[$i])) for i in 1:N]...),))
+end
 
 @inline function _check_tmem_store(p::TmemPartition,f)
     _same_distribution(Layouts.layout(p),Layouts.layout(f)) ||

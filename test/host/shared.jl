@@ -70,3 +70,18 @@ end
     @test_throws ArgumentError named(;threads=48)
     @test Base.return_types(() -> named_barriers((;a=named(2;threads=64),b=named(;threads=128))).b,())[1] == NamedBarrier
 end
+
+@testset "Chunks, chain sums and approximate exponentials" begin
+    o = distribute((32,32),32;vector=32,axis=2)
+    f = Fragment(ntuple(i -> Float32(i),32),o)
+    @test chainsum(f,1f0) == 529f0
+    @test collect(exp2_approx(f,(3,4)).data[7:10]) == exp2.(Float32[7,8,9,10])
+    x = Float32.(range(-30,30;length=1001))
+    @test maximum(abs.(Tylo._exp2_poly.(x) ./ exp2.(x) .- 1)) < 2e-4
+    t = TmemTile(Float32,UInt32(0),Tylo.Layouts.Layout((Tylo.Layouts.static(128),Tylo.Layouts.static(512)),(Tylo.Layouts.static(1),Tylo.Layouts.static(128))))
+    cs = chunks(window(t,(32,256),(32,128)),(32,32))
+    @test length(cs) == 4 && all(i -> Tylo.tmem_location(cs[i],(0,0)).address == UInt32(32 << 16 + 256 + 32(i-1)),1:4)
+    @test_throws DimensionMismatch chunks(window(t,(0,0),(32,48)),(32,32))
+    g = chunks(Fragment(ntuple(i -> Float32(i),64),distribute((32,64),32;vector=64,axis=2)),(32,32))
+    @test g[2].data == ntuple(i -> Float32(32+i),32)
+end

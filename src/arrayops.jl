@@ -350,3 +350,42 @@ Base.@propagate_inbounds coordinates(f::Fragment,thread::Integer) = coordinates(
     end
 end
 Base.size(f::Fragment) = size(Layouts.layout(f))
+
+"""
+    chunks(tile, shape) -> Tuple
+
+The windows of `shape` that tile `tile` (a memory tile, a TMEM tile or a
+fragment of constant shape), M fastest: a row band's 32-column chunks, say,
+to load in turn. Their transfers take the tuple
+(`wait_load(load_async(ownership, chunks(t, (32, 32))))`). `@inbounds`
+covers every window.
+"""
+Base.@constprop :aggressive Base.@propagate_inbounds chunks(t,shape::Tuple{Integer,Integer}) =
+    _chunks(t,Val(map(Int,size(t))),Val(map(Int,shape)))
+@generated function _chunks(t,::Val{S},::Val{C}) where {S,C}
+    S[1] % C[1] == 0 && S[2] % C[2] == 0 || return :(throw(DimensionMismatch("chunks of $C do not tile $S")))
+    windows = [:(window(t,($((i-1)*C[1]),$((j-1)*C[2])),$C)) for j in 1:S[2]÷C[2] for i in 1:S[1]÷C[1]]
+    quote
+        Base.@_propagate_inbounds_meta
+        ($(windows...),)
+    end
+end
+
+"""
+    chainsum(fragment::Fragment{Float32}, init::Float32) -> Float32
+
+The sum of `init` and all of a thread's values of `fragment` as one chain
+of paired additions (FP32 pairs, one instruction each on sm_100) in slot
+order, the two halves of the pair added last: every addition depends on
+`init`. A row's sum that must not start before an arrival starts from
+`after(arrival, 0f0)` (see [`after`](@ref)); a tree, as `sum` reduces,
+would let all but the last addition move above it.
+"""
+@generated function chainsum(x::Fragment{Float32,N},init::Float32) where N
+    chain = :(F32x2(init,0f0))
+    for k in 1:N÷2
+        chain = :($chain+F32x2(d[$(2k-1)],d[$(2k)]))
+    end
+    tail = isodd(N) ? :(a+b+d[$N]) : :(a+b)
+    :(Base.@inline; d = x.data; (a,b) = _lanes($chain); $tail)
+end

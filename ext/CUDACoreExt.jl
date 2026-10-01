@@ -33,6 +33,26 @@ end
 @device_override @inline Tylo._shuffle_idx(x::UInt32,lane::Int32) =
     ptx"shfl.sync.idx.b32"(x,lane % UInt32,UInt32(0x1f),0xffffffff % UInt32)
 @device_override @inline Tylo._ex2(x::Float32) = ccall("llvm.nvvm.ex2.approx.ftz.f",llvmcall,Float32,(Float32,),x)
+@device_override @inline Tylo.log2_approx(x::Float32) = ccall("llvm.nvvm.lg2.approx.ftz.f",llvmcall,Float32,(Float32,),x)
+# 2^x of a pair on the FMA pipe (pyptx's polynomial, as FlashAttention-4
+# evaluates it): the integer part rounded off by adding 1.5·2^23 rounding
+# down, a degree-3 polynomial in the fraction on packed pairs, and the
+# integer shifted into the exponent. (The shift is PTX's, which LLVM cannot
+# merge with the unpacking into a 64-bit shift and a mask: shift and add
+# become one instruction.)
+@inline _pack2(lo::Float32,hi::Float32) = (UInt64(reinterpret(UInt32,hi)) << 32) | UInt64(reinterpret(UInt32,lo))
+@device_override @inline function Tylo._exp2_fma(x0::Float32,x1::Float32)
+    big = _pack2(reinterpret(Float32,0x4B400000),reinterpret(Float32,0x4B400000))
+    x = _pack2(ptx"max.ftz.f32"(x0,-127f0),ptx"max.ftz.f32"(x1,-127f0))
+    bi = ptx"add.rm.ftz.f32x2"(x,big)
+    f = ptx"sub.rn.ftz.f32x2"(x,ptx"sub.rn.ftz.f32x2"(bi,big))
+    c3, c2, c1 = reinterpret(Float32,0x3D9DF09D), reinterpret(Float32,0x3E6906A4), reinterpret(Float32,0x3F31F519)
+    q = ptx"fma.rn.ftz.f32x2"(f,_pack2(c3,c3),_pack2(c2,c2))
+    q = ptx"fma.rn.ftz.f32x2"(q,f,_pack2(c1,c1))
+    q = ptx"fma.rn.ftz.f32x2"(q,f,_pack2(1f0,1f0))
+    reinterpret(Float32,ptx"shl.b32"(bi % UInt32,Val(23))+(q % UInt32)),
+    reinterpret(Float32,ptx"shl.b32"((bi >> 32) % UInt32,Val(23))+((q >> 32) % UInt32))
+end
 @device_override @inline Tylo._warp_reduce(op::F,x,::Val{W}) where {F,W} = PTX.Warps.warp_reduce(op,x,Val(W))
 # stmatrix exists from sm_90; the compile target decides, folded at compile time.
 @device_override @inline Tylo._stmatrix_available() = CUDACore.compute_capability().major >= 9

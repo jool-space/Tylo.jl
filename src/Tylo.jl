@@ -9,7 +9,7 @@ import Base: acquire            # a ring stage's producer wait, exported
 export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, window,
        Fragment, coordinates, relayout, GlobalTile, SharedTile, TmemTile, tile, bound, load_fragment, store!,
        Atom, OperandA, OperandB, Accumulator, ScaleA, ScaleB, operand_layout,
-       MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, atom_accumulators, mma, pack_operand_a,
+       MMAAtom, ScaledMMAAtom, TiledMMA, zero_accumulator, atom_accumulators, mma, pack_operand_a, chunks,
        CopyAtom, copy_async!, commit_copies, wait_copies,
        Barrier, initialize!, arrive!, after, expect_bytes!, invalidate!, fence_barrier_init, fence_async_shared, cluster_rank, cluster_sync,
        SharedLayout, barriers, scalars, buffers, shared_bytes, Ring, acquire, Config, NamedBarrier, named_barriers, named,
@@ -17,7 +17,7 @@ export Layouts, Layout, @Layout, Ownership, distribute, coordinate, compose, win
        WGMMAAtom, operand, mma_async, wait_mma, finish_mma, release_registers, acquire_registers, warp_uniform, elect_one,
        Tcgen05Atom, accumulator, commit_mma,
        reinterpret_tile, load_async, wait_load, store_async!, wait_stores,
-       SoftmaxState, softmax_update, softmax_merge, softmax_normalize,
+       SoftmaxState, softmax_update, softmax_merge, softmax_normalize, exp2_approx, log2_approx, chainsum,
        Float8_E4M3FN, Float8_E5M2, Float8_E8M0FNU,
        machine_code, @machine_code, audit, tune, Timeline, recorder, record!, events, spans, unchecked_div, unchecked_rem
 
@@ -49,6 +49,7 @@ include("copyatoms.jl")
 include("rows.jl")
 include("arrayops.jl")
 include("online.jl")
+include("fastmath.jl")
 include("tma.jl")
 include("wgmma.jl")
 include("warpgroup.jl")
