@@ -34,9 +34,11 @@ function hopper_gemm_kernel!(c,a,b,bh,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{S
     Cluster == 1 ? sync_threads() : cluster_sync()
     rank = Cluster == 1 ? Int32(0) : cluster_rank()
     m, n = size(c,2) % Int32, size(c,1) % Int32
-    tiles_m, tiles_n = m ÷ Int32(128*Cluster), n ÷ Int32(N)      # in row tiles per cluster
+    # Shapes of any size: the last tiles and stage may be partial, their
+    # loads zero-filled past the edges and their stores clipped there.
+    tiles_m, tiles_n = cld(m,Int32(128*Cluster)), cld(n,Int32(N))  # in row tiles per cluster
     tiles = tiles_m*tiles_n
-    count = k ÷ Int32(KS)
+    count = cld(k,Int32(KS))
     first_tile = (Int32(blockIdx().x)-Int32(1)) ÷ Int32(Cluster)
     stride = gridDim().x ÷ Int32(Cluster)
     @inline stage(i) = buffers+(i%Int32(Stages))*Int32(bytes)
@@ -83,7 +85,9 @@ function hopper_gemm_kernel!(c,a,b,bh,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{S
                 end
             end
         end
-        out = @inbounds GlobalTile(pointer(c),Layout((m,n),(n,static(1))),4)
+        # Tiles at the edges store through bounds; the others need none.
+        out = @inbounds GlobalTile(pointer(c),Layout((tiles_m*Int32(128*Cluster),tiles_n*Int32(N)),(n,static(1))),4)
+        edge = @inbounds bound(out,(m,n))
         i = Int32(0)
         t = first_tile
         while t < tiles
@@ -100,7 +104,12 @@ function hopper_gemm_kernel!(c,a,b,bh,atom::WGMMAAtom{T,N,KS,1},k::Int32,::Val{S
             result = finish_mma(wait_mma(acc))
             release((i+count-Int32(1))%Int32(Stages))
             i += count
-            @inbounds store!(window(out,(tm*Int32(128)+rows,tn*Int32(N)),(64,N)),Fragment{BFloat16}(result),thread)
+            values, origin = Fragment{BFloat16}(result), (tm*Int32(128)+rows,tn*Int32(N))
+            if (tm+Int32(1))*Int32(128) <= m && (tn+Int32(1))*Int32(N) <= n
+                @inbounds store!(window(out,origin,(64,N)),values,thread)
+            else
+                @inbounds store!(window(edge,origin,(64,N)),values,thread)
+            end
             t += stride
         end
     end
@@ -125,16 +134,19 @@ Prepare C = Aᵀ B for `a` (K×M) and `b` (K×N) on the device, BF16, FP16 or FP
 width `n`, the number of shared stages, the number of row tiles grouped
 for L2 reuse, and whether one CTA per SM walks the tiles (`persistent`) or
 one CTA per tile runs, and whether clusters of two CTAs share B tiles by
-multicast (`cluster = 2`) are the configuration. Returns the
-compiled kernel, a launcher, and C as an N×M matrix (row-major M×N).
+multicast (`cluster = 2`) are the configuration. M, N and K may take any
+sizes TMA can address (K a multiple of 16 bytes, N of 8): the last tiles
+overhang, zero-filled and clipped. Returns the compiled kernel, a
+launcher, and C as an N×M matrix (row-major M×N).
 """
 function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,persistent::Bool=true,
                      cluster::Integer=1,c=nothing) where T
     k, m = size(a); kb, nt = size(b)
     ks = 128 ÷ sizeof(T)                                  # one swizzle row of K per stage
     cluster in (1,2) || throw(ArgumentError("clusters of one or two CTAs"))
-    k == kb && k % ks == 0 && m % (128cluster) == 0 && nt % n == 0 ||
-        throw(ArgumentError("shapes must be multiples of the tile: K of $ks, M of $(128cluster), N of $n"))
+    # TMA's strides and C's rows are multiples of 16 bytes; the tiles may overhang.
+    k == kb && (k*sizeof(T)) % 16 == 0 && nt % 8 == 0 && k > 0 && m > 0 && nt > 0 ||
+        throw(ArgumentError("K spans a multiple of 16 bytes, and N is a multiple of 8"))
     atom = WGMMAAtom(T,n,ks)
     ta = prepare_tma(TMATile(T,(128,ks),2),a)
     tb = prepare_tma(TMATile(T,(ks,n),1),b)
@@ -142,12 +154,11 @@ function hopper_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Intege
     shmem = 16stages+1024+stages*(transfer_bytes(ta)+transfer_bytes(tb))
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
     c = c === nothing ? CuArray{BFloat16}(undef,nt,m) : c
-    (m÷(128cluster)) % group == 0 || throw(ArgumentError("row tiles must be a multiple of the group"))
     kernel = @cuda launch=false minthreads=384 maxregs=168 hopper_gemm_kernel!(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
-    tiles = (m÷128)*(nt÷n)
+    tiles = cld(m,128cluster)*cld(nt,n)                    # of a cluster
     sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-    blocks = persistent ? cluster*(min(tiles,sms)÷cluster) : tiles
+    blocks = cluster*(persistent ? min(tiles,sms÷cluster) : tiles)
     launch() = GC.@preserve ta tb tbh kernel(c,ta,tb,tbh,atom,Int32(k),Val(stages),Val(group),Val(cluster);
                                              threads=384,blocks,shmem,clustersize=cluster)
     kernel, launch, c
