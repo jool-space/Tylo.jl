@@ -54,5 +54,17 @@ if runtime_supported(@__FILE__)
         actual = permutedims(Float64.(Array(c)))
         @test all(abs.(actual .- expected) .<= 0.02 .+ 0.01 .* abs.(expected))
     end
+    # Shapes of any size TMA addresses: partial tiles in M, N and K, zero-filled
+    # and clipped; a partial group of row tiles.
+    for T in (BFloat16,Float8_E4M3FN), (m,n,k) in ((200,136,72),(1000,264,1040),(1300,2056,96)), ctas in (1,2)
+        (k*sizeof(T)) % 16 == 0 || continue
+        ha = T.(randn(rng,Float32,k,m) ./ sqrt(Float32(k)))
+        hb = T.(randn(rng,Float32,k,n))
+        _, launch, c = blackwell_gemm(CuArray(ha),CuArray(hb);ctas)
+        fill!(c,BFloat16(NaN)); launch(); synchronize()
+        expected = transpose(Float64.(Float32.(ha)))*Float64.(Float32.(hb))
+        @test all(abs.(permutedims(Float64.(Array(c))) .- expected) .<= 0.02 .+ 0.01 .* abs.(expected))
+    end
+    @test_throws ArgumentError blackwell_gemm(CUDACore.zeros(BFloat16,64,256),CUDACore.zeros(BFloat16,64,100))
 end
 end

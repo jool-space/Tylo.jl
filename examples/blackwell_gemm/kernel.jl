@@ -57,10 +57,12 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,::Val{Stages
     rank = CTAs == 1 ? Int32(0) : cluster_rank()
     # A pair's commits arrive in both CTAs; multicast needs a cluster launch.
     @inline release(barrier) = CTAs == 1 ? commit_mma(atom,barrier) : commit_mma(atom,barrier,UInt16(0b11))
+    # Shapes of any size: the last tiles and stage may be partial, their
+    # loads zero-filled past the edges and their stores clipped there.
     m, n = size(c,2) % Int32, size(c,1) % Int32
-    tiles_m, tiles_n = m ÷ Int32(M), n ÷ Int32(N)
+    tiles_m, tiles_n = cld(m,Int32(M)), cld(n,Int32(N))
     tiles = tiles_m*tiles_n
-    count = k ÷ Int32(KS)
+    count = cld(k,Int32(KS))
     first_tile = (Int32(blockIdx().x)-Int32(1)) ÷ Int32(CTAs)
     stride = gridDim().x ÷ Int32(CTAs)
     @inline stage(i) = buffers+(i%Int32(Stages))*Int32(bytes)
@@ -116,7 +118,9 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,::Val{Stages
     elseif warp >= Int32(4)
         band = (warp-Int32(4))*Int32(32)                    # the TMEM lanes this warp may read
         lane = tid%Int32(32)
-        out = @inbounds GlobalTile(pointer(c),Layout((m,n),(n,static(1))),16)
+        # Tiles at the edges store through bounds; the others need none.
+        out = @inbounds GlobalTile(pointer(c),Layout((tiles_m*Int32(M),tiles_n*Int32(N)),(n,static(1))),16)
+        edge = @inbounds bound(out,(m,n))
         rows = distribute((32,32),32;vector=32,axis=2)      # lane t holds row t, 32 columns
         j = Int32(0)
         t = first_tile
@@ -127,9 +131,11 @@ function blackwell_gemm_kernel!(c,a,b,atom::Tcgen05Atom{S},k::Int32,::Val{Stages
             fence_after_thread_sync()
             acc = accumulator(atom,tmem+UInt32(N)*(buffer%UInt32))
             row = tm*Int32(M)+rank*Int32(128)+band
+            inside = (tm+Int32(1))*Int32(M) <= m && (tn+Int32(1))*Int32(N) <= n
             for col in 0:32:N-32
-                values = wait_load(@inbounds load_async(rows,window(acc,(band,Int32(col)),(32,32))))
-                @inbounds store!(window(out,(row,tn*Int32(N)+Int32(col)),(32,32)),Fragment{BFloat16}(values),lane)
+                values = Fragment{BFloat16}(wait_load(@inbounds load_async(rows,window(acc,(band,Int32(col)),(32,32)))))
+                origin = (row,tn*Int32(N)+Int32(col))
+                inside ? (@inbounds store!(window(out,origin,(32,32)),values,lane)) : (@inbounds store!(window(edge,origin,(32,32)),values,lane))
             end
             fence_before_thread_sync()
             lane == Int32(0) && (CTAs == 1 ? arrive!(drained(buffer)) : arrive!(drained(buffer);cta=0))
@@ -151,25 +157,27 @@ Prepare C = Aᵀ B for `a` (K×M) and `b` (K×N) on the device, BF16, FP16 or
 FP8, with one persistent CTA per SM: the tile width `n` (the MMA's N, up to
 256), the number of shared stages, the number of row tiles grouped for L2
 reuse, and whether CTA pairs compute 256-row tiles together (`ctas = 2`)
-are the configuration. Returns the compiled kernel, a launcher, and C as an
-N×M matrix (row-major M×N).
+are the configuration. M, N and K may take any sizes TMA can address (K a
+multiple of 16 bytes, N of 8): the last tiles overhang, zero-filled and
+clipped. Returns the compiled kernel, a launcher, and C as an N×M matrix
+(row-major M×N).
 """
 function blackwell_gemm(a::CuMatrix{T},b::CuMatrix{T};n::Integer=256,stages::Integer=4,group::Integer=8,ctas::Integer=1,c=nothing) where T
     k, m = size(a); kb, nt = size(b)
     ks = 128 ÷ sizeof(T)                                    # one swizzle row of K per stage
     ctas in (1,2) || throw(ArgumentError("one CTA or a CTA pair"))
-    k == kb && k % ks == 0 && m % (128ctas) == 0 && nt % n == 0 ||
-        throw(ArgumentError("shapes must be multiples of the tile: K of $ks, M of $(128ctas), N of $n"))
+    # TMA's strides and C's rows are multiples of 16 bytes; the tiles may overhang.
+    k == kb && (k*sizeof(T)) % 16 == 0 && nt % 8 == 0 && k > 0 && m > 0 && nt > 0 ||
+        throw(ArgumentError("K spans a multiple of 16 bytes, and N is a multiple of 8"))
     atom = Tcgen05Atom((128ctas,n,32 ÷ sizeof(T)),T)
     ta = prepare_tma(TMATile(T,(128,ks),2),a)
     tb = prepare_tma(TMATile(T,(ks,n÷ctas),1),b)                # this CTA's columns of the tile
     shmem = 16stages+48+1024+stages*(transfer_bytes(ta)+transfer_bytes(tb))
     shmem <= 227*1024 || throw(ArgumentError("$stages stages need $(cld(shmem,1024)) KiB of shared memory"))
-    (m÷(128ctas)) % group == 0 || throw(ArgumentError("row tiles must be a multiple of the group"))
     c = c === nothing ? CuArray{BFloat16}(undef,nt,m) : c
     kernel = @cuda launch=false blackwell_gemm_kernel!(c,ta,tb,atom,Int32(k),Val(stages),Val(group))
     CUDACore.attributes(kernel.fun)[CUDACore.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES] = shmem
-    tiles = (m÷(128ctas))*(nt÷n)
+    tiles = cld(m,128ctas)*cld(nt,n)
     sms = CUDACore.attribute(CUDACore.device(),CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
     blocks = ctas*min(tiles,sms÷ctas)
     launch() = GC.@preserve ta tb kernel(c,ta,tb,atom,Int32(k),Val(stages),Val(group);threads=256,blocks,shmem,clustersize=ctas)
