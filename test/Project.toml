@@ -11,3 +11,4 @@ Tylo = "845906dd-ae2b-43fc-b595-f8c9a7396ab9"
 
 [compat]
 ParallelTestRunner = "2.6"
+TOML = "1"
